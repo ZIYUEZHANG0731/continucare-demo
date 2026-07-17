@@ -8,7 +8,16 @@ def inject_global_styles(st) -> None:
         """
         <style>
         .block-container {max-width: 1180px; padding-top: 2rem; padding-bottom: 4rem;}
-        h1, h2, h3 {overflow-wrap: anywhere;}
+        h1, h2, h3 {
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            white-space: normal !important;
+            max-width: 100%;
+        }
+        [data-testid="stHeadingWithActionElements"] {
+            white-space: normal !important;
+            min-width: 0;
+        }
         [data-testid="stAlert"], [data-testid="stExpander"],
         [data-testid="stChatMessage"], [data-testid="stVerticalBlockBorderWrapper"] {
             overflow-wrap: anywhere;
@@ -20,10 +29,30 @@ def inject_global_styles(st) -> None:
             background:#ecfeff; color:#155e75; border:1px solid #a5f3fc;
             font-size:.82rem; font-weight:650; margin:0 .35rem .35rem 0;
         }
+        .cc-kicker {color:#0f766e;font-size:.78rem;font-weight:750;letter-spacing:.08em;text-transform:uppercase;}
+        .cc-result-title {font-size:1.18rem;font-weight:750;margin:.15rem 0 .4rem;}
+        .cc-muted {color:#64748b;font-size:.88rem;}
+        .cc-quote {
+            padding:.85rem 1rem; border-left:4px solid #14b8a6;
+            background:#f0fdfa; border-radius:0 .55rem .55rem 0;
+            font-size:1.02rem; line-height:1.75;
+        }
+        .cc-fact {
+            display:inline-block; padding:.34rem .62rem; margin:.15rem .25rem .15rem 0;
+            border-radius:.45rem; background:#fff7ed; border:1px solid #fed7aa;
+            color:#9a3412; font-size:.86rem; font-weight:650;
+        }
+        .cc-chain-step {
+            padding:.7rem .85rem; margin:.35rem 0; border-radius:.55rem;
+            background:#f8fafc; border:1px solid #e2e8f0;
+        }
         @media (max-width: 768px) {
             .block-container {padding: 1rem .85rem 3rem;}
-            h1 {font-size: 1.9rem !important;}
-            h2 {font-size: 1.45rem !important;}
+            h1 {font-size: 1.75rem !important; line-height: 1.25 !important;}
+            h2 {font-size: 1.35rem !important; line-height: 1.3 !important;}
+            h3 {font-size: 1.12rem !important; line-height: 1.38 !important;}
+            [data-testid="stHorizontalBlock"] {gap: .75rem;}
+            [data-testid="stMetric"] {min-width: 0;}
             [data-testid="stButton"] button {min-height: 2.75rem;}
             [data-testid="stChatMessage"] {max-width: 100%;}
         }

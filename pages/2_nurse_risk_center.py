@@ -1,7 +1,8 @@
-"""Auditable nurse work queue for deterministic workflow Alerts."""
+"""Outcome-first nurse work queue for deterministic workflow Alerts."""
 
 from __future__ import annotations
 
+import html
 from datetime import datetime, timezone
 
 import streamlit as st
@@ -10,6 +11,12 @@ from continucare.adapters.mock_notifier import MockNotifier
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.config import get_settings
 from continucare.models import AlertStatus
+from continucare.presentation import (
+    alert_next_step,
+    alert_status_text,
+    observation_evidence_text,
+    owner_text,
+)
 from continucare.services.alerts import AlertService
 from continucare.ui import inject_global_styles, render_mode_badges
 
@@ -21,93 +28,164 @@ def _sla_text(due_at: str | None) -> str:
     remaining = due - datetime.now(timezone.utc)
     seconds = int(remaining.total_seconds())
     if seconds <= 0:
-        return "已到期 / 需立即处理"
+        return "需立即处理"
     hours, remainder = divmod(seconds, 3600)
     minutes = remainder // 60
-    return f"剩余 {hours} 小时 {minutes} 分钟"
+    return f"{hours} 小时 {minutes} 分钟"
+
+
+def _alert_evidence(store, alert):
+    message = None
+    observations = []
+    for ref in alert.evidence_refs:
+        if ref.startswith("message_"):
+            message = store.get_message(ref)
+        elif ref.startswith("observation_"):
+            item = store.get_observation(ref)
+            if item:
+                observations.append(item)
+    return message, observations
+
+
+def _render_task_reason(store, alert):
+    message, observations = _alert_evidence(store, alert)
+    st.markdown("**患者原话**")
+    if message:
+        st.markdown(
+            f'<div class="cc-quote">{html.escape(message.message_text)}</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.warning("原始消息记录缺失。")
+
+    st.markdown("**为什么进入工作队列**")
+    if observations:
+        for observation in observations:
+            st.markdown(f"- {observation_evidence_text(observation)}")
+    st.caption(f"确定性规则：{alert.trigger_rule_id} · {alert.trigger_reason}")
 
 
 st.set_page_config(
-    page_title="护士风险中心 · ContinuCare",
+    page_title="护士任务中心 · ContinuCare",
     page_icon="🧭",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 inject_global_styles(st)
-st.title("护士风险中心")
-st.error("仅使用合成数据 · Alert 表示工作流优先级，不是诊断结论")
-st.info("飞书状态：模拟飞书通知（Mock，未配置 Token、未完成真实联调）")
-render_mode_badges(st)
+st.title("护士任务中心")
+st.error("仅使用合成数据 · 这里展示的是医护工作任务，不是诊断结论")
 
 store = SQLiteStore(get_settings().db_path)
 service = AlertService(store, MockNotifier())
-alerts = [
-    alert
-    for alert in store.list_alerts()
-    if alert.status != AlertStatus.RESOLVED
-]
+all_alerts = store.list_alerts()
+active_alerts = [item for item in all_alerts if item.status != AlertStatus.RESOLVED]
+resolved_alerts = [item for item in all_alerts if item.status == AlertStatus.RESOLVED]
 
-metric_l4, metric_l2, metric_open = st.columns(3)
-metric_l4.metric("L4", sum(alert.severity == "L4" for alert in alerts))
-metric_l2.metric("L2", sum(alert.severity == "L2" for alert in alerts))
-metric_open.metric("待处理", len(alerts))
+st.markdown("## 今天需要处理什么")
+l4_metric, l2_metric, done_metric = st.columns(3)
+l4_metric.metric("需立即查看的 L4", sum(item.severity == "L4" for item in active_alerts))
+l2_metric.metric("24 小时内复核的 L2", sum(item.severity == "L2" for item in active_alerts))
+done_metric.metric("已完成任务", len(resolved_alerts))
 
-if not alerts:
-    st.success("当前没有待处理 Alert。可从患者页提交 L2 或 L4 合成场景。")
+active_tab, completed_tab = st.tabs(
+    [f"待处理任务（{len(active_alerts)}）", f"已完成任务（{len(resolved_alerts)}）"]
+)
 
-for alert in alerts:
-    with st.container(border=True):
-        heading, sla = st.columns([3, 1])
-        with heading:
-            st.subheader(f"{alert.severity} · {alert.title}")
-            st.caption(f"Alert ID：{alert.alert_id}")
-        with sla:
-            st.metric("SLA", _sla_text(alert.sla_due_at))
+with active_tab:
+    if not active_alerts:
+        st.success("当前工作队列为空。新的 L2/L4 合成场景会在这里形成明确任务。")
 
-        st.write(f"状态：`{alert.status.value}` · 责任角色：`{alert.owner_role}`")
-        st.write(f"触发规则：`{alert.trigger_rule_id}`")
-        st.write(f"触发原因：{alert.trigger_reason}")
+    for index, alert in enumerate(active_alerts, start=1):
+        with st.container(border=True):
+            st.markdown(
+                f'<div class="cc-kicker">任务 {index} · {alert.severity}</div>',
+                unsafe_allow_html=True,
+            )
+            heading, sla = st.columns([3, 1])
+            with heading:
+                if alert.severity == "L4":
+                    st.markdown("### 尽快查看当前红旗表达并完成留痕")
+                else:
+                    st.markdown("### 在 24 小时内复核本次患者报告")
+                st.caption(
+                    f"责任角色：{owner_text(alert.owner_role)} · "
+                    f"当前状态：{alert_status_text(alert)}"
+                )
+            with sla:
+                st.metric("剩余 SLA", _sla_text(alert.sla_due_at))
 
-        with st.expander("查看原文证据链", expanded=True):
-            for ref in alert.evidence_refs:
-                if ref.startswith("message_"):
-                    message = store.get_message(ref)
-                    st.write(f"**{ref}**：{message.message_text if message else '记录缺失'}")
-                elif ref.startswith("observation_"):
-                    observation = store.get_observation(ref)
-                    if observation:
-                        st.write(
-                            f"**{ref}**：{observation.code} = {observation.value}；"
-                            f"证据“{observation.evidence_text}”"
-                        )
+            _render_task_reason(store, alert)
 
-        st.warning(
-            "📨 模拟飞书告警卡片（Mock，未真实发送）\n\n"
-            f"{alert.severity} | {alert.title}\n\n"
-            f"责任角色：{alert.owner_role} | SLA：{_sla_text(alert.sla_due_at)}"
-        )
+            st.markdown("**你需要完成的下一步**")
+            st.info(alert_next_step(alert))
 
-        note = st.text_area(
-            "处理记录（关闭时必填）",
-            key=f"note_{alert.alert_id}",
-            placeholder="请记录合成演示中的处理过程，不要填写真实患者信息",
-        )
-        acknowledge, escalate, resolve = st.columns(3)
-        try:
-            if acknowledge.button(
-                "确认收到", key=f"ack_{alert.alert_id}", width="stretch"
-            ):
-                service.acknowledge(alert.alert_id, note)
-                st.rerun()
-            if escalate.button(
-                "升级医生", key=f"escalate_{alert.alert_id}", width="stretch"
-            ):
-                service.escalate(alert.alert_id, note)
-                st.rerun()
-            if resolve.button(
-                "关闭", key=f"resolve_{alert.alert_id}", width="stretch"
-            ):
-                service.resolve(alert.alert_id, note)
-                st.rerun()
-        except ValueError as exc:
-            st.error(str(exc))
+            note = st.text_area(
+                "处理记录（关闭任务时必填）",
+                key=f"note_{alert.alert_id}",
+                placeholder="例如：已完成合成演示复核并记录结果。不要填写真实患者信息。",
+            )
+            acknowledge, escalate, resolve = st.columns(3)
+            try:
+                if acknowledge.button(
+                    "确认收到任务", key=f"ack_{alert.alert_id}", width="stretch"
+                ):
+                    service.acknowledge(alert.alert_id, note)
+                    st.rerun()
+                if escalate.button(
+                    "升级医生复核", key=f"escalate_{alert.alert_id}", width="stretch"
+                ):
+                    service.escalate(alert.alert_id, note)
+                    st.rerun()
+                if resolve.button(
+                    "记录结果并完成", key=f"resolve_{alert.alert_id}", width="stretch"
+                ):
+                    service.resolve(alert.alert_id, note)
+                    st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+            with st.expander("模拟飞书通知预览（Mock，未真实发送）"):
+                st.warning(
+                    f"{alert.severity} 医护任务\n\n"
+                    f"{alert.title}\n\n"
+                    f"责任角色：{owner_text(alert.owner_role)} · SLA：{_sla_text(alert.sla_due_at)}"
+                )
+                st.caption("此卡片只是本地 Mock 展示，未配置 Token，也未完成飞书联调。")
+
+            with st.expander("查看技术记录"):
+                st.write(f"Alert ID：`{alert.alert_id}`")
+                st.write(f"规则 ID：`{alert.trigger_rule_id}`")
+                st.write("Evidence refs：")
+                st.code("\n".join(alert.evidence_refs), language=None)
+
+with completed_tab:
+    if not resolved_alerts:
+        st.info("还没有已完成任务。处理并关闭一个 L2/L4 任务后，结果会保留在这里并进入医生简报。")
+    for alert in resolved_alerts:
+        message, observations = _alert_evidence(store, alert)
+        actions = store.list_alert_actions(alert.alert_id)
+        with st.container(border=True):
+            st.markdown(
+                f'<div class="cc-kicker">{alert.severity} · 已完成</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown("### 处理结果已进入医生复诊简报")
+            st.success(alert.resolution_reason or "任务已完成并留痕。")
+            if message:
+                st.markdown(
+                    f'<div class="cc-quote">{html.escape(message.message_text)}</div>',
+                    unsafe_allow_html=True,
+                )
+            st.caption(f"完成时间：{alert.resolved_at or '—'}")
+            st.markdown("**处理时间线**")
+            for action in actions:
+                action_label = {
+                    "acknowledge": "确认收到",
+                    "escalate_to_doctor": "升级医生",
+                    "resolve": "记录结果并完成",
+                }.get(action.action_type, action.action_type)
+                st.write(f"- {action.created_at} · {action_label}：{action.note}")
+
+with st.expander("演示模式说明"):
+    render_mode_badges(st)
+    st.caption("通知为 Mock；任务、处理记录和审计事件为真实本地持久化。")
