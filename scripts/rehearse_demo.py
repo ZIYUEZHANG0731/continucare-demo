@@ -1,4 +1,4 @@
-"""Run the M5 synthetic story three times without external services."""
+"""Run the FHIR-native synthetic story three times without external services."""
 
 from __future__ import annotations
 
@@ -9,28 +9,37 @@ from continucare.adapters.mock_extractor import MockExtractor
 from continucare.adapters.mock_notifier import MockNotifier
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.demo_data import DEMO_PATIENT_ID
-from continucare.services.alerts import AlertService
 from continucare.services.demo_scenarios import load_scenario
 from continucare.services.summaries import SummaryService
 
 
 def rehearse_once(db_path: Path) -> None:
-    normal = load_scenario(db_path, "正常路径")
-    assert normal.decision.severity == "L0" and normal.alert is None
+    nausea = load_scenario(db_path, "恶心记录")
+    assert nausea.decision.severity == "not_assessed" and nausea.alert is None
+    assert {item.code for item in nausea.extraction.observations} == {"422587007"}
 
-    l2 = load_scenario(db_path, "L2 工作流")
-    assert l2.decision.severity == "L2" and l2.alert is not None
+    quantified = load_scenario(db_path, "呕吐与摄入记录")
+    assert quantified.decision.severity == "not_assessed"
+    assert quantified.alert is None
+    assert {item.code for item in quantified.extraction.observations} == {
+        "94070-0",
+        "75301-2",
+    }
     store = SQLiteStore(db_path)
-    alerts = AlertService(store, MockNotifier())
-    alerts.acknowledge(l2.alert.alert_id)
-    alerts.resolve(l2.alert.alert_id, "已完成合成演示复核并留痕")
+    response = store.get_questionnaire_response(quantified.message.message_id)
+    assert response["resourceType"] == "QuestionnaireResponse"
     summaries = SummaryService(store, MockExtractor(), MockNotifier())
     summary = summaries.generate(DEMO_PATIENT_ID)
     summaries.review(summary.summary_id)
     assert SQLiteStore(db_path).get_summary(summary.summary_id).status == "reviewed"
 
-    l4 = load_scenario(db_path, "L4 红旗")
-    assert l4.decision.severity == "L4" and l4.alert is not None
+    unstructured = load_scenario(db_path, "仅保留患者原文")
+    assert unstructured.decision.severity == "not_assessed"
+    assert unstructured.alert is None
+    assert unstructured.extraction.observations == []
+    assert SQLiteStore(db_path).get_questionnaire_response(
+        unstructured.message.message_id
+    )["resourceType"] == "QuestionnaireResponse"
 
 
 def main() -> None:
@@ -42,4 +51,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

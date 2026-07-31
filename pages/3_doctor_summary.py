@@ -30,7 +30,7 @@ def _in_period(timestamp: str, start: str, end: str) -> bool:
 
 def _source_message(store, alert):
     for ref in alert.evidence_refs:
-        if ref.startswith("message_"):
+        if ref.startswith(("message-", "message_")):
             return store.get_message(ref)
     return None
 
@@ -38,7 +38,7 @@ def _source_message(store, alert):
 def _alert_observations(store, alert):
     observations = []
     for ref in alert.evidence_refs:
-        if ref.startswith("observation_"):
+        if ref.startswith(("observation-", "observation_")):
             item = store.get_observation(ref)
             if item:
                 observations.append(item)
@@ -46,10 +46,6 @@ def _alert_observations(store, alert):
 
 
 def _human_trigger(alert) -> str:
-    if alert.severity == "L4":
-        return "患者当前原文包含未被否定或既往语境排除的固定红旗表达。"
-    if alert.trigger_rule_id == "GLP1-002":
-        return "患者同时报告呕吐至少 1 次和饮水意愿降低。"
     return alert.trigger_reason
 
 

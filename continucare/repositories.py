@@ -27,8 +27,17 @@ def row_to_message(row: sqlite3.Row) -> FollowUpMessage:
 
 def row_to_observation(row: sqlite3.Row) -> Observation:
     data = dict(row)
-    data["value"] = json.loads(data.pop("value_json"))
-    return Observation(**data)
+    return Observation(
+        resource=json.loads(data["resource_json"]),
+        evidence={
+            "questionnaire_response_id": data["questionnaire_response_id"],
+            "confidence_tier": data["confidence_tier"],
+            "evidence_text": data["evidence_text"],
+            "evidence_start": data["evidence_start"],
+            "evidence_end": data["evidence_end"],
+            "recorded_at": data["recorded_at"],
+        },
+    )
 
 
 def row_to_alert(row: sqlite3.Row) -> Alert:
@@ -55,4 +64,3 @@ def row_to_audit_event(row: sqlite3.Row) -> AuditEvent:
 
 def placeholders(values: Iterable[Any]) -> str:
     return ", ".join("?" for _ in values)
-

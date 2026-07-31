@@ -1,4 +1,6 @@
-# ContinuCare 比赛 Demo：Codex 实施交接文档
+# ContinuCare 比赛 Demo：Codex 实施交接文档（历史实现归档）
+
+> **已被 2026-07-31 FHIR 基线替代：** 本文保留用于追溯早期 Demo 需求，正文中的自定义 Observation、`fluid_intake_reduced`、`GLP1-002`、`EMERGENCY-001` 和 L0–L4 自动分级均已停用，不得作为当前实现或临床依据。当前唯一有效边界见 `docs/13_fhir_conformance_policy.md` 与 `docs/clinical/glp1_14d_observation_evidence.md`。
 
 > 用途：将本文件复制到一个新的 Codex 工作区，作为实现任务的唯一主说明。
 >

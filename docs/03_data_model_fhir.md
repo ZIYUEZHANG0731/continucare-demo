@@ -1,8 +1,10 @@
-# 03. FHIR风格数据模型
+# 03. FHIR R4 临床数据模型
+
+> **现行边界：** FHIR R4 4.0.1 的 Questionnaire、QuestionnaireResponse、Observation 和 PlanDefinition 是当前临床数据基线。本文后部出现的 Alert L0–L4 属于未启用的应用层目标态，不是 FHIR 标准，也不是当前获批临床规则。
 
 ## 1. 设计原则
 
-本系统参考FHIR思想，但不要求第一版完全实现FHIR服务器。内部模型应保持FHIR兼容性，方便未来与医院系统、科研数据和标准接口对接。
+临床数据边界固定使用 HL7 FHIR R4 4.0.1。当前原型尚未实现完整 FHIR REST 服务器或目标医院 Implementation Guide，但不再使用“FHIR 风格”自定义 Observation 作为交换格式。所有新临床资源必须保存完整 FHIR JSON 并通过校验；应用索引和证据元数据与 FHIR 资源本体分离。
 
 原则：
 
@@ -110,39 +112,64 @@ FHIR可映射到MedicationStatement、MedicationRequest或MedicationAdministrati
 
 记录体征、症状、量表、患者自报、设备数据和检验结果。
 
-### 6.2 关键字段
+### 6.2 R4 必要结构
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| observation_id | string | 观察ID |
-| patient_id | string | 患者ID |
-| pathway_enrollment_id | string | 所属Pathway实例 |
-| code | string | 内部或标准编码 |
-| display | string | 展示名称 |
-| category | enum | vital/symptom/lab/behavior/adherence/patient_reported |
-| value | number/string/boolean/object | 观察值 |
-| unit | string | 单位 |
-| effective_time | datetime | 发生时间 |
-| recorded_time | datetime | 记录时间 |
-| source | enum | patient/device/nurse/doctor/lab/ai_extracted |
-| confidence | number | 0-1 |
-| evidence_ref | string | 原始证据 |
-| interpretation | enum | normal/abnormal/critical/unknown |
+| `resourceType` | code | 固定为 `Observation` |
+| `id` | id | FHIR 资源逻辑 ID |
+| `status` | code | 必填；如 `final` |
+| `category` | CodeableConcept[] | 当前患者报告使用 Observation Category `survey` |
+| `code` | CodeableConcept | 必填；LOINC/SNOMED CT 等标准编码 |
+| `subject` | Reference(Patient) | 数据所属患者 |
+| `effective[x]` | dateTime/Period/... | 临床相关时间或时间窗 |
+| `issued` | instant | 资源版本可用时间 |
+| `performer` | Reference[] | 患者自报时指向 Patient |
+| `value[x]` | FHIR choice type | `valueBoolean`、`valueQuantity`、`valueCodeableConcept` 等 |
+| `derivedFrom` | Reference[] | 指向原始 QuestionnaireResponse |
 
-### 6.3 示例
+抽取置信度、字符偏移和原文片段不是 Observation 的标准原生字段，保存在独立 `observation_evidence` 表中。
+
+### 6.3 Schema示例
+
+以下为符合 FHIR R4 基础结构的合成示例，不代表真实患者数据或模型评测结果。
 
 ```json
 {
-  "observation_id": "obs_001",
-  "patient_id": "p_001",
-  "code": "symptom.nausea.severity",
-  "display": "恶心程度",
-  "category": "symptom",
-  "value": 3,
-  "unit": "0-10",
-  "source": "patient",
-  "confidence": 0.92,
-  "evidence_ref": "comm_20260715_001"
+  "resourceType": "Observation",
+  "id": "observation-example-001",
+  "status": "final",
+  "category": [{
+    "coding": [{
+      "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+      "code": "survey",
+      "display": "Survey"
+    }]
+  }],
+  "code": {
+    "coding": [{
+      "system": "http://loinc.org",
+      "version": "2.82",
+      "code": "94070-0",
+      "display": "Emesis count 24 hour"
+    }]
+  },
+  "subject": {"reference": "Patient/P-DEMO-001"},
+  "effectivePeriod": {
+    "start": "2026-07-30T10:00:00+00:00",
+    "end": "2026-07-31T10:00:00+00:00"
+  },
+  "issued": "2026-07-31T10:00:00+00:00",
+  "performer": [{"reference": "Patient/P-DEMO-001"}],
+  "valueQuantity": {
+    "value": 1,
+    "unit": "vomiting episodes/24 hours",
+    "system": "http://unitsofmeasure.org",
+    "code": "/d"
+  },
+  "derivedFrom": [{
+    "reference": "QuestionnaireResponse/message-example-001"
+  }]
 }
 ```
 
@@ -150,32 +177,15 @@ FHIR可映射到MedicationStatement、MedicationRequest或MedicationAdministrati
 
 ### 7.1 Questionnaire
 
-表示Pathway中的标准问题集。
+使用 FHIR R4 Questionnaire 表示 Pathway 中的标准问题集。不得用自定义 `questions/options` JSON 冒充 FHIR Questionnaire。
 
-关键字段：
-
-- questionnaire_id。
-- title。
-- pathway_definition_id。
-- version。
-- questions。
-- skip_logic。
-- active_status。
+关键元素包括 `url`、`version`、`status`、`item.linkId`、`item.type`、`item.code`、`answerOption` 和 `enableWhen`。
 
 ### 7.2 QuestionnaireResponse
 
-表示患者一次填写结果。
+使用 FHIR R4 QuestionnaireResponse 表示患者一次填写结果，并保留实际问题层级、答案、subject、authored、author 和 source。
 
-关键字段：
-
-- response_id。
-- patient_id。
-- questionnaire_id。
-- pathway_enrollment_id。
-- answers。
-- submitted_time。
-- source_channel。
-- ai_extraction_status。
+Observation 必须通过 `derivedFrom` 引用产生它的 QuestionnaireResponse。自由文本原文不得仅存进 Observation 而丢失原始回答。
 
 ## 8. Communication
 
@@ -328,4 +338,3 @@ Alert是内部业务实体，表示系统发现需要关注、处理或升级的
 - department_id。
 - access_level。
 - audit_trace_id。
-

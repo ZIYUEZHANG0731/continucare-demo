@@ -1,10 +1,10 @@
 # AI Native Doctor Copilot 文档包
 
-本文档包是项目的 v0.1 source of truth，用于比赛提交、团队开发、医院沟通和后续融资材料的基础沉淀。
+本文档包是项目的v0.1设计基线，用于比赛提交和后续开发。它同时包含当前原型事实、目标系统设计和入围后计划，不应将规划能力表述为已实现或已获临床验证。
 
 项目定位：
 
-> AI Native Doctor Copilot 是面向医院的连续照护操作系统。它不替代医生诊断和治疗，而是在患者离院后持续收集、理解、整理和总结健康状态，并在复诊前向医生提供可审阅、可解释、可追溯的患者连续健康记忆。
+> ContinuCare Copilot提出一套面向医院的连续照护系统，协助医护在诊后收集、理解和整理院外变化，并在复诊前提供可审阅、可解释、可追溯的连续健康记忆；系统不承担诊断、治疗或用药决策。
 
 ## 文档结构
 
@@ -13,7 +13,11 @@
 | [00_product_overview.md](00_product_overview.md) | 产品定位、使命愿景、核心边界、竞品差异 |
 | [01_prd.md](01_prd.md) | 完整产品需求文档、用户、场景、MVP范围、验收标准 |
 | [02_system_architecture.md](02_system_architecture.md) | 系统架构、模块职责、数据流、部署和集成方式 |
+| [14_layered_solution_blueprint.md](14_layered_solution_blueprint.md) | 今天确定的六层方案、前后端/Agent边界和端到端工作流 |
+| [15_layer_1_acceptance.md](15_layer_1_acceptance.md) | 第一层交付物、验收结果、剩余工程项和医院上线阻断项 |
 | [03_data_model_fhir.md](03_data_model_fhir.md) | FHIR风格数据模型和核心实体关系 |
+| [13_fhir_conformance_policy.md](13_fhir_conformance_policy.md) | FHIR R4 合规策略、验证层级和上线门槛 |
+| [clinical/glp1_14d_observation_evidence.md](clinical/glp1_14d_observation_evidence.md) | GLP-1 指标、术语映射与权威临床信源 |
 | [04_pathway_engine.md](04_pathway_engine.md) | Clinical Pathway Engine、规则、模板、审批和版本管理 |
 | [05_ai_agents.md](05_ai_agents.md) | Guideline/Care/Memory/Risk/Summary/Safety Agent设计 |
 | [06_safety_and_governance.md](06_safety_and_governance.md) | 医疗安全、证据链、急症流程、人工审批、审计 |
@@ -27,7 +31,7 @@
 
 1. AI不诊断、不改药、不决定治疗方案。
 2. 医生负责照护路径确认、最终审批和临床决策。
-3. 高风险判断由确定性规则和人工流程兜底，LLM只辅助理解和整理。
+3. 关键风险分级由经临床审批的确定性规则执行，LLM只辅助理解和整理。
 4. 所有临床相关输出必须有证据链、置信度和审计记录。
 5. 系统围绕 Care Pathway 设计，而不是围绕单个疾病设计。
 
@@ -35,13 +39,13 @@
 
 比赛命题强调“贯穿诊前诊后的医生AI Copilot”，具体包括：
 
-- 诊后替医护主动随访。
+- 诊后协助医护开展主动随访。
 - 监测异常并进行分级。
 - 起草人性化医患沟通。
 - 院外数据沉淀后，在复诊前生成医生简报。
 - 形成院外连续照护与院内精准决策互相喂养的闭环。
 
-本项目以此为第一版落地方向，但将产品边界进一步收敛为“连续照护记忆与工作流系统”，避免被误解为问诊、诊断或自动治疗系统。
+本项目以此为第一版落地方向，并将产品边界收敛为“连续照护记忆与工作流系统”。当前原型使用合成数据和Mock适配器；Aily、飞书和医院系统真实联调属于入围后计划。
 
 ## 当前已有图表
 

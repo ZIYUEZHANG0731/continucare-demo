@@ -15,13 +15,12 @@ def test_one_click_scenario_reset_removes_previous_story(tmp_path):
     from continucare.services.demo_scenarios import load_scenario
 
     db_path = tmp_path / "scenarios.db"
-    l2 = load_scenario(db_path, "L2 工作流")
-    assert l2.alert is not None
+    quantified = load_scenario(db_path, "呕吐与摄入记录")
+    assert quantified.alert is None
 
-    normal = load_scenario(db_path, "正常路径")
+    nausea = load_scenario(db_path, "恶心记录")
     store = SQLiteStore(db_path)
 
-    assert normal.alert is None
+    assert nausea.alert is None
     assert store.list_alerts() == []
     assert len(store.list_messages("P-DEMO-001")) == 1
-

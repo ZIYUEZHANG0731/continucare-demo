@@ -26,7 +26,11 @@ class AlertService:
                 entity_id=f"risk_{uuid4().hex}",
                 event_type="risk_evaluated",
                 actor_type="deterministic_rule_engine",
-                details={"severity": "L0", "alert_created": False},
+                details={
+                    "classification": decision.severity,
+                    "alert_created": False,
+                    "reason": "no_approved_clinical_rule",
+                },
             )
             return None
 
@@ -171,4 +175,3 @@ class AlertService:
             },
         )
         return alert
-

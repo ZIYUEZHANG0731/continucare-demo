@@ -38,9 +38,9 @@ def _alert_evidence(store, alert):
     message = None
     observations = []
     for ref in alert.evidence_refs:
-        if ref.startswith("message_"):
+        if ref.startswith(("message-", "message_")):
             message = store.get_message(ref)
-        elif ref.startswith("observation_"):
+        elif ref.startswith(("observation-", "observation_")):
             item = store.get_observation(ref)
             if item:
                 observations.append(item)
@@ -81,10 +81,10 @@ all_alerts = store.list_alerts()
 active_alerts = [item for item in all_alerts if item.status != AlertStatus.RESOLVED]
 resolved_alerts = [item for item in all_alerts if item.status == AlertStatus.RESOLVED]
 
-st.markdown("## 今天需要处理什么")
-l4_metric, l2_metric, done_metric = st.columns(3)
-l4_metric.metric("需立即查看的 L4", sum(item.severity == "L4" for item in active_alerts))
-l2_metric.metric("24 小时内复核的 L2", sum(item.severity == "L2" for item in active_alerts))
+st.markdown("## 已获批规则产生的任务")
+active_metric, approved_metric, done_metric = st.columns(3)
+active_metric.metric("待处理任务", len(active_alerts))
+approved_metric.metric("当前获批临床规则", 0)
 done_metric.metric("已完成任务", len(resolved_alerts))
 
 active_tab, completed_tab = st.tabs(
@@ -93,7 +93,10 @@ active_tab, completed_tab = st.tabs(
 
 with active_tab:
     if not active_alerts:
-        st.success("当前工作队列为空。新的 L2/L4 合成场景会在这里形成明确任务。")
+        st.info(
+            "当前工作队列为空。路径仍处于临床审核草案，"
+            "不会根据患者文本自动产生分级任务。"
+        )
 
     for index, alert in enumerate(active_alerts, start=1):
         with st.container(border=True):
@@ -103,10 +106,7 @@ with active_tab:
             )
             heading, sla = st.columns([3, 1])
             with heading:
-                if alert.severity == "L4":
-                    st.markdown("### 尽快查看当前红旗表达并完成留痕")
-                else:
-                    st.markdown("### 在 24 小时内复核本次患者报告")
+                st.markdown("### 按获批规则要求复核本次患者报告")
                 st.caption(
                     f"责任角色：{owner_text(alert.owner_role)} · "
                     f"当前状态：{alert_status_text(alert)}"
@@ -160,7 +160,7 @@ with active_tab:
 
 with completed_tab:
     if not resolved_alerts:
-        st.info("还没有已完成任务。处理并关闭一个 L2/L4 任务后，结果会保留在这里并进入医生简报。")
+        st.info("还没有已完成任务。只有获批规则产生的任务才会进入这里。")
     for alert in resolved_alerts:
         message, observations = _alert_evidence(store, alert)
         actions = store.list_alert_actions(alert.alert_id)

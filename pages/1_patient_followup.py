@@ -21,7 +21,6 @@ from continucare.presentation import (
 from continucare.services.alerts import AlertService
 from continucare.services.extraction import ExtractionService
 from continucare.services.followup import FollowUpService
-from continucare.services.risk_rules import EMERGENCY_NOTICE
 from continucare.services.workflow import FollowUpWorkflow
 from continucare.ui import inject_global_styles, render_mode_badges
 
@@ -95,12 +94,12 @@ else:
             elif latest_alert:
                 st.markdown("### 已创建护士 24 小时复核任务")
             else:
-                st.markdown("### 已记录本次患者报告，无需新增医护任务")
+                st.markdown("### 已保存本次患者报告和可确认的标准化事实")
         with status_col:
             if latest_alert:
                 st.metric("工作流状态", f"{latest_alert.severity} · {alert_status_text(latest_alert)}")
             else:
-                st.metric("工作流状态", "L0 · 已记录")
+                st.metric("临床分级", "未评估")
 
         st.markdown("**患者本次原话**")
         st.markdown(
@@ -132,10 +131,10 @@ else:
                 f"任务状态：{alert_status_text(latest_alert)}"
             )
         else:
-            st.success("本次报告已进入随访时间线；当前无需护士额外处理。")
-
-        if latest_alert and latest_alert.severity == "L4":
-            st.error(EMERGENCY_NOTICE)
+            st.info(
+                "本次报告已进入随访时间线。当前没有获批的自动临床规则，"
+                "因此系统不生成风险等级或医护任务。"
+            )
 
         with st.expander("为什么会得到这个结果？查看原文证据与结构化记录"):
             st.markdown("**原文中被采用的证据**")
@@ -147,6 +146,8 @@ else:
                 [
                     {
                         "患者报告事实": observation_text(item),
+                        "FHIR code": item.code,
+                        "code system": item.code_system,
                         "结构化值": json.dumps(item.value, ensure_ascii=False),
                         "原文证据": item.evidence_text,
                         "证据位置": f"{item.evidence_start}:{item.evidence_end}",
@@ -156,7 +157,10 @@ else:
                 hide_index=True,
                 width="stretch",
             )
-            st.caption("技术字段和 evidence_refs 仍会持久化，但不作为患者端的主要信息。")
+            st.caption(
+                "FHIR Observation 与原始 QuestionnaireResponse 分开保存，"
+                "并通过 derivedFrom 建立来源关系。"
+            )
 
 st.markdown("## 提交一条新的合成随访")
 profile, intake = st.columns([1, 2])
@@ -191,12 +195,12 @@ with intake:
                 AlertService(store, MockNotifier()),
             )
             result = workflow.submit(DEMO_PATIENT_ID, message_text)
-            if result.decision.severity == "L4":
-                notice = "提交成功：已显示固定急救提示并通知医护工作队列。"
-            elif result.alert:
+            if result.alert:
                 notice = "提交成功：已记录患者报告，并创建护士复核任务。"
             else:
-                notice = "提交成功：已记录患者报告，当前无需新增医护任务。"
+                notice = (
+                    "提交成功：FHIR 原始回答已保存；当前未启用自动临床分级。"
+                )
             st.session_state["submission_notice"] = notice
             st.rerun()
         except ValueError as exc:

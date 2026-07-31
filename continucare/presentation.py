@@ -10,14 +10,10 @@ from continucare.models import Alert, AlertStatus, Observation
 
 
 OBSERVATION_LABELS = {
-    "nausea": "报告恶心",
-    "vomiting_count": "报告呕吐次数",
-    "fluid_intake_reduced": "报告饮水意愿降低",
-    "fluid_intake_normal": "报告可以正常喝水",
-    "emergency_chest_pain": "当前原文包含胸痛红旗表达",
-    "emergency_breathing_difficulty": "当前原文包含呼吸困难红旗表达",
-    "emergency_altered_consciousness": "当前原文包含意识/晕厥红旗表达",
-    "emergency_heavy_bleeding": "当前原文包含大量出血红旗表达",
+    "422587007": "报告恶心",
+    "94070-0": "报告过去24小时呕吐次数",
+    "75301-2": "报告过去24小时估计液体摄入量",
+    "21522001": "报告腹痛",
 }
 
 OWNER_LABELS = {
@@ -60,10 +56,13 @@ ACTOR_LABELS = {
 
 
 def observation_text(observation: Observation) -> str:
-    if observation.code == "vomiting_count":
+    if observation.code == "94070-0":
         return f"报告呕吐 {observation.value} 次"
+    if observation.code == "75301-2":
+        return f"报告估计液体摄入 {observation.value_display}"
     return OBSERVATION_LABELS.get(
-        observation.code, f"患者报告 {observation.code} = {observation.value}"
+        observation.code,
+        f"患者报告 {observation.code_display} = {observation.value_display}",
     )
 
 
@@ -80,9 +79,7 @@ def owner_text(role: str) -> str:
 
 
 def alert_next_step(alert: Alert) -> str:
-    if alert.severity == "L4":
-        return "系统已向患者显示固定急救提示；值班医护角色需要尽快查看并留痕。"
-    return "随访护士需要在 SLA 内查看原文证据并记录处理结果。"
+    return "责任医护需要按已批准的工作流要求查看原文证据并记录处理结果。"
 
 
 def event_text(event_type: str) -> str:

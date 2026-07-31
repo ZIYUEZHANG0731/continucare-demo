@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from continucare.adapters.mock_extractor import MockExtractor
 from continucare.adapters.mock_notifier import MockNotifier
 from continucare.adapters.sqlite_store import SQLiteStore
-from continucare.demo_data import DEMO_PATIENT_ID, L2_MESSAGE
+from continucare.demo_data import DEMO_PATIENT_ID, QUANTIFIED_MESSAGE
 from continucare.services.alerts import AlertService
 from continucare.services.extraction import ExtractionService
 from continucare.services.followup import FollowUpService
@@ -19,11 +19,7 @@ def build_story(store):
         ExtractionService(store, MockExtractor()),
         AlertService(store, MockNotifier()),
     )
-    result = workflow.submit(DEMO_PATIENT_ID, L2_MESSAGE)
-    AlertService(store, MockNotifier()).resolve(
-        result.alert.alert_id, "已完成合成演示复核"
-    )
-    return result
+    return workflow.submit(DEMO_PATIENT_ID, QUANTIFIED_MESSAGE)
 
 
 def all_summary_items(summary):
@@ -44,9 +40,8 @@ def test_summary_bullets_have_evidence_refs(tmp_path):
     items = list(all_summary_items(summary))
     assert items
     assert all(item.evidence_refs for item in items)
-    alert_items = summary.summary_json.alerts_and_actions
-    assert len(alert_items) == 1
-    assert "已完成合成演示复核" in alert_items[0].text
+    assert summary.summary_json.alerts_and_actions == []
+    assert any("呕吐 1" in item.text for item in summary.summary_json.key_changes)
 
 
 def test_doctor_review_is_persisted_and_audited(tmp_path):

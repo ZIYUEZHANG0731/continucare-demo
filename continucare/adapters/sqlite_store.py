@@ -6,6 +6,10 @@ import json
 from pathlib import Path
 
 from continucare.db import connect, initialize_database
+from continucare.fhir.r4 import FHIRValidationError, validate_r4_resource
+from continucare.fhir.references import (
+    validate_questionnaire_response_against_questionnaire,
+)
 from continucare.models import (
     Alert,
     AlertAction,
@@ -24,6 +28,7 @@ from continucare.repositories import (
     row_to_patient,
     row_to_summary,
 )
+from continucare.pathways.fhir_artifacts import load_glp1_questionnaire
 
 
 class SQLiteStore:
@@ -64,6 +69,55 @@ class SQLiteStore:
             ).fetchone()
         return row_to_message(row) if row else None
 
+    def save_questionnaire_response(self, resource: dict) -> None:
+        resource = validate_questionnaire_response_against_questionnaire(
+            resource, load_glp1_questionnaire()
+        )
+        patient_reference = resource["subject"]["reference"]
+        patient_id = patient_reference.removeprefix("Patient/")
+        with connect(self.db_path) as connection:
+            message_row = connection.execute(
+                "SELECT patient_id FROM followup_messages WHERE message_id = ?",
+                (resource["id"],),
+            ).fetchone()
+            if message_row is None:
+                raise FHIRValidationError(
+                    "QuestionnaireResponse.id must match a stored follow-up message"
+                )
+            if message_row["patient_id"] != patient_id:
+                raise FHIRValidationError(
+                    "QuestionnaireResponse.subject must match the source message patient"
+                )
+            connection.execute(
+                """
+                INSERT INTO fhir_questionnaire_responses (
+                    resource_id, patient_id, message_id, resource_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    resource["id"],
+                    patient_id,
+                    resource["id"],
+                    json.dumps(resource, ensure_ascii=False, separators=(",", ":")),
+                    resource["authored"],
+                ),
+            )
+
+    def get_questionnaire_response(self, resource_id: str) -> dict | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT resource_json FROM fhir_questionnaire_responses
+                WHERE resource_id = ?
+                """,
+                (resource_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return validate_questionnaire_response_against_questionnaire(
+            json.loads(row["resource_json"]), load_glp1_questionnaire()
+        )
+
     def list_messages(self, patient_id: str) -> list[FollowUpMessage]:
         with connect(self.db_path) as connection:
             rows = connection.execute(
@@ -79,40 +133,55 @@ class SQLiteStore:
         if not observations:
             return
         with connect(self.db_path) as connection:
-            connection.executemany(
-                """
-                INSERT INTO observations (
-                    observation_id, patient_id, message_id, code, value_json,
-                    unit, effective_time, source, confidence_tier, evidence_text,
-                    evidence_start, evidence_end, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
+            for item in observations:
+                resource = validate_r4_resource(
+                    item.as_fhir(), expected_resource_type="Observation"
+                )
+                item = Observation(resource=resource, evidence=item.evidence)
+                connection.execute(
+                    """
+                    INSERT INTO fhir_observations (
+                        observation_id, patient_id, questionnaire_response_id,
+                        effective_time, resource_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
                     (
                         item.observation_id,
                         item.patient_id,
                         item.message_id,
-                        item.code,
-                        json.dumps(item.value, ensure_ascii=False),
-                        item.unit,
                         item.effective_time,
-                        item.source,
+                        json.dumps(
+                            item.as_fhir(), ensure_ascii=False, separators=(",", ":")
+                        ),
+                        item.created_at,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO observation_evidence (
+                        observation_id, confidence_tier, evidence_text,
+                        evidence_start, evidence_end, recorded_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.observation_id,
                         item.confidence_tier.value,
                         item.evidence_text,
                         item.evidence_start,
                         item.evidence_end,
                         item.created_at,
-                    )
-                    for item in observations
-                ],
-            )
+                    ),
+                )
 
     def list_observations(self, patient_id: str) -> list[Observation]:
         with connect(self.db_path) as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM observations
-                WHERE patient_id = ? ORDER BY effective_time DESC
+                SELECT o.*, e.confidence_tier, e.evidence_text,
+                       e.evidence_start, e.evidence_end, e.recorded_at
+                FROM fhir_observations o
+                JOIN observation_evidence e USING (observation_id)
+                WHERE o.patient_id = ? ORDER BY o.effective_time DESC
                 """,
                 (patient_id,),
             ).fetchall()
@@ -122,8 +191,11 @@ class SQLiteStore:
         with connect(self.db_path) as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM observations
-                WHERE message_id = ? ORDER BY evidence_start
+                SELECT o.*, e.confidence_tier, e.evidence_text,
+                       e.evidence_start, e.evidence_end, e.recorded_at
+                FROM fhir_observations o
+                JOIN observation_evidence e USING (observation_id)
+                WHERE o.questionnaire_response_id = ? ORDER BY e.evidence_start
                 """,
                 (message_id,),
             ).fetchall()
@@ -132,7 +204,13 @@ class SQLiteStore:
     def get_observation(self, observation_id: str) -> Observation | None:
         with connect(self.db_path) as connection:
             row = connection.execute(
-                "SELECT * FROM observations WHERE observation_id = ?",
+                """
+                SELECT o.*, e.confidence_tier, e.evidence_text,
+                       e.evidence_start, e.evidence_end, e.recorded_at
+                FROM fhir_observations o
+                JOIN observation_evidence e USING (observation_id)
+                WHERE o.observation_id = ?
+                """,
                 (observation_id,),
             ).fetchone()
         return row_to_observation(row) if row else None

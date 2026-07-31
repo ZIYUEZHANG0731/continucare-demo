@@ -114,15 +114,27 @@ CREATE TABLE IF NOT EXISTS followup_messages (
     processing_status TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS observations (
+CREATE TABLE IF NOT EXISTS fhir_questionnaire_responses (
+    resource_id TEXT PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(patient_id) ON DELETE CASCADE,
+    message_id TEXT NOT NULL UNIQUE REFERENCES followup_messages(message_id) ON DELETE CASCADE,
+    resource_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fhir_observations (
     observation_id TEXT PRIMARY KEY,
     patient_id TEXT NOT NULL REFERENCES patients(patient_id) ON DELETE CASCADE,
-    message_id TEXT NOT NULL REFERENCES followup_messages(message_id) ON DELETE CASCADE,
-    code TEXT NOT NULL,
-    value_json TEXT NOT NULL,
-    unit TEXT,
+    questionnaire_response_id TEXT NOT NULL
+        REFERENCES fhir_questionnaire_responses(resource_id) ON DELETE CASCADE,
     effective_time TEXT NOT NULL,
-    source TEXT NOT NULL,
+    resource_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS observation_evidence (
+    observation_id TEXT PRIMARY KEY
+        REFERENCES fhir_observations(observation_id) ON DELETE CASCADE,
     confidence_tier TEXT NOT NULL CHECK (
         confidence_tier IN (
             'patient_confirmed', 'verbatim_explicit',
@@ -132,7 +144,7 @@ CREATE TABLE IF NOT EXISTS observations (
     evidence_text TEXT NOT NULL,
     evidence_start INTEGER NOT NULL,
     evidence_end INTEGER NOT NULL,
-    created_at TEXT NOT NULL
+    recorded_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -187,7 +199,9 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS idx_messages_patient_time
 ON followup_messages(patient_id, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_observations_patient_time
-ON observations(patient_id, effective_time);
+ON fhir_observations(patient_id, effective_time);
+CREATE INDEX IF NOT EXISTS idx_questionnaire_responses_patient_time
+ON fhir_questionnaire_responses(patient_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_patient_status
 ON alerts(patient_id, status);
 CREATE INDEX IF NOT EXISTS idx_audit_patient_time

@@ -12,6 +12,18 @@ from typing import Any, Pattern
 from uuid import uuid4
 
 from continucare.db import utc_now_iso
+from continucare.fhir.observations import (
+    build_patient_reported_observation,
+    millilitres_per_24_hours,
+    per_day_quantity,
+)
+from continucare.fhir.terminology import (
+    ABDOMINAL_PAIN_FINDING,
+    FLUID_INTAKE_24H_ESTIMATED,
+    NAUSEA_FINDING,
+    VOMITING_COUNT_24H,
+    CodingDefinition,
+)
 from continucare.models import (
     ConfidenceTier,
     ExtractionResult,
@@ -26,10 +38,10 @@ from continucare.models import (
 
 @dataclass(frozen=True)
 class PhraseRule:
-    code: str
+    code: CodingDefinition
     pattern: Pattern[str]
     value: Any = True
-    unit: str | None = None
+    value_element: str = "valueBoolean"
     exclude_context: bool = True
 
 
@@ -49,28 +61,8 @@ _NUMBER_MAP = {
 
 
 PHRASE_RULES = (
-    PhraseRule("nausea", re.compile(r"恶心")),
-    PhraseRule(
-        "fluid_intake_reduced",
-        re.compile(r"喝水也不太想喝|不太想喝水|不想喝水|喝不下水|饮水减少"),
-    ),
-    PhraseRule(
-        "fluid_intake_normal",
-        re.compile(r"能正常喝水|可以正常喝水|喝水正常"),
-    ),
-    PhraseRule(
-        "emergency_chest_pain",
-        re.compile(r"胸口很痛|胸痛|胸口痛"),
-    ),
-    PhraseRule(
-        "emergency_breathing_difficulty",
-        re.compile(r"喘不过气|呼吸困难|上不来气"),
-    ),
-    PhraseRule(
-        "emergency_altered_consciousness",
-        re.compile(r"意识不清|晕厥"),
-    ),
-    PhraseRule("emergency_heavy_bleeding", re.compile(r"大量出血")),
+    PhraseRule(NAUSEA_FINDING, re.compile(r"恶心")),
+    PhraseRule(ABDOMINAL_PAIN_FINDING, re.compile(r"腹痛|肚子痛|肚子疼")),
 )
 
 
@@ -93,12 +85,34 @@ class MockExtractor:
                 observations.append(
                     self._observation(
                         message,
-                        code="vomiting_count",
-                        value=count,
-                        unit="times",
+                        code=VOMITING_COUNT_24H,
+                        value_element="valueQuantity",
+                        value=per_day_quantity(count, unit="vomiting episodes/24 hours"),
                         match=vomiting_match,
+                        effective_period_hours=24,
                     )
                 )
+
+        fluid_match = re.search(
+            r"(?:喝水|饮水|液体摄入).{0,6}?([0-9]+(?:\.[0-9]+)?)\s*(毫升|ml|mL|升|L)",
+            text,
+        )
+        if fluid_match and not _is_negated_or_historical(
+            text, fluid_match.start(), fluid_match.end()
+        ):
+            amount = float(fluid_match.group(1))
+            if fluid_match.group(2) in {"升", "L"}:
+                amount *= 1000
+            observations.append(
+                self._observation(
+                    message,
+                    code=FLUID_INTAKE_24H_ESTIMATED,
+                    value_element="valueQuantity",
+                    value=millilitres_per_24_hours(amount),
+                    match=fluid_match,
+                    effective_period_hours=24,
+                )
+            )
 
         for rule in PHRASE_RULES:
             match = rule.pattern.search(text)
@@ -112,8 +126,8 @@ class MockExtractor:
                 self._observation(
                     message,
                     code=rule.code,
+                    value_element=rule.value_element,
                     value=rule.value,
-                    unit=rule.unit,
                     match=match,
                 )
             )
@@ -196,25 +210,33 @@ class MockExtractor:
     def _observation(
         message: FollowUpMessage,
         *,
-        code: str,
+        code: CodingDefinition,
+        value_element: str,
         value: Any,
-        unit: str | None,
         match: re.Match[str],
+        effective_period_hours: int | None = None,
     ) -> Observation:
         now = utc_now_iso()
-        return Observation(
-            observation_id=f"observation_{uuid4().hex}",
+        resource = build_patient_reported_observation(
+            observation_id=f"observation-{uuid4().hex}",
             patient_id=message.patient_id,
-            message_id=message.message_id,
-            code=code,
-            value=value,
-            unit=unit,
+            questionnaire_response_id=message.message_id,
             effective_time=message.submitted_at,
-            confidence_tier=ConfidenceTier.VERBATIM_EXPLICIT,
-            evidence_text=match.group(0),
-            evidence_start=match.start(),
-            evidence_end=match.end(),
-            created_at=now,
+            code=code,
+            value_element=value_element,
+            value=value,
+            effective_period_hours=effective_period_hours,
+        )
+        return Observation(
+            resource=resource,
+            evidence={
+                "questionnaire_response_id": message.message_id,
+                "confidence_tier": ConfidenceTier.VERBATIM_EXPLICIT,
+                "evidence_text": match.group(0),
+                "evidence_start": match.start(),
+                "evidence_end": match.end(),
+                "recorded_at": now,
+            },
         )
 
 
@@ -226,7 +248,9 @@ def _is_negated_or_historical(text: str, start: int, end: int) -> bool:
 
     if re.search(r"(?:没有|没|无|否认|不)(?:再|觉得|感到|出现)?$", prefix):
         return True
-    if re.search(r"(?:上个月|以前|之前|曾经|既往|过去).{0,6}$", prefix):
+    # Do not treat an explicit measurement window such as "过去24小时" as
+    # historical context; it is the required time basis for the LOINC metrics.
+    if re.search(r"(?:上个月|以前|之前|曾经|既往).{0,6}$", prefix):
         return True
     if re.search(r"过.{0,6}(?:现在|目前)(?:没有|没|无)", suffix):
         return True
@@ -234,14 +258,12 @@ def _is_negated_or_historical(text: str, start: int, end: int) -> bool:
 
 
 def _observation_summary_text(observation: Observation) -> str | None:
-    if observation.code == "vomiting_count":
+    if observation.code == "94070-0":
         return f"患者原文报告呕吐 {observation.value} 次。"
-    if observation.code == "fluid_intake_reduced":
-        return "患者原文报告饮水意愿降低。"
-    if observation.code == "fluid_intake_normal":
-        return "患者原文报告可以正常喝水。"
-    if observation.code == "nausea":
+    if observation.code == "75301-2":
+        return f"患者原文报告过去24小时估计液体摄入 {observation.value_display}。"
+    if observation.code == "422587007":
         return "患者原文报告恶心。"
-    if observation.code.startswith("emergency_"):
-        return f"患者当前原文包含固定红旗表达“{observation.evidence_text}”。"
-    return f"患者报告字段 {observation.code} = {observation.value}。"
+    if observation.code == "21522001":
+        return "患者原文报告腹痛。"
+    return f"患者报告 {observation.code_display} = {observation.value_display}。"

@@ -5,7 +5,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from continucare.fhir.r4 import validate_r4_resource
 
 
 class StrictModel(BaseModel):
@@ -46,20 +48,15 @@ class FollowUpMessage(StrictModel):
     processing_status: str
 
 
-class Observation(StrictModel):
-    observation_id: str
-    patient_id: str
-    message_id: str
-    code: str
-    value: Any
-    unit: str | None = None
-    effective_time: str
-    source: str = "patient_reported"
+class ObservationEvidence(StrictModel):
+    """Application evidence metadata kept outside the FHIR resource body."""
+
+    questionnaire_response_id: str
     confidence_tier: ConfidenceTier
     evidence_text: str
     evidence_start: int = Field(ge=0)
     evidence_end: int = Field(ge=0)
-    created_at: str
+    recorded_at: str
 
     @field_validator("evidence_end")
     @classmethod
@@ -68,6 +65,135 @@ class Observation(StrictModel):
         if value <= start:
             raise ValueError("evidence_end must be greater than evidence_start")
         return value
+
+
+class Observation(StrictModel):
+    """A validated FHIR R4 Observation plus non-clinical extraction evidence.
+
+    ``resource`` is the exact exchange/persistence payload. Evidence offsets and
+    extraction confidence are application metadata and are intentionally not
+    inserted as non-standard FHIR properties.
+    """
+
+    resource: dict[str, Any]
+    evidence: ObservationEvidence
+
+    @model_validator(mode="after")
+    def validate_fhir_and_trace(self) -> "Observation":
+        self.resource = validate_r4_resource(
+            self.resource, expected_resource_type="Observation"
+        )
+        expected = (
+            f"QuestionnaireResponse/{self.evidence.questionnaire_response_id}"
+        )
+        derived_from = {
+            item.get("reference") for item in self.resource.get("derivedFrom", [])
+        }
+        if expected not in derived_from:
+            raise ValueError(
+                "FHIR Observation.derivedFrom must reference the evidence "
+                "QuestionnaireResponse"
+            )
+        return self
+
+    @property
+    def observation_id(self) -> str:
+        return self.resource["id"]
+
+    @property
+    def patient_id(self) -> str:
+        reference = self.resource["subject"]["reference"]
+        return reference.removeprefix("Patient/")
+
+    @property
+    def message_id(self) -> str:
+        return self.evidence.questionnaire_response_id
+
+    @property
+    def code(self) -> str:
+        return self.resource["code"]["coding"][0]["code"]
+
+    @property
+    def code_system(self) -> str:
+        return self.resource["code"]["coding"][0]["system"]
+
+    @property
+    def code_display(self) -> str:
+        coding = self.resource["code"]["coding"][0]
+        return coding.get("display") or self.resource["code"].get("text") or self.code
+
+    @property
+    def value(self) -> Any:
+        if "valueQuantity" in self.resource:
+            return self.resource["valueQuantity"].get("value")
+        if "valueCodeableConcept" in self.resource:
+            concept = self.resource["valueCodeableConcept"]
+            coding = concept.get("coding", [])
+            return coding[0].get("code") if coding else concept.get("text")
+        for field_name in (
+            "valueBoolean",
+            "valueInteger",
+            "valueString",
+            "valueDateTime",
+            "valueTime",
+        ):
+            if field_name in self.resource:
+                return self.resource[field_name]
+        return None
+
+    @property
+    def value_display(self) -> str:
+        if "valueQuantity" in self.resource:
+            quantity = self.resource["valueQuantity"]
+            return f"{quantity.get('value')} {quantity.get('unit', quantity.get('code', ''))}".strip()
+        if "valueCodeableConcept" in self.resource:
+            concept = self.resource["valueCodeableConcept"]
+            coding = concept.get("coding", [])
+            if coding:
+                return coding[0].get("display") or coding[0].get("code", "")
+            return concept.get("text", "")
+        return str(self.value)
+
+    @property
+    def unit(self) -> str | None:
+        quantity = self.resource.get("valueQuantity")
+        if quantity:
+            return quantity.get("code") or quantity.get("unit")
+        return None
+
+    @property
+    def effective_time(self) -> str:
+        if "effectiveDateTime" in self.resource:
+            return self.resource["effectiveDateTime"]
+        period = self.resource.get("effectivePeriod", {})
+        return period.get("end") or period.get("start") or self.resource["issued"]
+
+    @property
+    def source(self) -> str:
+        return "patient_reported"
+
+    @property
+    def confidence_tier(self) -> ConfidenceTier:
+        return self.evidence.confidence_tier
+
+    @property
+    def evidence_text(self) -> str:
+        return self.evidence.evidence_text
+
+    @property
+    def evidence_start(self) -> int:
+        return self.evidence.evidence_start
+
+    @property
+    def evidence_end(self) -> int:
+        return self.evidence.evidence_end
+
+    @property
+    def created_at(self) -> str:
+        return self.evidence.recorded_at
+
+    def as_fhir(self) -> dict[str, Any]:
+        return self.resource.copy()
 
 
 class Alert(StrictModel):
@@ -137,10 +263,7 @@ class ExtractionResult(StrictModel):
 
     @property
     def has_current_emergency_signal(self) -> bool:
-        return any(
-            observation.code.startswith("emergency_") and observation.value is True
-            for observation in self.observations
-        )
+        return False
 
 
 class SummaryContext(StrictModel):

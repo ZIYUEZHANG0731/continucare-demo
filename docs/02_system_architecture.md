@@ -1,14 +1,16 @@
 # 02. 系统架构设计
 
+> 本文保留目标系统的模块视角。当前正式的分层建设顺序、层间输入输出、动态 Questionnaire UI、Agent 边界和验收门槛见 [14_layered_solution_blueprint.md](14_layered_solution_blueprint.md)；第一层现状见 [15_layer_1_acceptance.md](15_layer_1_acceptance.md)。
+
 ## 1. 架构目标
 
-系统要支持真实医院落地，而不是单次比赛Demo。因此架构必须满足：
+本节描述目标系统架构。当前原型采用本地SQLite、确定性规则和明确标注的Mock适配器；目标架构同时考虑比赛演示、后续单科室试点及分阶段医院集成，因此需要满足：
 
 - 临床安全边界清晰。
 - 数据模型稳定可扩展。
 - Pathway可配置。
 - Agent可编排、可审计、可降级。
-- 规则引擎优先于LLM做高风险判断。
+- 经临床审批的确定性规则负责关键阈值和工作流分级，LLM只辅助理解与整理。
 - 支持旁路部署和后续HIS/EMR集成。
 
 ## 2. 总体架构
@@ -21,7 +23,7 @@ flowchart LR
   CareAgent --> Comm[Communication Service]
 
   HIS[HIS/EMR/LIS/PACS] --> Integration[Integration Layer]
-  Integration --> ClinicalData[FHIR-style Clinical Data Layer]
+  Integration --> ClinicalData[FHIR R4 Clinical Data Layer]
 
   Obs --> ClinicalData
   Comm --> ClinicalData
@@ -90,7 +92,7 @@ flowchart LR
 
 负责数据持久化：
 
-- FHIR-style Clinical Data Store。
+- FHIR R4 Clinical Data Store。
 - Pathway Definition Store。
 - Conversation Store。
 - Timeline Store。
@@ -208,15 +210,15 @@ Agent不是自由对话机器人，而是受控的任务执行器。
 
 ## 8. 部署形态
 
-### 8.1 比赛Demo
+### 8.1 当前比赛原型
 
 - 单体应用或轻量前后端。
-- 模拟患者数据。
-- 模拟消息通道。
+- 合成患者数据。
+- 明确标注的Mock消息通道。
 - 内置Pathway模板。
 - 本地或云端Demo。
 
-### 8.2 医院试点
+### 8.2 计划中的医院试点
 
 - 私有化部署或医院专有云。
 - 与HIS/EMR只读集成。
@@ -224,7 +226,7 @@ Agent不是自由对话机器人，而是受控的任务执行器。
 - 医护账号和患者授权。
 - 审计日志和权限控制上线。
 
-### 8.3 医院生产
+### 8.3 长期目标：医院生产部署
 
 - 高可用服务。
 - SSO。
@@ -236,7 +238,7 @@ Agent不是自由对话机器人，而是受控的任务执行器。
 
 ## 9. 集成原则
 
-第一阶段采用旁路系统：
+计划中的第一阶段采用旁路系统：
 
 - 从HIS/EMR读取患者、Encounter、药物和复诊信息。
 - 不自动改医嘱。
@@ -256,9 +258,8 @@ Agent不是自由对话机器人，而是受控的任务执行器。
 | 风险 | 对策 |
 |---|---|
 | Alert过多导致疲劳 | 分级、去重、合并、静默期、SLA |
-| LLM幻觉 | 结构化输出、证据链、Safety Agent、禁忌表达检查 |
+| LLM生成不准确或越界 | 结构化输出、证据链、安全检查、预定义测试和人工审阅；不宣称完全消除风险 |
 | 医院接口复杂 | 先旁路部署，后分阶段集成 |
-| 医护不信任 | 每条结论可追溯，医生可编辑和反馈 |
+| 医护难以审阅或采纳 | 每条结论可追溯，医生可编辑、拒绝和反馈；通过试点测量实际采用情况 |
 | 患者低依从 | 简短问题、提醒、低负担交互 |
 | 医疗责任不清 | 明确AI边界、人工审批、急症流程 |
-

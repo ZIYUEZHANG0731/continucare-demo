@@ -12,11 +12,11 @@ from continucare.ui import inject_global_styles, render_mode_badges
 
 
 def _scenario_outcome(result) -> str:
-    if result.decision.severity == "L4":
-        return "已显示固定急救提示，并创建值班医护角色任务。"
-    if result.decision.severity == "L2":
-        return "已创建护士 24 小时复核任务；处理结果会进入医生简报。"
-    return "已记录患者报告事实；当前不需要新增医护处理任务。"
+    count = len(result.extraction.observations)
+    return (
+        f"原始 QuestionnaireResponse 已保存，形成 {count} 条 FHIR Observation；"
+        "未启用未经批准的临床分级或报警规则。"
+    )
 
 
 st.set_page_config(
@@ -35,7 +35,7 @@ st.subheader("最终交付不是一段 AI 回复，而是一份医生复诊前�
 st.error("仅使用合成数据 · 非诊断系统 · 不是医疗急救通道")
 
 st.markdown("## 最终要得到什么")
-st.caption("下面展示预置 L2 合成场景完成患者提交和护士处理后，医生会看到的最终结果。")
+st.caption("下面展示患者回答形成标准资源后，医生会看到的证据化结果。")
 with st.container(border=True):
     st.markdown('<div class="cc-kicker">复诊前 30 秒简报 · 合成示例</div>', unsafe_allow_html=True)
     title_col, status_col = st.columns([3, 1])
@@ -43,17 +43,17 @@ with st.container(border=True):
         st.markdown("### 陈女士（合成） · GLP1-14D")
         st.caption("14 天窗口 · 所有结论都可以展开回看患者原文和处理记录")
     with status_col:
-        st.success("L2 已处理")
+        st.info("未启用临床分级")
 
     focus, handled, confirm = st.columns(3)
     with focus:
         st.markdown("#### 本期重点")
-        st.write("患者原文报告呕吐 1 次，并报告饮水意愿降低。")
-        st.caption("来源：患者本人 · 可展开原文证据")
+        st.write("患者原文报告呕吐 1 次，并量化过去 24 小时液体摄入。")
+        st.caption("来源：QuestionnaireResponse · 可追溯到原文")
     with handled:
-        st.markdown("#### 已完成处理")
-        st.write("护士任务已确认并关闭，处理记录已进入简报。")
-        st.caption("规则、Alert、处理动作完整留痕")
+        st.markdown("#### 标准化记录")
+        st.write("生成的 Observation 使用 LOINC 编码与 UCUM 单位。")
+        st.caption("FHIR R4 资源、来源引用和抽取证据分别保存")
     with confirm:
         st.markdown("#### 复诊待确认")
         st.write("14 天窗口内有 13 天没有随访记录。")
@@ -70,7 +70,7 @@ with step_two:
     with st.container(border=True):
         st.markdown('<div class="cc-kicker">02 · 护士</div>', unsafe_allow_html=True)
         st.markdown("#### 完成医护任务")
-        st.write("确定性规则创建任务，护士确认、升级或关闭并留下记录。")
+        st.write("仅处理已经临床批准的规则；当前草案不自动分级或报警。")
 with step_three:
     with st.container(border=True):
         st.markdown('<div class="cc-kicker">03 · 医生</div>', unsafe_allow_html=True)
