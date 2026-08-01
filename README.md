@@ -29,6 +29,7 @@ CONTINUCARE_LLM_MODEL=mimo-v2.5
 CONTINUCARE_LLM_BASE_URL=https://api.xiaomimimo.com/v1
 CONTINUCARE_LLM_API_KEY_ENV=MIMO_API_KEY
 MIMO_API_KEY=your-rotated-key
+CONTINUCARE_LLM_PROMPT_VERSION=mimo-semantic-extraction-v2
 ```
 
 最小联通测试：
@@ -36,6 +37,14 @@ MIMO_API_KEY=your-rotated-key
 ```bash
 .venv/bin/python scripts/mimo_smoke_test.py
 ```
+
+10例合成文本的真实模型回归：
+
+```bash
+.venv/bin/python scripts/evaluate_mimo_live.py --fail-on-mismatch
+```
+
+评测报告默认写入 `/tmp/continucare-mimo-live-evaluation.json`。该结果属于工程验证，不能替代临床验证。
 
 密钥不会进入 AgentRun、审计日志或 Git。当前只允许官方 `*.xiaomimimo.com` HTTPS 地址，并且只发送合成演示文本。[MiMo 官方快速接入](https://mimo.mi.com/docs/en-US/quick-start/summary/first-api-call) · [JSON mode](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/structured-output)
 

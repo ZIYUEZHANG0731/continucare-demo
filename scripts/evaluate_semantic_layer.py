@@ -8,6 +8,10 @@ from pathlib import Path
 
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.care_agent import CareAgentService
+from continucare.care_agent.model_api import (
+    SemanticModelConfig,
+    UnconfiguredModelAdapter,
+)
 from continucare.care_engine import CareEngine
 from continucare.demo_data import DEMO_PATIENT_ID
 
@@ -30,8 +34,13 @@ def main() -> None:
             store = SQLiteStore(Path(directory) / f"case-{index}.db")
             engine = CareEngine(store)
             session = engine.start_or_resume(DEMO_PATIENT_ID)
-            result = CareAgentService(store, care_engine=engine).analyze(
-                session.session_id, case["text"]
+            result = CareAgentService(
+                store,
+                care_engine=engine,
+                model_adapter=UnconfiguredModelAdapter(SemanticModelConfig()),
+            ).analyze(
+                session.session_id,
+                case["text"],
             ).result
             actual_links = sorted(item.link_id for item in result.candidates)
             checks = {

@@ -63,7 +63,7 @@ class MiMoSemanticAdapter:
     """Calls MiMo JSON mode, then rebuilds governed local candidate objects."""
 
     SUPPORTED_JSON_MODELS = {"mimo-v2.5", "mimo-v2.5-pro"}
-    VERSION = "xiaomi-mimo-openai-v1"
+    VERSION = "xiaomi-mimo-openai-v2"
     _STRUCTURED_LINKS = {
         "nausea-present",
         "nausea-severity",
@@ -332,9 +332,24 @@ def _messages(task: SemanticTask) -> list[dict[str, str]]:
             "type": item.item_type,
             "question": item.text,
             "answer_options": [
-                {"code": option.code, "display": option.display}
+                {
+                    "code": option.code,
+                    "display": option.display,
+                    "semantic_aliases": option.semantic_aliases,
+                }
                 for option in item.answer_options
             ],
+            "enable_when": [
+                {
+                    "question": condition.question,
+                    "operator": condition.operator,
+                    "answer": condition.answer,
+                }
+                for condition in item.enable_when
+            ],
+            "enable_behavior": item.enable_behavior,
+            "required": item.required,
+            "repeats": item.repeats,
         }
         for item in task.allowed_items
         if item.link_id in MiMoSemanticAdapter._STRUCTURED_LINKS
@@ -348,6 +363,11 @@ Return JSON only with exactly this shape:
 
 Rules:
 - Use only the allowed link_id values below. Never emit free-text-report.
+- Evaluate every allowed item one by one. Do not stop after finding the first matching item.
+- enable_when defines the questionnaire dependency graph. Evaluate it from facts explicitly stated in patient_text.
+- A dependent item becoming enabled does not by itself supply an answer. Emit it only when patient_text explicitly supplies its value.
+- When patient_text explicitly answers both a parent item and an enabled dependent item, emit both items. One exact evidence substring may support multiple related items.
+- For choice items, semantic_aliases are governed equivalent patient expressions for that option. Map colloquial wording to exactly one allowed answer option only when it matches the display or semantic_aliases unambiguously; otherwise omit the item.
 - evidence_text must be one exact contiguous substring copied from patient_text.
 - Do not infer a 24-hour window. Use explicit_24h only when the text explicitly says 24 hours.
 - "today" is not the same as a complete past-24-hour window; use unspecified for 24-hour fields unless "24 hours" is explicit.

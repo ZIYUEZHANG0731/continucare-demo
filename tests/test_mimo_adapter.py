@@ -75,6 +75,14 @@ def test_mimo_adapter_uses_json_mode_and_local_governance(monkeypatch, tmp_path)
                     "temporality": "current",
                     "negated": False,
                 },
+                {
+                    "link_id": "nausea-severity",
+                    "answer": "LA6752-5",
+                    "evidence_text": "现在有点恶心",
+                    "subject": "patient",
+                    "temporality": "current",
+                    "negated": False,
+                },
             ],
         }
     )
@@ -90,6 +98,7 @@ def test_mimo_adapter_uses_json_mode_and_local_governance(monkeypatch, tmp_path)
     assert {item.link_id for item in interaction.result.candidates} == {
         "vomiting-count-24h",
         "nausea-present",
+        "nausea-severity",
     }
     assert interaction.result.safety_violations == []
     assert interaction.result.model_usage == {
@@ -102,6 +111,23 @@ def test_mimo_adapter_uses_json_mode_and_local_governance(monkeypatch, tmp_path)
     assert captured["payload"]["response_format"] == {"type": "json_object"}
     assert captured["payload"]["stream"] is False
     assert "过去24小时" in captured["payload"]["messages"][1]["content"]
+    system_prompt = captured["payload"]["messages"][0]["content"]
+    assert '"enable_when":[{"question":"nausea-present","operator":"=","answer":true}]' in system_prompt
+    assert "Evaluate every allowed item one by one" in system_prompt
+    assert "enabled dependent item" in system_prompt
+    nausea_severity = next(
+        item
+        for item in interaction.task.allowed_items
+        if item.link_id == "nausea-severity"
+    )
+    assert nausea_severity.enable_when[0].question == "nausea-present"
+    assert nausea_severity.enable_when[0].answer is True
+    assert nausea_severity.answer_options[0].semantic_aliases == [
+        "轻度",
+        "轻微",
+        "有点",
+    ]
+    assert '"semantic_aliases":["轻度","轻微","有点"]' in system_prompt
     assert interaction.record.model_provider == "xiaomi_mimo"
     assert interaction.record.model_name == "mimo-v2.5"
     assert "sk-test-not-a-real-secret" not in json.dumps(
@@ -114,6 +140,7 @@ def test_mimo_adapter_uses_json_mode_and_local_governance(monkeypatch, tmp_path)
     )
     assert updated.answers["vomiting-count-24h"] == 2
     assert updated.answers["nausea-present"] is True
+    assert updated.answers["nausea-severity"] == "LA6752-5"
     assert store.list_observations(DEMO_PATIENT_ID) == []
 
 

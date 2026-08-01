@@ -56,6 +56,15 @@ class AnswerOptionContract(StrictModel):
     code: str
     system: str
     display: str | None = None
+    semantic_aliases: list[str] = Field(default_factory=list)
+
+
+class EnableWhenContract(StrictModel):
+    """Provider-neutral form of a FHIR Questionnaire.enableWhen condition."""
+
+    question: str
+    operator: str
+    answer: Any
 
 
 class QuestionnaireItemContract(StrictModel):
@@ -64,6 +73,10 @@ class QuestionnaireItemContract(StrictModel):
     text: str
     codes: list[CodingContract] = Field(default_factory=list)
     answer_options: list[AnswerOptionContract] = Field(default_factory=list)
+    enable_when: list[EnableWhenContract] = Field(default_factory=list)
+    enable_behavior: str | None = None
+    required: bool = False
+    repeats: bool = False
 
 
 class SemanticTask(StrictModel):

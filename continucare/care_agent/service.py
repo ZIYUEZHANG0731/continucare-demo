@@ -13,6 +13,7 @@ from continucare.agents.contracts import (
     AgentRuntimeOutcome,
     AnswerOptionContract,
     CodingContract,
+    EnableWhenContract,
     QuestionnaireItemContract,
     SemanticCandidate,
     SemanticResult,
@@ -28,6 +29,11 @@ from continucare.care_engine import CareEngine
 from continucare.db import utc_now_iso
 from continucare.fhir.questionnaires import flatten_questionnaire_items
 from continucare.services.audit import record_audit_event
+
+
+SEMANTIC_ALIAS_EXTENSION_URL = (
+    "urn:continucare:StructureDefinition:answer-semantic-alias"
+)
 
 
 class SemanticInteraction(BaseModel):
@@ -319,10 +325,36 @@ def _questionnaire_contracts(questionnaire: dict[str, Any]):
                         code=option["valueCoding"]["code"],
                         system=option["valueCoding"]["system"],
                         display=option["valueCoding"].get("display"),
+                        semantic_aliases=[
+                            extension["valueString"]
+                            for extension in option.get("extension", [])
+                            if extension.get("url") == SEMANTIC_ALIAS_EXTENSION_URL
+                            and isinstance(extension.get("valueString"), str)
+                        ],
                     )
                     for option in item.get("answerOption", [])
                     if "valueCoding" in option
                 ],
+                enable_when=[
+                    EnableWhenContract(
+                        question=condition["question"],
+                        operator=condition["operator"],
+                        answer=_enable_when_answer(condition),
+                    )
+                    for condition in item.get("enableWhen", [])
+                ],
+                enable_behavior=item.get("enableBehavior"),
+                required=item.get("required", False),
+                repeats=item.get("repeats", False),
             )
         )
     return contracts
+
+
+def _enable_when_answer(condition: dict[str, Any]) -> Any:
+    answers = [
+        value for key, value in condition.items() if key.startswith("answer")
+    ]
+    if len(answers) != 1:
+        raise ValueError("Questionnaire.enableWhen must contain one answer[x]")
+    return answers[0]

@@ -45,6 +45,20 @@
       ],
       "answerOption": [
         {
+          "extension": [
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "轻度"
+            },
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "轻微"
+            },
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "有点"
+            }
+          ],
           "valueCoding": {
             "system": "http://loinc.org",
             "version": "2.82",
@@ -53,6 +67,20 @@
           }
         },
         {
+          "extension": [
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "中度"
+            },
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "一般"
+            },
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "比较明显"
+            }
+          ],
           "valueCoding": {
             "system": "http://loinc.org",
             "version": "2.82",
@@ -61,6 +89,20 @@
           }
         },
         {
+          "extension": [
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "重度"
+            },
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "严重"
+            },
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "非常严重"
+            }
+          ],
           "valueCoding": {
             "system": "http://loinc.org",
             "version": "2.82",
