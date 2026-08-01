@@ -73,6 +73,7 @@ class PathwayDefinition(StrictModel):
     clinical_safety_note: str
     fhir_version: Literal["4.0.1"]
     artifacts: list[FHIRArtifactReference] = Field(min_length=2)
+    observation_mapping_file: str
     evidence_document: str
     knowledge_sources: list[KnowledgeSource] = Field(min_length=1)
     clinical_rules: list[ClinicalRule] = Field(default_factory=list)

@@ -4,7 +4,7 @@
 
 本技术附录同时描述当前原型、目标系统设计和入围后计划。除非明确标注“当前已实现”，Agent编排、医院系统集成和生产级部署均属于待验证的目标能力。
 
-- **当前已实现**：使用合成数据跑通患者提交、FHIR QuestionnaireResponse/Observation、证据简报、持久化和审计；通用任务状态机可测试，但没有启用任何临床分级规则。
+- **当前已实现**：使用合成数据跑通版本锁定的 Care Session、FHIR Questionnaire 动态患者端、QuestionnaireResponse、确定性 Observation、证据简报、持久化和审计；通用任务状态机可测试，但没有启用任何临床分级规则。
 - **目标系统设计**：六个受控Agent围绕同一Clinical Memory协作，并由规则和人工审批约束。
 - **入围后计划**：接入Aily、飞书及FHIR/EMR旁路接口，开展单科室、单Pathway试点。
 - **尚未验证**：真实临床效果、医院联调状态及量化业务提升。

@@ -1,0 +1,118 @@
+{
+  "pathway_id": "pathway_glp1_14d",
+  "code": "GLP1-14D",
+  "name": "GLP-1治疗后14天患者报告采集",
+  "department": "内分泌科",
+  "version": "1.0.0",
+  "status": "draft",
+  "synthetic_only": true,
+  "description": "FHIR R4原生患者报告采集与Observation沉淀草案。当前药物安全证据以司美格鲁肽Wegovy为主，尚不能外推为全部GLP-1产品的统一临床路径。",
+  "clinical_safety_note": "本版本不包含任何自动临床分诊、报警阈值、诊断或治疗建议。真实患者使用前必须完成目标药物、适应证、人群、地区说明书、术语和院内流程的临床审批。",
+  "fhir_version": "4.0.1",
+  "artifacts": [
+    {
+      "resource_type": "Questionnaire",
+      "canonical": "urn:uuid:7f28b4c6-49a1-4cef-b6c3-37d24660f7a4",
+      "version": "1.0.0",
+      "file_name": "glp1_followup_questionnaire_v1.json"
+    },
+    {
+      "resource_type": "PlanDefinition",
+      "canonical": "urn:uuid:8f384dce-c0c3-4f7d-ac4b-e61c349e4b43",
+      "version": "1.0.0",
+      "file_name": "glp1_followup_plan_definition_v1.json"
+    }
+  ],
+  "observation_mapping_file": "mapping_artifacts/glp1_followup_observation_mapping_v1.json",
+  "evidence_document": "docs/clinical/glp1_14d_observation_evidence.md",
+  "knowledge_sources": [
+    {
+      "source_id": "hl7-fhir-r4-observation",
+      "title": "FHIR R4 Observation",
+      "source_type": "international_standard",
+      "authority": "HL7 International",
+      "url": "https://hl7.org/fhir/R4/observation.html",
+      "version": "4.0.1",
+      "applicable_section": "Resource content, scope and boundaries",
+      "accessed_at": "2026-07-31"
+    },
+    {
+      "source_id": "hl7-fhir-r4-questionnaire",
+      "title": "FHIR R4 Questionnaire and QuestionnaireResponse",
+      "source_type": "international_standard",
+      "authority": "HL7 International",
+      "url": "https://hl7.org/fhir/R4/questionnaire.html",
+      "version": "4.0.1",
+      "applicable_section": "Question structure, answer options and enableWhen",
+      "accessed_at": "2026-07-31"
+    },
+    {
+      "source_id": "loinc-2.82",
+      "title": "LOINC clinical observation terminology",
+      "source_type": "terminology_standard",
+      "authority": "Regenstrief Institute",
+      "url": "https://loinc.org/about/",
+      "version": "2.82",
+      "applicable_section": "Clinical observations and survey items",
+      "accessed_at": "2026-07-31"
+    },
+    {
+      "source_id": "snomed-ct-clinical-finding",
+      "title": "SNOMED CT Clinical Finding and Disorder",
+      "source_type": "terminology_standard",
+      "authority": "SNOMED International",
+      "url": "https://docs.snomed.org/snomed-ct-specifications/snomed-ct-editorial-guide/readme/authoring/domain-specific-modeling/clinical-finding-and-disorder",
+      "version": null,
+      "applicable_section": "Clinical findings and observations",
+      "accessed_at": "2026-07-31"
+    },
+    {
+      "source_id": "ucum",
+      "title": "Unified Code for Units of Measure",
+      "source_type": "unit_standard",
+      "authority": "Regenstrief Institute",
+      "url": "https://ucum.org/ucum",
+      "version": null,
+      "applicable_section": "Electronic communication of quantities and units",
+      "accessed_at": "2026-07-31"
+    },
+    {
+      "source_id": "ema-wegovy-epar",
+      "title": "Wegovy European Public Assessment Report and Product Information",
+      "source_type": "regulatory_product_information",
+      "authority": "European Medicines Agency",
+      "url": "https://www.ema.europa.eu/en/medicines/human/EPAR/wegovy",
+      "version": "accessed 2026-07-31",
+      "applicable_section": "Risks, adverse reactions and product information",
+      "accessed_at": "2026-07-31"
+    },
+    {
+      "source_id": "fda-wegovy-2026",
+      "title": "WEGOVY Prescribing Information",
+      "source_type": "regulatory_product_information",
+      "authority": "U.S. Food and Drug Administration",
+      "url": "https://www.accessdata.fda.gov/drugsatfda_docs/label/2026/218316s005lbl.pdf",
+      "version": "2026 label, Reference ID 5766092",
+      "applicable_section": "5.2, 5.5, 5.6, 6.1 and Patient Counseling Information",
+      "accessed_at": "2026-07-31"
+    },
+    {
+      "source_id": "jcm-glp1-gi-consensus-2022",
+      "title": "Clinical Recommendations to Manage Gastrointestinal Adverse Events in Patients Treated with GLP-1 Receptor Agonists: A Multidisciplinary Expert Consensus",
+      "source_type": "peer_reviewed_expert_consensus",
+      "authority": "Journal of Clinical Medicine",
+      "url": "https://doi.org/10.3390/jcm12010145",
+      "version": "2022;12(1):145",
+      "applicable_section": "Gastrointestinal adverse events and patient guidance",
+      "accessed_at": "2026-07-31"
+    }
+  ],
+  "clinical_rules": [],
+  "approval": {
+    "required": true,
+    "status": "not_reviewed",
+    "clinical_approver": null,
+    "terminology_approver": null,
+    "approved_at": null
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "policy_id": "patient-language-zh-CN",
+  "version": "1.0.0",
+  "status": "synthetic_demo_draft",
+  "locale": "zh-CN",
+  "templates": {
+    "confirm_explicit_count": "为了确保记录准确：过去24小时您一共呕吐了{value}次，对吗？",
+    "confirm_time_window_count": "我看到您提到呕吐了{value}次。为了记录准确，这{value}次都是发生在过去24小时内吗？",
+    "confirm_explicit_quantity": "为了确保记录准确：过去24小时您的液体摄入大约是{value}毫升，对吗？",
+    "confirm_time_window_quantity": "我看到您提到液体摄入大约{value}毫升。这个量是过去24小时的总量吗？",
+    "confirm_current_symptom": "我看到您提到{symptom}。这是您现在的情况吗？",
+    "confirm_boolean_present": "为了确保记录准确：您现在有{symptom}，对吗？",
+    "confirm_boolean_absent": "为了确保记录准确：您现在没有{symptom}，对吗？",
+    "confirm_severity": "我记录到您现在的{symptom}程度为{severity}，对吗？",
+    "resolve_conflict": "我看到同一项信息里有不同数值。为了避免记录错误，请您在完整问卷中确认最终答案。",
+    "no_structured_fact": "我会保留您的原话，但目前没有找到可以安全写入结构化问卷的明确数值。您也可以继续使用下方完整问卷。",
+    "blocked_instruction": "这段文字看起来像是在要求系统改写规则，而不是描述身体状态，因此我没有生成健康记录。请直接描述您现在的情况。",
+    "model_unavailable_fallback": "模型接口尚未配置，本次已使用本地规则完成安全演示。"
+  },
+  "clarification_options": {
+    "yes_24h": "是，发生在过去24小时内",
+    "yes_current": "是，这是我现在的情况",
+    "no": "不是",
+    "unsure": "我不确定"
+  }
+}

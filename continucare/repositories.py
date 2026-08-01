@@ -6,10 +6,12 @@ import json
 import sqlite3
 from typing import Any, Iterable
 
+from continucare.agents.contracts import AgentRunRecord
 from continucare.models import (
     Alert,
     AlertAction,
     AuditEvent,
+    CareSession,
     FollowUpMessage,
     Observation,
     Patient,
@@ -23,6 +25,18 @@ def row_to_patient(row: sqlite3.Row) -> Patient:
 
 def row_to_message(row: sqlite3.Row) -> FollowUpMessage:
     return FollowUpMessage(**dict(row))
+
+
+def row_to_care_session(row: sqlite3.Row) -> CareSession:
+    data = dict(row)
+    data["answers"] = json.loads(data.pop("answers_json"))
+    return CareSession(**data)
+
+
+def row_to_agent_run(row: sqlite3.Row) -> AgentRunRecord:
+    data = dict(row)
+    data["output_json"] = json.loads(data["output_json"])
+    return AgentRunRecord(**data)
 
 
 def row_to_observation(row: sqlite3.Row) -> Observation:

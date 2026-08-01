@@ -1,10 +1,10 @@
 # ContinuCare Demo
 
-把合成患者的院外随访输入保存为 FHIR R4 `QuestionnaireResponse`，将有明确标准语义的内容沉淀为可追溯的 `Observation`，再形成医生复诊前可审阅的证据简报。
+用版本化 FHIR R4 `Questionnaire` 动态驱动合成患者随访，并通过受控 Care Agent 把患者自由表达整理成待确认候选；患者确认后，第二层将答案保存为完整 `QuestionnaireResponse`，把明确事实确定性沉淀为可追溯的 `Observation`。
 
 > **安全边界：仅使用合成数据。系统不是医疗急救通道，不生成诊断、治疗或用药建议。**
 
-当前版本默认运行在“本地稳定演示模式”：数据写入本地 SQLite，抽取使用明确标注的本地 Mock，飞书通知使用明确标注的 Mock 适配器。无需任何外部 API Key。
+当前版本已接入小米 MiMo OpenAI-compatible 适配器；配置本地密钥时使用 `mimo-v2.5` JSON mode，未配置、超时或输出不合规时自动回退到明确标注的本地语义 Mock。无论哪种模式，Safety Agent 和患者确认门都不能绕过。飞书通知仍使用 Mock 适配器。
 
 ## 本地运行
 
@@ -19,9 +19,33 @@ python3.11 -m venv .venv
 
 打开 Streamlit 输出的本地地址即可进入首页。运行数据默认保存在 `data/continucare.db`，该目录已被 Git 忽略。
 
+## 小米 MiMo 配置
+
+复制 `.env.example` 为被 Git 忽略的 `.env`，只在本机填入轮换后的密钥：
+
+```dotenv
+CONTINUCARE_LLM_PROVIDER=xiaomi_mimo
+CONTINUCARE_LLM_MODEL=mimo-v2.5
+CONTINUCARE_LLM_BASE_URL=https://api.xiaomimimo.com/v1
+CONTINUCARE_LLM_API_KEY_ENV=MIMO_API_KEY
+MIMO_API_KEY=your-rotated-key
+```
+
+最小联通测试：
+
+```bash
+.venv/bin/python scripts/mimo_smoke_test.py
+```
+
+密钥不会进入 AgentRun、审计日志或 Git。当前只允许官方 `*.xiaomimimo.com` HTTPS 地址，并且只发送合成演示文本。[MiMo 官方快速接入](https://mimo.mi.com/docs/en-US/quick-start/summary/first-api-call) · [JSON mode](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/structured-output)
+
 ## 三个核心价值
 
 - 原始回答与 FHIR Observation 通过 `derivedFrom` 可追溯；
+- 患者端由 Questionnaire 动态渲染，结构化答案不依赖 LLM；
+- 对话式自由表达只生成候选，患者确认前不写入第二层；
+- Agent 输出通过 linkId/code、证据跨度、主语、否定、时间和单位安全检查；
+- 随访会话锁定 Pathway/Questionnaire 版本，支持草稿恢复和幂等提交；
 - LOINC、SNOMED CT 与 UCUM 映射有独立权威信源包；
 - 没有获批临床规则时采取 fail-closed，不输出风险等级或 Alert；
 - Summary 审阅和 Mock 通知进入本地审计链。
@@ -38,6 +62,8 @@ python3.11 -m venv .venv
 
 - [整体六层方案与端到端工作流](docs/14_layered_solution_blueprint.md)
 - [第一层验收报告](docs/15_layer_1_acceptance.md)
+- [第二层验收报告](docs/16_layer_2_acceptance.md)
+- [第三层验收报告](docs/17_layer_3_acceptance.md)
 - [FHIR R4 合规策略与上线门槛](docs/13_fhir_conformance_policy.md)
 - [GLP-1 指标、术语映射与权威临床信源](docs/clinical/glp1_14d_observation_evidence.md)
 - [当前 FHIR 数据模型](docs/03_data_model_fhir.md)
@@ -46,7 +72,10 @@ python3.11 -m venv .venv
 
 ## 当前实施范围
 
-- M0–M5：本地无 Key 闭环，按 [实施交接规范](CODEX_DEMO_IMPLEMENTATION_HANDOFF.md) 实现
+- 第一层工程基线：FHIR R4 契约、术语、证据、追溯和 fail-closed 治理
+- 第二层比赛工程基线：Care Session、动态 Questionnaire renderer、通用回答 Builder 和确定性 Observation 映射
+- 第三层比赛工程基线：Agent Runtime、MiMo/Care Agent 语义候选、Safety Agent、患者确认与本地回退
+- 旧 M0–M5 自由文本链继续作为兼容测试夹具，不是患者端主流程
 - M6：真实飞书/Aily 接入，明确不在第一版范围内
 
 ## 演示
@@ -63,6 +92,7 @@ python3.11 -m venv .venv
 curl -L https://hl7.org/fhir/R4/fhir.schema.json.zip -o /tmp/fhir-r4-schema.zip
 FHIR_R4_SCHEMA_ZIP=/tmp/fhir-r4-schema.zip .venv/bin/python -m pytest -q
 .venv/bin/python scripts/validate_fhir_r4.py --schema /tmp/fhir-r4-schema.zip
+.venv/bin/python scripts/evaluate_semantic_layer.py
 .venv/bin/streamlit run app.py
 ```
 

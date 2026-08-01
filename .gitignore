@@ -6,6 +6,9 @@ __pycache__/
 *.db
 *.sqlite
 data/
+!continucare/pathways/data/
+!continucare/pathways/data/**
+continucare/pathways/data/**/__pycache__/
+continucare/pathways/data/**/*.pyc
 tmp/
 .DS_Store
-

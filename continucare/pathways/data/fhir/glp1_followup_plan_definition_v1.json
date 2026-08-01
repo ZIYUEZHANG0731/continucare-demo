@@ -1,0 +1,20 @@
+{
+  "resourceType": "PlanDefinition",
+  "id": "glp1-14d-followup-plan-v1",
+  "url": "urn:uuid:8f384dce-c0c3-4f7d-ac4b-e61c349e4b43",
+  "version": "1.0.0",
+  "name": "GLP1FourteenDayFollowUpPlan",
+  "title": "GLP-1治疗后14天随访计划（临床审核草案）",
+  "status": "draft",
+  "experimental": true,
+  "date": "2026-07-31",
+  "publisher": "ContinuCare",
+  "description": "仅定义采集动作，不包含任何未经批准的临床分诊、报警阈值或治疗建议。",
+  "action": [
+    {
+      "title": "完成患者报告采集",
+      "description": "按指定Questionnaire收集患者报告并保留QuestionnaireResponse原始答案。",
+      "definitionCanonical": "urn:uuid:7f28b4c6-49a1-4cef-b6c3-37d24660f7a4|1.0.0"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "pathway_code": "GLP1-14D",
+  "pathway_version": "1.0.0",
+  "questionnaire": "urn:uuid:7f28b4c6-49a1-4cef-b6c3-37d24660f7a4|1.0.0",
+  "mappings": [
+    {
+      "link_id": "nausea-present",
+      "kind": "boolean",
+      "positive_only": true
+    },
+    {
+      "link_id": "nausea-severity",
+      "kind": "coded_choice"
+    },
+    {
+      "link_id": "vomiting-count-24h",
+      "kind": "count_per_day",
+      "effective_period_hours": 24
+    },
+    {
+      "link_id": "fluid-intake-24h-estimated",
+      "kind": "millilitres_per_24_hours",
+      "effective_period_hours": 24,
+      "accepted_quantity_unit_codes": ["mL"]
+    },
+    {
+      "link_id": "abdominal-pain-present",
+      "kind": "boolean",
+      "positive_only": true
+    }
+  ]
+}

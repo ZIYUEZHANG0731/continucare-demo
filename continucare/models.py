@@ -28,6 +28,15 @@ class AlertStatus(str, Enum):
     RESOLVED = "resolved"
 
 
+class CareSessionStatus(str, Enum):
+    """Lifecycle for one execution of a locked Questionnaire version."""
+
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    STOPPED = "stopped"
+    ENTERED_IN_ERROR = "entered_in_error"
+
+
 class Patient(StrictModel):
     patient_id: str
     display_name: str
@@ -46,6 +55,23 @@ class FollowUpMessage(StrictModel):
     submitted_at: str
     source: str = "patient_demo_web"
     processing_status: str
+
+
+class CareSession(StrictModel):
+    """Persisted Layer-2 execution state, separate from clinical FHIR data."""
+
+    session_id: str
+    patient_id: str
+    pathway_code: str
+    pathway_version: str
+    questionnaire_canonical: str
+    questionnaire_version: str
+    status: CareSessionStatus = CareSessionStatus.IN_PROGRESS
+    answers: dict[str, Any] = Field(default_factory=dict)
+    questionnaire_response_id: str | None = None
+    created_at: str
+    updated_at: str
+    completed_at: str | None = None
 
 
 class ObservationEvidence(StrictModel):

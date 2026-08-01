@@ -2,7 +2,7 @@
 
 ## 0. 实施状态
 
-本节描述入围后的六 Agent 目标架构。当前无外部 API Key 原型使用明确标注的本地 Mock 抽取和固定模板验证 FHIR 数据链；临床规则为空并采取 fail-closed，尚不能证明六 Agent 的模型效果。后续 Agent 能力必须经过结构化输出测试、安全测试和人工评审后逐步接入。
+本节同时描述六 Agent 目标架构和当前第三层实现。现已实现受控 Agent Runtime、小米 MiMo Care Agent 语义适配器、本地 Mock 回退、Safety Agent v2、字段级证据一致性、动态澄清、可解释候选去向和患者确认门。Guideline/Memory/Risk/Summary Agent 仍属于后续层或后续阶段，当前临床规则为空并采取 fail-closed，不能据此宣称六 Agent 模型效果或临床准确率。
 
 ## 1. Agent设计原则
 
@@ -145,10 +145,10 @@ flowchart TD
 1. Pathway Engine触发随访任务。
 2. Care Agent生成患者问题。
 3. 患者回复。
-4. Agent抽取Observation。
-5. 如果信息模糊，追问一个问题。
-6. 写入Communication和Observation。
-7. 调用Risk Agent或Rule Engine。
+4. Agent 只生成 Questionnaire 答案候选并给出原文证据跨度。
+5. Safety Agent 校验；信息模糊时一次追问一个问题。
+6. 患者确认后交给 Care Engine 写入 QuestionnaireResponse/Observation。
+7. 后续由经临床批准的 Rule Engine 执行风险工作流；当前保持 not_assessed。
 
 ## 5. Clinical Memory Agent
 

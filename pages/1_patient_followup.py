@@ -1,53 +1,424 @@
-"""Synthetic patient follow-up intake with outcome-first presentation."""
+"""Questionnaire-driven synthetic patient follow-up (Layer 2)."""
 
 from __future__ import annotations
 
 import html
 import json
+from typing import Any
 
 import streamlit as st
 
-from continucare.adapters.mock_extractor import MockExtractor
-from continucare.adapters.mock_notifier import MockNotifier
 from continucare.adapters.sqlite_store import SQLiteStore
-from continucare.config import get_settings
-from continucare.demo_data import DEMO_PATIENT_ID, SCENARIOS
-from continucare.presentation import (
-    alert_next_step,
-    alert_status_text,
-    observation_text,
-    owner_text,
+from continucare.agents.contracts import (
+    CandidateIssueAction,
+    SemanticResult,
+    SemanticStatus,
 )
-from continucare.services.alerts import AlertService
-from continucare.services.extraction import ExtractionService
-from continucare.services.followup import FollowUpService
-from continucare.services.workflow import FollowUpWorkflow
+from continucare.care_agent import CareAgentService
+from continucare.care_engine import CareEngine
+from continucare.config import get_settings
+from continucare.demo_data import DEMO_PATIENT_ID, STRUCTURED_SCENARIOS
+from continucare.fhir.questionnaires import (
+    flatten_questionnaire_items,
+    visible_questionnaire_items,
+)
+from continucare.fhir.r4 import FHIRValidationError
+from continucare.fhir.terminology import UCUM
+from continucare.presentation import observation_text
 from continucare.ui import inject_global_styles, render_mode_badges
 
 
-def _highlight_evidence(message_text, observations):
-    cursor = 0
-    parts = []
-    for item in sorted(observations, key=lambda value: value.evidence_start):
-        if item.evidence_start < cursor:
-            continue
-        parts.append(html.escape(message_text[cursor : item.evidence_start]))
-        parts.append(
-            '<mark style="background:#fde68a;padding:0.1rem 0.2rem;border-radius:0.2rem">'
-            + html.escape(message_text[item.evidence_start : item.evidence_end])
-            + "</mark>"
+PRESETS = {
+    "轻度恶心": STRUCTURED_SCENARIOS["恶心记录"],
+    "呕吐与摄入": STRUCTURED_SCENARIOS["呕吐与摄入记录"],
+    "仅保留原文": STRUCTURED_SCENARIOS["仅保留患者原文"],
+}
+
+
+def _widget_key(session_id: str, link_id: str) -> str:
+    return f"care::{session_id}::{link_id}"
+
+
+def _set_widget_answers(session_id: str, answers: dict[str, Any]) -> None:
+    for item in flatten_questionnaire_items(questionnaire.get("item", [])):
+        key = _widget_key(session_id, item["linkId"])
+        st.session_state[key] = _widget_value(item, answers.get(item["linkId"]))
+
+
+def _widget_value(item: dict[str, Any], value: Any) -> Any:
+    if item["type"] == "quantity" and isinstance(value, dict):
+        return value.get("value")
+    return value
+
+
+def _read_widget_answer(item: dict[str, Any], session_id: str) -> Any:
+    key = _widget_key(session_id, item["linkId"])
+    saved = session.answers.get(item["linkId"])
+    initial = _widget_value(item, saved)
+    item_type = item["type"]
+
+    if item_type == "boolean":
+        if key not in st.session_state:
+            st.session_state[key] = initial
+        return st.radio(
+            item.get("text", item["linkId"]),
+            options=[None, True, False],
+            format_func=lambda value: {None: "暂不回答", True: "是", False: "否"}[value],
+            horizontal=True,
+            key=key,
         )
-        cursor = item.evidence_end
-    parts.append(html.escape(message_text[cursor:]))
-    return '<div class="cc-quote">' + "".join(parts) + "</div>"
+
+    if item_type == "choice":
+        options = [
+            option["valueCoding"]
+            for option in item.get("answerOption", [])
+            if "valueCoding" in option
+        ]
+        option_by_code = {option["code"]: option for option in options}
+        if key not in st.session_state:
+            st.session_state[key] = initial
+        return st.radio(
+            item.get("text", item["linkId"]),
+            options=[None, *option_by_code],
+            format_func=lambda code: (
+                "暂不回答"
+                if code is None
+                else _choice_display(option_by_code[code])
+            ),
+            horizontal=True,
+            key=key,
+        )
+
+    if item_type == "integer":
+        kwargs = {"value": initial} if key not in st.session_state else {}
+        return st.number_input(
+            item.get("text", item["linkId"]),
+            min_value=0,
+            step=1,
+            key=key,
+            **kwargs,
+        )
+
+    if item_type == "decimal":
+        kwargs = {"value": initial} if key not in st.session_state else {}
+        return st.number_input(
+            item.get("text", item["linkId"]),
+            step=0.1,
+            key=key,
+            **kwargs,
+        )
+
+    if item_type == "quantity":
+        kwargs = {"value": initial} if key not in st.session_state else {}
+        value = st.number_input(
+            item.get("text", item["linkId"]),
+            min_value=0,
+            step=50,
+            key=key,
+            **kwargs,
+        )
+        st.caption("单位由当前 Pathway 锁定为 mL；不确定时可以留空。")
+        if value is None:
+            return None
+        return {"value": value, "unit": "mL", "system": UCUM, "code": "mL"}
+
+    if item_type in {"text", "string"}:
+        kwargs = {"value": initial or ""} if key not in st.session_state else {}
+        return st.text_area(
+            item.get("text", item["linkId"]),
+            placeholder="请只输入合成演示内容",
+            height=110,
+            key=key,
+            **kwargs,
+        )
+
+    st.warning(f"当前界面尚未支持题型：{item_type}")
+    return None
 
 
-def _related_alert(store, patient_id, message_id):
+def _choice_display(coding: dict[str, Any]) -> str:
+    translations = {"Mild": "轻度", "Moderate": "中度", "Severe": "重度"}
+    display = coding.get("display") or coding["code"]
+    return translations.get(display, display)
+
+
+def _has_answer(value: Any) -> bool:
+    return value is not None and not (isinstance(value, str) and not value.strip())
+
+
+def _render_latest_submission() -> None:
+    messages = store.list_messages(DEMO_PATIENT_ID)
+    if not messages:
+        st.info("尚未提交随访。完成下方问题后，这里会显示系统实际保存的标准记录。")
+        return
+    message = messages[0]
+    observations = store.list_observations_for_message(message.message_id)
+    response = store.get_questionnaire_response(message.message_id)
+    with st.container(border=True):
+        heading, state = st.columns([3, 1])
+        with heading:
+            st.markdown('<div class="cc-kicker">最近一次提交</div>', unsafe_allow_html=True)
+            st.markdown("### 回答已保存，临床风险尚未评估")
+            st.caption(message.submitted_at)
+        with state:
+            st.metric("临床分级", "未评估")
+
+        fact_col, next_col = st.columns([3, 2])
+        with fact_col:
+            st.markdown("**系统记录的患者报告事实**")
+            if observations:
+                for observation in observations:
+                    st.markdown(f"- {observation_text(observation)}")
+            else:
+                st.caption("原始回答已经保存，本次没有形成当前映射范围内的 Observation。")
+        with next_col:
+            st.markdown("**安全边界**")
+            st.info("当前没有获批临床规则，因此不生成风险等级、报警或治疗建议。")
+
+        with st.expander("查看本次 QuestionnaireResponse 与来源链"):
+            st.markdown("**患者提交内容**")
+            st.markdown(
+                '<div class="cc-quote">'
+                + "<br>".join(html.escape(line) for line in message.message_text.splitlines())
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+            if response:
+                st.caption(
+                    f"Questionnaire：{response['questionnaire']} · "
+                    f"QuestionnaireResponse/{response['id']}"
+                )
+            st.dataframe(
+                [
+                    {
+                        "患者报告事实": observation_text(item),
+                        "FHIR code": item.code,
+                        "结构化值": item.value_display,
+                        "来源": f"QuestionnaireResponse/{item.message_id}",
+                        "确认级别": item.confidence_tier.value,
+                    }
+                    for item in observations
+                ],
+                hide_index=True,
+                width="stretch",
+            )
+
+
+def _semantic_state_key(name: str, *parts: str) -> str:
+    return "::".join(("semantic", name, session.session_id, *parts))
+
+
+def _render_conversation_assist() -> None:
+    """Hybrid chat/card UX; only a patient action can update the Layer-2 draft."""
+
+    st.markdown("### 先用一句话告诉我今天的情况")
+    st.caption(
+        "Care Agent 只提出问卷候选答案；Safety Agent 校验后，仍需您确认才会写入草稿。"
+    )
+    with st.chat_message("assistant"):
+        st.write(
+            "您可以像聊天一样描述，例如：过去24小时吐了2次，现在有点恶心。"
+        )
+        st.caption("请勿输入真实患者信息；当前仅用于合成数据演示。")
+
+    run_key = _semantic_state_key("latest_run")
+    run_id = st.session_state.get(run_key)
+    if run_id:
+        record = store.get_agent_run(run_id)
+        if record and record.session_id == session.session_id:
+            result = SemanticResult.model_validate(record.output_json)
+            _render_semantic_result(record, result)
+
+    text_key = _semantic_state_key("input")
+    patient_text = st.text_area(
+        "输入身体状态",
+        placeholder="例如：过去24小时我吐了2次，现在有点恶心。",
+        height=92,
+        key=text_key,
+        label_visibility="collapsed",
+    )
+    analyze_clicked = st.button(
+        "让 Care Agent 帮我整理",
+        type="primary",
+        width="stretch",
+        key=_semantic_state_key("analyze"),
+    )
+    if analyze_clicked:
+        if not patient_text.strip():
+            st.warning("请先输入一段合成的身体状态描述。")
+        else:
+            try:
+                interaction = agent_service.analyze(session.session_id, patient_text)
+                st.session_state[run_key] = interaction.result.run_id
+                st.rerun()
+            except ValueError as exc:
+                st.warning(str(exc))
+
+
+def _render_semantic_result(record, result: SemanticResult) -> None:
+    with st.chat_message("user"):
+        st.write(record.input_text)
+    with st.chat_message("assistant"):
+        if result.mode == "local_semantic_mock":
+            st.caption("本地语义 Mock · 未调用外部模型 · Safety Agent v2 已检查")
+        else:
+            st.caption(
+                f"小米 MiMo {record.model_name or ''} · JSON mode · "
+                "Safety Agent v2 已检查"
+            )
+
+        if result.status == SemanticStatus.BLOCKED:
+            st.warning(_human_reason(result) or "这段文字不能安全转换为健康记录。")
+            return
+
+        confirmed_key = _semantic_state_key("confirmed", result.run_id)
+        confirmed = set(st.session_state.get(confirmed_key, []))
+        available = [
+            item for item in result.candidates if item.candidate_id not in confirmed
+        ]
+        if available:
+            st.markdown("**请确认我整理的内容**")
+            selected: list[str] = []
+            for candidate in available:
+                with st.container(border=True):
+                    st.write(candidate.patient_message)
+                    st.caption(f"依据原话：‘{candidate.evidence_text}’")
+                    if st.checkbox(
+                        "这项记录正确",
+                        value=True,
+                        key=_semantic_state_key("select", candidate.candidate_id),
+                    ):
+                        selected.append(candidate.candidate_id)
+            confirm_col, modify_col = st.columns([1.4, 1])
+            with confirm_col:
+                if st.button(
+                    "确认所选记录",
+                    type="primary",
+                    width="stretch",
+                    key=_semantic_state_key("confirm", result.run_id),
+                    disabled=not selected,
+                ):
+                    try:
+                        updated = agent_service.confirm_candidates(result.run_id, selected)
+                        st.session_state[confirmed_key] = [*confirmed, *selected]
+                        _set_widget_answers(session.session_id, updated.answers)
+                        st.rerun()
+                    except ValueError as exc:
+                        st.warning(str(exc))
+            with modify_col:
+                st.caption("如有不准确，请取消勾选，或在下方完整问卷中修改。")
+        elif result.candidates:
+            st.success("这些候选已由您确认，并保存到下方问卷草稿。")
+
+        resolved_key = _semantic_state_key("resolved", result.run_id)
+        resolved = set(st.session_state.get(resolved_key, []))
+        pending_clarifications = [
+            item
+            for item in result.clarifications
+            if item.clarification_id not in resolved
+        ]
+        for clarification in pending_clarifications:
+            st.markdown("**还需要确认一个细节**")
+            st.write(clarification.prompt)
+            columns = st.columns(len(clarification.options))
+            for column, option in zip(columns, clarification.options):
+                with column:
+                    if st.button(
+                        option.label,
+                        width="stretch",
+                        key=_semantic_state_key(
+                            "clarify",
+                            clarification.clarification_id,
+                            option.option_id,
+                        ),
+                    ):
+                        try:
+                            updated = agent_service.resolve_clarification(
+                                result.run_id,
+                                clarification.clarification_id,
+                                option.option_id,
+                            )
+                            st.session_state[resolved_key] = [
+                                *resolved,
+                                clarification.clarification_id,
+                            ]
+                            _set_widget_answers(session.session_id, updated.answers)
+                            st.rerun()
+                        except ValueError as exc:
+                            st.warning(str(exc))
+        if result.clarifications and not pending_clarifications:
+            st.info("澄清已处理；只有您明确确认的内容才进入问卷草稿。")
+
+        if result.status == SemanticStatus.NO_MATCH:
+            st.info(_human_reason(result) or "暂时没有可安全结构化的明确事实。")
+            verbatim_key = _semantic_state_key("verbatim", result.run_id)
+            if st.session_state.get(verbatim_key):
+                st.success("原话已保存到问卷草稿，未生成结构化临床事实。")
+            elif st.button(
+                "确认仅保存原话",
+                width="stretch",
+                key=_semantic_state_key("save_original", result.run_id),
+            ):
+                try:
+                    updated = agent_service.confirm_original_text(result.run_id)
+                    st.session_state[verbatim_key] = True
+                    _set_widget_answers(session.session_id, updated.answers)
+                    st.rerun()
+                except ValueError as exc:
+                    st.warning(str(exc))
+
+        _render_candidate_issues(result)
+
+
+def _render_candidate_issues(result: SemanticResult) -> None:
+    if not result.candidate_issues:
+        return
+    st.markdown("**Safety Agent 的处理说明**")
+    for issue in result.candidate_issues:
+        with st.container(border=True):
+            if issue.action == CandidateIssueAction.CLARIFICATION_REQUIRED:
+                st.info(f"需要患者确认：{issue.field_label}")
+            else:
+                st.warning(f"未采用模型候选：{issue.field_label}")
+            st.write(issue.explanation)
+            st.caption(
+                f"模型尝试整理为：{_display_issue_answer(issue.proposed_answer)}"
+            )
+            st.caption(f"引用原话：‘{issue.evidence_text}’")
+            st.caption(
+                "判断依据："
+                + "；".join(_display_reason_code(code) for code in issue.reason_codes)
+            )
+
+
+def _display_issue_answer(answer: Any) -> str:
+    if answer is True:
+        return "是"
+    if answer is False:
+        return "否"
+    if isinstance(answer, dict) and "value" in answer:
+        return f"{answer['value']} {answer.get('unit', '')}".strip()
+    return str(answer)
+
+
+def _display_reason_code(code: str) -> str:
+    labels = {
+        "time_window_not_explicit": "需要明确是否覆盖完整过去24小时",
+        "current_status_not_explicit": "需要明确是否为当前情况",
+        "evidence_concept_mismatch": "引用原话与目标症状不一致",
+        "evidence_negation_mismatch": "有/无判断与患者原话不一致",
+        "subject_not_patient": "描述对象不是患者本人",
+        "invalid_evidence_span": "引用内容无法在患者原话中找到",
+    }
+    return labels.get(code, "候选未通过当前安全规则")
+
+
+def _human_reason(result: SemanticResult) -> str | None:
     return next(
         (
-            alert
-            for alert in store.list_alerts(patient_id)
-            if message_id in alert.evidence_refs
+            reason
+            for reason in reversed(result.ignored_reasons)
+            if any("\u4e00" <= char <= "\u9fff" for char in reason)
         ),
         None,
     )
@@ -69,148 +440,117 @@ if patient is None:
     st.error("合成患者初始化失败，请返回首页重置 Demo。")
     st.stop()
 
-submission_notice = st.session_state.pop("submission_notice", None)
-if submission_notice:
-    st.success(submission_notice)
+engine = CareEngine(store)
+session = engine.start_or_resume(DEMO_PATIENT_ID)
+questionnaire = engine.questionnaire_for_session(session)
+agent_service = CareAgentService(store, care_engine=engine)
 
-messages = store.list_messages(DEMO_PATIENT_ID)
-latest_message = messages[0] if messages else None
+notice = st.session_state.pop("care_submission_notice", None)
+if notice:
+    st.success(notice)
 
-st.markdown("## 本次随访产生了什么结果")
-if latest_message is None:
-    st.info("尚未提交随访。提交后，这里会直接显示记录结果、是否创建医护任务以及下一步。")
-else:
-    latest_observations = store.list_observations_for_message(latest_message.message_id)
-    latest_alert = _related_alert(store, DEMO_PATIENT_ID, latest_message.message_id)
+st.markdown("## 最近一次随访结果")
+_render_latest_submission()
 
-    with st.container(border=True):
-        st.markdown('<div class="cc-kicker">本次处理结果</div>', unsafe_allow_html=True)
-        summary_col, status_col = st.columns([3, 1])
-        with summary_col:
-            if latest_alert and latest_alert.status.value == "resolved":
-                st.markdown("### 医护任务已完成，处理结果已进入医生简报")
-            elif latest_alert and latest_alert.severity == "L4":
-                st.markdown("### 已显示固定急救提示，并创建值班医护任务")
-            elif latest_alert:
-                st.markdown("### 已创建护士 24 小时复核任务")
-            else:
-                st.markdown("### 已保存本次患者报告和可确认的标准化事实")
-        with status_col:
-            if latest_alert:
-                st.metric("工作流状态", f"{latest_alert.severity} · {alert_status_text(latest_alert)}")
-            else:
-                st.metric("临床分级", "未评估")
-
-        st.markdown("**患者本次原话**")
-        st.markdown(
-            f'<div class="cc-quote">{html.escape(latest_message.message_text)}</div>',
-            unsafe_allow_html=True,
-        )
-
-        st.markdown("**系统记录的患者报告事实**")
-        if latest_observations:
-            fact_html = "".join(
-                f'<span class="cc-fact">{html.escape(observation_text(item))}</span>'
-                for item in latest_observations
-            )
-            st.markdown(fact_html, unsafe_allow_html=True)
-        else:
-            st.caption("本次原文已保存，但没有形成预置演示范围内的结构化事实。")
-
-        st.markdown("**下一步**")
-        if latest_alert and latest_alert.status.value == "resolved":
-            st.success(
-                "医护任务已经完成并留痕。医生生成复诊前简报后，可以看到患者原话、"
-                "规则触发原因和最终处理记录。"
-            )
-            st.caption(f"最终处理结果：{latest_alert.resolution_reason or '任务已完成'}")
-        elif latest_alert:
-            st.info(alert_next_step(latest_alert))
-            st.caption(
-                f"当前责任角色：{owner_text(latest_alert.owner_role)} · "
-                f"任务状态：{alert_status_text(latest_alert)}"
-            )
-        else:
-            st.info(
-                "本次报告已进入随访时间线。当前没有获批的自动临床规则，"
-                "因此系统不生成风险等级或医护任务。"
-            )
-
-        with st.expander("为什么会得到这个结果？查看原文证据与结构化记录"):
-            st.markdown("**原文中被采用的证据**")
-            st.markdown(
-                _highlight_evidence(latest_message.message_text, latest_observations),
-                unsafe_allow_html=True,
-            )
-            st.dataframe(
-                [
-                    {
-                        "患者报告事实": observation_text(item),
-                        "FHIR code": item.code,
-                        "code system": item.code_system,
-                        "结构化值": json.dumps(item.value, ensure_ascii=False),
-                        "原文证据": item.evidence_text,
-                        "证据位置": f"{item.evidence_start}:{item.evidence_end}",
-                    }
-                    for item in latest_observations
-                ],
-                hide_index=True,
-                width="stretch",
-            )
-            st.caption(
-                "FHIR Observation 与原始 QuestionnaireResponse 分开保存，"
-                "并通过 derivedFrom 建立来源关系。"
-            )
-
-st.markdown("## 提交一条新的合成随访")
-profile, intake = st.columns([1, 2])
+st.markdown("## 完成本次随访")
+profile, form_area = st.columns([1, 2.15], gap="large")
 with profile:
     with st.container(border=True):
-        st.markdown("#### 当前路径")
-        st.write(patient.display_name)
-        st.write(f"Pathway：{patient.pathway_code}")
+        st.markdown('<div class="cc-kicker">版本已锁定</div>', unsafe_allow_html=True)
+        st.markdown(f"### {patient.display_name}")
+        st.write(f"Pathway：`{session.pathway_code}`")
+        st.write(f"版本：`{session.pathway_version}`")
+        st.write(f"问卷：`{session.questionnaire_version}`")
         st.write(f"下次复诊：{patient.next_visit_date}")
-        st.caption(f"患者 ID：{patient.patient_id} · 合成患者")
+        st.caption(f"会话：{session.session_id} · 合成患者")
+    with st.container(border=True):
+        st.markdown("#### 填写说明")
+        st.write("问题和选项来自已锁定的 FHIR Questionnaire，不由模型临时生成。")
+        st.write("不确定的数量可以留空，并在补充说明中保留原话。")
+        st.write("保存草稿后，可在同一设备继续填写。")
 
-with intake:
-    scenario_columns = st.columns(3)
-    for column, (label, text) in zip(scenario_columns, SCENARIOS.items()):
+with form_area:
+    with st.container(border=True):
+        _render_conversation_assist()
+
+    st.markdown("### 或直接填写完整问卷")
+    st.caption("对话整理的确认结果会同步到这里；完整问卷始终是可检查、可修改的兜底入口。")
+    st.markdown(f"### {questionnaire.get('title', '患者报告采集')}")
+    st.caption(questionnaire.get("description", ""))
+    preset_columns = st.columns(len(PRESETS))
+    for column, (label, preset) in zip(preset_columns, PRESETS.items()):
         with column:
-            if st.button(label, width="stretch"):
-                st.session_state["followup_draft"] = text
+            if st.button(f"载入：{label}", width="stretch", key=f"preset::{label}"):
+                engine.save_draft(session.session_id, preset)
+                _set_widget_answers(session.session_id, preset)
+                st.rerun()
 
-    with st.form("patient_message_form", clear_on_submit=True):
-        message_text = st.text_area(
-            "今天的身体状态如何？",
-            key="followup_draft",
-            height=120,
-            placeholder="请只输入演示用的合成内容",
-        )
-        submitted = st.form_submit_button("提交并查看结果", type="primary")
-    if submitted:
-        try:
-            workflow = FollowUpWorkflow(
-                FollowUpService(store),
-                ExtractionService(store, MockExtractor()),
-                AlertService(store, MockNotifier()),
+    answers: dict[str, Any] = {}
+    all_items = flatten_questionnaire_items(questionnaire.get("item", []))
+    for item in all_items:
+        if item["type"] in {"display", "group"}:
+            continue
+        visible_ids = {
+            question["linkId"]
+            for question in visible_questionnaire_items(questionnaire, answers)
+        }
+        if item["linkId"] not in visible_ids:
+            st.session_state.pop(
+                _widget_key(session.session_id, item["linkId"]), None
             )
-            result = workflow.submit(DEMO_PATIENT_ID, message_text)
-            if result.alert:
-                notice = "提交成功：已记录患者报告，并创建护士复核任务。"
-            else:
-                notice = (
-                    "提交成功：FHIR 原始回答已保存；当前未启用自动临床分级。"
-                )
-            st.session_state["submission_notice"] = notice
+            continue
+        with st.container(border=True):
+            value = _read_widget_answer(item, session.session_id)
+            if _has_answer(value):
+                answers[item["linkId"]] = value
+            if item.get("required"):
+                st.caption("必填")
+            elif item["type"] != "quantity":
+                st.caption("可选；不确定时可以暂不回答")
+
+    visible_count = len(visible_questionnaire_items(questionnaire, answers))
+    answered_count = sum(_has_answer(value) for value in answers.values())
+    st.progress(
+        answered_count / visible_count if visible_count else 0,
+        text=f"已回答 {answered_count} / 当前可见 {visible_count} 个问题",
+    )
+
+    save_col, submit_col, stop_col = st.columns([1, 1.4, 1])
+    with save_col:
+        save_clicked = st.button("保存草稿", width="stretch")
+    with submit_col:
+        submit_clicked = st.button(
+            "确认并提交", type="primary", width="stretch"
+        )
+    with stop_col:
+        stop_clicked = st.button("放弃本次", width="stretch")
+
+    try:
+        if save_clicked:
+            engine.save_draft(session.session_id, answers)
+            st.success("草稿已保存。问题版本和当前答案均已锁定。")
+        if submit_clicked:
+            result = engine.complete(session.session_id, answers)
+            st.session_state["care_submission_notice"] = (
+                "提交成功：完整 QuestionnaireResponse 已保存，形成 "
+                f"{len(result.observations)} 条患者确认的 Observation；临床风险未评估。"
+            )
             st.rerun()
-        except ValueError as exc:
-            st.warning(str(exc))
+        if stop_clicked:
+            engine.stop(session.session_id)
+            st.session_state["care_submission_notice"] = "本次草稿已停止，未形成临床事实。"
+            st.rerun()
+    except (ValueError, FHIRValidationError) as exc:
+        st.warning(str(exc))
 
-if len(messages) > 1:
-    with st.expander(f"查看更早的随访记录（{len(messages) - 1} 条）"):
-        for message in messages[1:]:
-            st.markdown(f"- {message.submitted_at} · {message.message_text}")
-
-with st.expander("演示模式说明"):
+with st.expander("第二层与第三层执行边界"):
     render_mode_badges(st)
-    st.caption("抽取为本地规则/模板 Mock；所有数据均为合成数据。")
+    st.write("第三层只生成候选与澄清问题，不能直接写 FHIR、生成风险等级或创建 Alert。")
+    st.write("患者确认后，答案才交给第二层完成问卷校验、条件分支和 Observation 映射。")
+    if agent_service.agent.model_adapter.configured:
+        st.write(
+            "小米 MiMo API 已配置；模型只生成候选，异常时自动回退本地语义 Mock。"
+        )
+    else:
+        st.write("MiMo API Key 未配置；系统使用本地语义 Mock 安全回退。")
+    st.caption("当前 Pathway 为 draft / synthetic_only / not_reviewed。")

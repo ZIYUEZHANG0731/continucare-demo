@@ -15,6 +15,8 @@
 | [02_system_architecture.md](02_system_architecture.md) | 系统架构、模块职责、数据流、部署和集成方式 |
 | [14_layered_solution_blueprint.md](14_layered_solution_blueprint.md) | 今天确定的六层方案、前后端/Agent边界和端到端工作流 |
 | [15_layer_1_acceptance.md](15_layer_1_acceptance.md) | 第一层交付物、验收结果、剩余工程项和医院上线阻断项 |
+| [16_layer_2_acceptance.md](16_layer_2_acceptance.md) | 第二层 Care Engine、动态患者端、确定性映射、验收结果和生产缺口 |
+| [17_layer_3_acceptance.md](17_layer_3_acceptance.md) | 第三层 Agent 契约、语义确认、Safety Agent、模型接口与验收结果 |
 | [03_data_model_fhir.md](03_data_model_fhir.md) | FHIR风格数据模型和核心实体关系 |
 | [13_fhir_conformance_policy.md](13_fhir_conformance_policy.md) | FHIR R4 合规策略、验证层级和上线门槛 |
 | [clinical/glp1_14d_observation_evidence.md](clinical/glp1_14d_observation_evidence.md) | GLP-1 指标、术语映射与权威临床信源 |

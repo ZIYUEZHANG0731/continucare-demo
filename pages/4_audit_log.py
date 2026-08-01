@@ -29,6 +29,17 @@ def _event_detail(event) -> str:
     if event.event_type == "extraction_completed":
         count = len(details.get("observation_refs", []))
         return f"从患者原文形成 {count} 条带证据引用的患者报告事实。"
+    if event.event_type == "semantic_analysis_completed":
+        return (
+            f"Care Agent 以 {details.get('mode', '—')} 模式提出候选；"
+            f"生成 {details.get('clarification_count', 0)} 个澄清问题，"
+            f"Safety Agent 拦截 {details.get('safety_violation_count', 0)} 项。"
+        )
+    if event.event_type == "semantic_candidate_patient_decision":
+        return (
+            f"患者决定：{details.get('decision', '—')}；"
+            f"确认字段 {', '.join(details.get('confirmed_link_ids', [])) or '无'}。"
+        )
     if event.event_type == "risk_rule_matched":
         return f"规则命中，工作流优先级为 {details.get('severity', '—')}。"
     if event.event_type == "risk_evaluated":

@@ -71,81 +71,81 @@ FIGURES_BY_DOC = {
     "02_system_architecture.md": [
         (
             "figma_architecture_clean_v2.png",
-            "图 2-1 Figwright中文重绘系统架构图：从患者院外信号到医生工作台的连续照护操作系统。",
+            "图 2-1 目标系统架构：从患者院外信号到医生工作台的连续照护系统。",
         ),
         (
             "figwright_pathway_config_sequence_v1.png",
-            "图 2-2 Figwright重绘Pathway配置时序图：AI建议、临床审批、安全审查与发布边界。",
+            "图 2-2 Pathway配置时序：AI建议、临床审批、安全审查与发布边界。",
         ),
         (
             "figwright_followup_data_sequence_v1.png",
-            "图 2-3 Figwright重绘随访数据流：患者回复如何转化为Observation并触发规则引擎。",
+            "图 2-3 随访数据流：患者回复如何转化为Observation并触发规则引擎。",
         ),
         (
             "figwright_summary_sequence_v1.png",
-            "图 2-4 Figwright重绘复诊摘要流：长期记忆、Summary草稿、安全检查和医生审阅。",
+            "图 2-4 复诊摘要流：长期记忆、Summary草稿、安全检查和医生审阅。",
         ),
     ],
     "03_data_model_fhir.md": [
         (
             "figma_data_model_clean_v2.png",
-            "图 3-1 Figwright中文重绘FHIR风格资源模型：Patient锚点、核心资源与派生记忆层。",
+            "图 3-1 FHIR风格资源模型：Patient锚点、核心资源与派生记忆层。",
         )
     ],
     "04_pathway_engine.md": [
         (
             "figma_pathway_engine_clean_v2.png",
-            "图 4-1 Figwright中文重绘Clinical Pathway Engine：从路径创建到运行态对象的配置闭环。",
+            "图 4-1 Clinical Pathway Engine：从路径创建到运行态对象的配置闭环。",
         ),
         (
             "figwright_pathway_lifecycle_v1.png",
-            "图 4-2 Figwright重绘Pathway生命周期：Draft、Clinical Review、Pilot、Active与Retired。",
+            "图 4-2 Pathway生命周期：Draft、Clinical Review、Pilot、Active与Retired。",
         ),
     ],
     "05_ai_agents.md": [
         (
             "figma_agent_operating_model_clean.png",
-            "图 5-1 Figwright中文重绘Agent Operating Model：设计时、运行时与Safety Agent边界。",
+            "图 5-1 Agent Operating Model：设计时、运行时与Safety Agent边界。",
         )
     ],
     "06_safety_and_governance.md": [
         (
             "figwright_safety_emergency_v1.png",
-            "图 6-1 Figwright重绘安全与应急工作流：规则、置信度、证据链与人工审批边界。",
+            "图 6-1 安全与应急工作流：规则、置信度、证据链与人工审批边界。",
         )
     ],
     "07_workbench_and_patient_app.md": [
         (
             "figwright_workbench_information_architecture_v1.png",
-            "图 7-1 Figwright重绘页面信息架构：医生、护士、患者和Pathway工具的工作流关系。",
+            "图 7-1 页面信息架构：医生、护士、患者和Pathway工具的工作流关系。",
         ),
         (
             "figwright_doctor_workbench_v1.png",
-            "图 7-2 Figwright重绘医生工作台：风险中心、患者时间线与复诊摘要的页面逻辑。",
+            "图 7-2 医生工作台：风险中心、患者时间线与复诊摘要的页面逻辑。",
         ),
         (
             "figwright_patient_followup_v1.png",
-            "图 7-3 Figwright重绘患者端随访：提醒、动态追问、教育与结构化Observation输出。",
+            "图 7-3 患者端随访：提醒、动态追问、教育与结构化Observation输出。",
         ),
     ],
     "08_demo_script.md": [
         (
             "figwright_care_workflow_v2.png",
-            "图 8-1 Figwright重绘完整业务流程：从出院到复诊前Summary的人机协同闭环。",
+            "图 8-1 完整业务流程：从诊后到复诊前Summary的人机协同闭环。",
         )
     ],
     "11_wireframes_and_visuals.md": [
         (
             "figwright_clinician_wireframes_v1.png",
-            "图 11-1 Figwright重绘临床工作台线框合集：Dashboard、Patient Detail、Summary、Timeline与Trends。",
+            "图 11-1 临床工作台线框合集：Dashboard、Patient Detail、Summary、Timeline与Trends。",
         ),
         (
             "figwright_operations_wireframes_v1.png",
-            "图 11-2 Figwright重绘运营处理线框合集：Risk Center、Alert Detail与Pathway Studio。",
+            "图 11-2 运营处理线框合集：Risk Center、Alert Detail与Pathway Studio。",
         ),
         (
             "figwright_patient_wireframes_v1.png",
-            "图 11-3 Figwright重绘患者端线框合集：聊天随访、快速打卡与结构化Observation输出。",
+            "图 11-3 患者端线框合集：聊天随访、快速打卡与结构化Observation输出。",
         ),
     ],
 }
@@ -341,12 +341,12 @@ class CoverPage(Flowable):
         c.roundRect(0, h - 15 * mm, 72 * mm, 5 * mm, 2, stroke=0, fill=1)
         c.setFillColor(DARK)
         c.setFont(FONT, 27)
-        c.drawString(0, h - 31 * mm, "AI Native Doctor Copilot")
+        c.drawString(0, h - 31 * mm, "ContinuCare Copilot")
         c.setFont(FONT, 17)
-        c.drawString(0, h - 43 * mm, "产品需求与系统设计说明书")
+        c.drawString(0, h - 43 * mm, "参赛技术附录：产品需求与目标系统设计")
         c.setFillColor(MUTED)
         c.setFont(FONT, 10.5)
-        c.drawString(0, h - 54 * mm, "Continuous Care Operating System / v0.1")
+        c.drawString(0, h - 54 * mm, "Continuous Care System / v0.1")
 
         y = h - 88 * mm
         c.setFillColor(DARK)
@@ -356,9 +356,9 @@ class CoverPage(Flowable):
         c.setFillColor(TEXT)
         c.setFont(FONT, 10.5)
         lines = [
-            "面向医院的连续照护操作系统。",
-            "不替代医生诊断和治疗，而是在患者离院后持续收集、理解、整理和总结健康状态。",
-            "在复诊前向医生提供可审阅、可解释、可追溯的患者连续健康记忆。",
+            "本方案面向医院诊后至复诊之间的信息断层。",
+            "目标系统协助医护收集、理解和整理院外变化，不承担诊断、治疗或用药决策。",
+            "当前合成数据原型已跑通患者、护士、医生三端闭环；其余能力按路线图验证。",
         ]
         for line in lines:
             c.drawString(0, y, line)
@@ -373,10 +373,10 @@ class CoverPage(Flowable):
         c.setFont(FONT, 9.6)
         c.setFillColor(TEXT)
         guards = [
-            "AI不诊断、不改药、不决定治疗方案。",
-            "医生确认Care Pathway，并负责最终临床决策。",
-            "高风险判断由规则引擎和人工流程兜底。",
-            "所有临床摘要必须有证据链、置信度和审计记录。",
+            "AI在本方案中不得生成诊断、治疗或用药建议。",
+            "Care Pathway、关键规则和正式临床输出均需医护审批。",
+            "关键风险分级由经审批的确定性规则执行，模型仅辅助理解与整理。",
+            "Aily、飞书及HIS/EMR真实联调属于入围后的计划，不作为当前成果陈述。",
         ]
         gy = y - 15 * mm
         for item in guards:
@@ -386,7 +386,7 @@ class CoverPage(Flowable):
 
         c.setFillColor(MUTED)
         c.setFont(FONT, 8.5)
-        c.drawString(0, 10 * mm, f"Generated {datetime.now().strftime('%Y-%m-%d')} from docs/*.md")
+        c.drawString(0, 10 * mm, f"参赛技术附录 · v0.1 · {datetime.now().strftime('%Y-%m-%d')} · 仅使用合成演示数据")
         c.restoreState()
 
 
@@ -1048,7 +1048,7 @@ def on_page(canvas, doc):
         canvas.line(LEFT, PAGE_H - 12 * mm, PAGE_W - RIGHT, PAGE_H - 12 * mm)
         canvas.setFillColor(MUTED)
         canvas.setFont(FONT, 7.5)
-        canvas.drawString(LEFT, PAGE_H - 9 * mm, "AI Native Doctor Copilot · Product & System Design")
+        canvas.drawString(LEFT, PAGE_H - 9 * mm, "ContinuCare Copilot · 参赛技术附录")
         canvas.drawRightString(PAGE_W - RIGHT, 9 * mm, f"Page {page}")
     canvas.restoreState()
 
@@ -1062,7 +1062,7 @@ def main():
         rightMargin=RIGHT,
         topMargin=TOP,
         bottomMargin=BOTTOM,
-        title="AI Native Doctor Copilot Product and System Design",
+        title="ContinuCare Copilot Competition Technical Appendix",
         author="ContinuCare Copilot Team",
     )
     story = build_story()

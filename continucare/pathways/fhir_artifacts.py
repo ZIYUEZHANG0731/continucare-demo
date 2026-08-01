@@ -16,6 +16,12 @@ def load_glp1_plan_definition() -> dict:
     return _load("glp1_followup_plan_definition_v1.json", "PlanDefinition")
 
 
+def load_fhir_artifact(file_name: str, resource_type: str) -> dict:
+    """Load a governed built-in artifact by its manifest reference."""
+
+    return _load(file_name, resource_type)
+
+
 def _load(name: str, resource_type: str) -> dict:
     data_dir = files("continucare.pathways.data.fhir")
     resource = json.loads(data_dir.joinpath(name).read_text("utf-8"))

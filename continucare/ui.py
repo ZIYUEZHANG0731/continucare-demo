@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 
 def inject_global_styles(st) -> None:
     st.markdown(
@@ -63,12 +65,23 @@ def inject_global_styles(st) -> None:
 
 
 def render_mode_badges(st) -> None:
+    model_label = html.escape(semantic_model_label())
     st.markdown(
-        """
+        f"""
         <span class="cc-mode-chip">本地稳定演示</span>
-        <span class="cc-mode-chip">规则/模板 Mock 抽取</span>
+        <span class="cc-mode-chip">{model_label}</span>
+        <span class="cc-mode-chip">Safety Agent v2</span>
         <span class="cc-mode-chip">SQLite 持久化</span>
         <span class="cc-mode-chip">飞书通知 Mock · 未联调</span>
         """,
         unsafe_allow_html=True,
     )
+
+
+def semantic_model_label() -> str:
+    from continucare.care_agent.model_api import build_model_adapter
+
+    adapter = build_model_adapter()
+    if adapter.configured:
+        return f"MiMo {adapter.config.model_name} 已启用"
+    return "Care Agent 语义 Mock 回退"

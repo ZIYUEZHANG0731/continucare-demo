@@ -1,6 +1,6 @@
 # 07. 医生工作台与患者端设计
 
-> **治理提示：** 本文含目标态页面示例。当前患者端只保存 FHIR QuestionnaireResponse、显示有标准依据的 Observation，并明确显示“未评估”；旧 L2/L4 页面文案不代表现行功能。
+> **治理提示：** 本文含目标态页面示例。当前患者端已由版本锁定的 FHIR Questionnaire 动态驱动，保存 QuestionnaireResponse、确定性映射有标准依据的 Observation，并明确显示“未评估”；旧 L2/L4 页面文案不代表现行功能。
 
 ## 1. 设计原则
 

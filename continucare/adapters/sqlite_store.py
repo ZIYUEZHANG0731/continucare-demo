@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from continucare.agents.contracts import AgentRunRecord
 from continucare.db import connect, initialize_database
 from continucare.fhir.r4 import FHIRValidationError, validate_r4_resource
 from continucare.fhir.references import (
@@ -14,6 +15,8 @@ from continucare.models import (
     Alert,
     AlertAction,
     AuditEvent,
+    CareSession,
+    CareSessionStatus,
     FollowUpMessage,
     Observation,
     Patient,
@@ -22,7 +25,9 @@ from continucare.models import (
 from continucare.repositories import (
     row_to_alert,
     row_to_alert_action,
+    row_to_agent_run,
     row_to_audit_event,
+    row_to_care_session,
     row_to_message,
     row_to_observation,
     row_to_patient,
@@ -42,6 +47,274 @@ class SQLiteStore:
                 "SELECT * FROM patients WHERE patient_id = ?", (patient_id,)
             ).fetchone()
         return row_to_patient(row) if row else None
+
+    def save_care_session(self, session: CareSession) -> None:
+        with connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO care_sessions (
+                    session_id, patient_id, pathway_code, pathway_version,
+                    questionnaire_canonical, questionnaire_version, status,
+                    answers_json, questionnaire_response_id, created_at,
+                    updated_at, completed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session.session_id,
+                    session.patient_id,
+                    session.pathway_code,
+                    session.pathway_version,
+                    session.questionnaire_canonical,
+                    session.questionnaire_version,
+                    session.status.value,
+                    json.dumps(session.answers, ensure_ascii=False),
+                    session.questionnaire_response_id,
+                    session.created_at,
+                    session.updated_at,
+                    session.completed_at,
+                ),
+            )
+
+    def get_care_session(self, session_id: str) -> CareSession | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM care_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return row_to_care_session(row) if row else None
+
+    def get_active_care_session(
+        self, patient_id: str, pathway_code: str
+    ) -> CareSession | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM care_sessions
+                WHERE patient_id = ? AND pathway_code = ? AND status = 'in_progress'
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (patient_id, pathway_code),
+            ).fetchone()
+        return row_to_care_session(row) if row else None
+
+    def update_care_session(
+        self,
+        session_id: str,
+        *,
+        answers: dict,
+        status: CareSessionStatus,
+        updated_at: str,
+        questionnaire_response_id: str | None = None,
+        completed_at: str | None = None,
+    ) -> None:
+        with connect(self.db_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE care_sessions
+                SET answers_json = ?, status = ?, updated_at = ?,
+                    questionnaire_response_id = COALESCE(?, questionnaire_response_id),
+                    completed_at = COALESCE(?, completed_at)
+                WHERE session_id = ?
+                """,
+                (
+                    json.dumps(answers, ensure_ascii=False),
+                    status.value,
+                    updated_at,
+                    questionnaire_response_id,
+                    completed_at,
+                    session_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError(f"care session {session_id!r} was not found")
+
+    def list_care_sessions(self, patient_id: str) -> list[CareSession]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM care_sessions
+                WHERE patient_id = ? ORDER BY updated_at DESC
+                """,
+                (patient_id,),
+            ).fetchall()
+        return [row_to_care_session(row) for row in rows]
+
+    def save_agent_run(self, record: AgentRunRecord) -> None:
+        with connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO agent_runs (
+                    run_id, task_id, patient_id, session_id, agent_name,
+                    agent_version, mode, input_text, input_hash, output_json,
+                    status, model_provider, model_name, prompt_version,
+                    started_at, completed_at, error_code
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.run_id,
+                    record.task_id,
+                    record.patient_id,
+                    record.session_id,
+                    record.agent_name,
+                    record.agent_version,
+                    record.mode,
+                    record.input_text,
+                    record.input_hash,
+                    json.dumps(record.output_json, ensure_ascii=False),
+                    record.status,
+                    record.model_provider,
+                    record.model_name,
+                    record.prompt_version,
+                    record.started_at,
+                    record.completed_at,
+                    record.error_code,
+                ),
+            )
+
+    def get_agent_run(self, run_id: str) -> AgentRunRecord | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return row_to_agent_run(row) if row else None
+
+    def get_agent_run_by_task(self, task_id: str) -> AgentRunRecord | None:
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT * FROM agent_runs WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        return row_to_agent_run(row) if row else None
+
+    def list_agent_runs(self, session_id: str) -> list[AgentRunRecord]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM agent_runs WHERE session_id = ?
+                ORDER BY completed_at DESC
+                """,
+                (session_id,),
+            ).fetchall()
+        return [row_to_agent_run(row) for row in rows]
+
+    def complete_care_session_submission(
+        self,
+        *,
+        session: CareSession,
+        message: FollowUpMessage,
+        questionnaire_response: dict,
+        questionnaire: dict,
+        observations: list[Observation],
+        completed_at: str,
+    ) -> None:
+        """Atomically persist the Layer-2 response, facts, and session transition."""
+
+        resource = validate_questionnaire_response_against_questionnaire(
+            questionnaire_response, questionnaire
+        )
+        patient_id = resource["subject"]["reference"].removeprefix("Patient/")
+        if patient_id != session.patient_id or message.patient_id != session.patient_id:
+            raise FHIRValidationError(
+                "care session, message and QuestionnaireResponse patient must match"
+            )
+        if message.message_id != resource["id"]:
+            raise FHIRValidationError(
+                "follow-up message id must match QuestionnaireResponse.id"
+            )
+
+        validated_observations: list[Observation] = []
+        for item in observations:
+            normalized = validate_r4_resource(
+                item.as_fhir(), expected_resource_type="Observation"
+            )
+            validated = Observation(resource=normalized, evidence=item.evidence)
+            if validated.patient_id != session.patient_id:
+                raise FHIRValidationError("Observation patient must match care session")
+            validated_observations.append(validated)
+
+        with connect(self.db_path) as connection:
+            current = connection.execute(
+                "SELECT status FROM care_sessions WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()
+            if current is None:
+                raise LookupError(f"care session {session.session_id!r} was not found")
+            if current["status"] != CareSessionStatus.IN_PROGRESS.value:
+                raise ValueError("只有进行中的随访可以提交")
+
+            connection.execute(
+                """
+                INSERT INTO followup_messages (
+                    message_id, patient_id, message_text, submitted_at,
+                    source, processing_status
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                tuple(message.model_dump().values()),
+            )
+            connection.execute(
+                """
+                INSERT INTO fhir_questionnaire_responses (
+                    resource_id, patient_id, message_id, resource_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    resource["id"],
+                    patient_id,
+                    message.message_id,
+                    json.dumps(resource, ensure_ascii=False, separators=(",", ":")),
+                    resource["authored"],
+                ),
+            )
+            for item in validated_observations:
+                connection.execute(
+                    """
+                    INSERT INTO fhir_observations (
+                        observation_id, patient_id, questionnaire_response_id,
+                        effective_time, resource_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.observation_id,
+                        item.patient_id,
+                        item.message_id,
+                        item.effective_time,
+                        json.dumps(
+                            item.as_fhir(), ensure_ascii=False, separators=(",", ":")
+                        ),
+                        item.created_at,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO observation_evidence (
+                        observation_id, confidence_tier, evidence_text,
+                        evidence_start, evidence_end, recorded_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.observation_id,
+                        item.confidence_tier.value,
+                        item.evidence_text,
+                        item.evidence_start,
+                        item.evidence_end,
+                        item.created_at,
+                    ),
+                )
+            cursor = connection.execute(
+                """
+                UPDATE care_sessions
+                SET answers_json = ?, status = 'completed', updated_at = ?,
+                    questionnaire_response_id = ?, completed_at = ?
+                WHERE session_id = ? AND status = 'in_progress'
+                """,
+                (
+                    json.dumps(session.answers, ensure_ascii=False),
+                    completed_at,
+                    resource["id"],
+                    completed_at,
+                    session.session_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("随访状态已变化，请刷新后重试")
 
     def save_message(self, message: FollowUpMessage) -> None:
         with connect(self.db_path) as connection:
@@ -69,9 +342,11 @@ class SQLiteStore:
             ).fetchone()
         return row_to_message(row) if row else None
 
-    def save_questionnaire_response(self, resource: dict) -> None:
+    def save_questionnaire_response(
+        self, resource: dict, questionnaire: dict | None = None
+    ) -> None:
         resource = validate_questionnaire_response_against_questionnaire(
-            resource, load_glp1_questionnaire()
+            resource, questionnaire or load_glp1_questionnaire()
         )
         patient_reference = resource["subject"]["reference"]
         patient_id = patient_reference.removeprefix("Patient/")
@@ -103,7 +378,9 @@ class SQLiteStore:
                 ),
             )
 
-    def get_questionnaire_response(self, resource_id: str) -> dict | None:
+    def get_questionnaire_response(
+        self, resource_id: str, questionnaire: dict | None = None
+    ) -> dict | None:
         with connect(self.db_path) as connection:
             row = connection.execute(
                 """
@@ -115,7 +392,8 @@ class SQLiteStore:
         if row is None:
             return None
         return validate_questionnaire_response_against_questionnaire(
-            json.loads(row["resource_json"]), load_glp1_questionnaire()
+            json.loads(row["resource_json"]),
+            questionnaire or load_glp1_questionnaire(),
         )
 
     def list_messages(self, patient_id: str) -> list[FollowUpMessage]:

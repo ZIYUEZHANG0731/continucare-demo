@@ -122,6 +122,43 @@ CREATE TABLE IF NOT EXISTS fhir_questionnaire_responses (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS care_sessions (
+    session_id TEXT PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(patient_id) ON DELETE CASCADE,
+    pathway_code TEXT NOT NULL,
+    pathway_version TEXT NOT NULL,
+    questionnaire_canonical TEXT NOT NULL,
+    questionnaire_version TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('in_progress', 'completed', 'stopped', 'entered_in_error')
+    ),
+    answers_json TEXT NOT NULL,
+    questionnaire_response_id TEXT UNIQUE,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    run_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL UNIQUE,
+    patient_id TEXT NOT NULL REFERENCES patients(patient_id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES care_sessions(session_id) ON DELETE CASCADE,
+    agent_name TEXT NOT NULL,
+    agent_version TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    input_text TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
+    output_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    model_provider TEXT,
+    model_name TEXT,
+    prompt_version TEXT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    error_code TEXT
+);
+
 CREATE TABLE IF NOT EXISTS fhir_observations (
     observation_id TEXT PRIMARY KEY,
     patient_id TEXT NOT NULL REFERENCES patients(patient_id) ON DELETE CASCADE,
@@ -202,6 +239,12 @@ CREATE INDEX IF NOT EXISTS idx_observations_patient_time
 ON fhir_observations(patient_id, effective_time);
 CREATE INDEX IF NOT EXISTS idx_questionnaire_responses_patient_time
 ON fhir_questionnaire_responses(patient_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_care_sessions_patient_status
+ON care_sessions(patient_id, status, updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_care_session
+ON care_sessions(patient_id, pathway_code) WHERE status = 'in_progress';
+CREATE INDEX IF NOT EXISTS idx_agent_runs_session_time
+ON agent_runs(session_id, completed_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_patient_status
 ON alerts(patient_id, status);
 CREATE INDEX IF NOT EXISTS idx_audit_patient_time

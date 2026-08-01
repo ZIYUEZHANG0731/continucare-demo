@@ -389,6 +389,6 @@ sequenceDiagram
 
 ## 13. 当前整体判断
 
-当前仓库已经完成 Milestone 1 的“FHIR R4 基础资源工程基线”，足以开始 Milestone 2。它尚未完成目标医院 Profile、完整 Questionnaire renderer、通用结构化回答映射、生产 Agent、经批准临床规则和真实医院集成。因此当前应表述为：
+当前仓库已经完成 Milestone 1 的“FHIR R4 基础资源工程基线”，并完成 Milestone 2 的比赛工程基线：版本锁定的 Care Session、通用 QuestionnaireResponse Builder、`answerOption/required/enableWhen` 校验、Questionnaire 动态患者端和结构化答案确定性 Observation 映射已经可运行、可持久化、可测试。第二层的正式修订/撤回、语音、排期、多设备并发和真实身份仍未封板；目标医院 Profile、生产 Agent、经批准临床规则和真实医院集成也尚未完成。因此当前应表述为：
 
-> 已建立可验证的第一层数据与治理底座；下一步从 Questionnaire 驱动的患者交互开始，逐层补齐语义理解、Clinical Memory、医护工作流和医院集成。
+> 已建立可验证的第一层数据治理底座与第二层 Questionnaire 驱动患者端；下一步从受控自由文本语义理解开始，继续补齐 Clinical Memory、医护工作流和医院集成。

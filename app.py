@@ -7,12 +7,12 @@ import streamlit as st
 from continucare.config import get_settings
 from continucare.db import initialize_database, reset_demo
 from continucare.demo_data import SCENARIOS
-from continucare.services.demo_scenarios import load_scenario
-from continucare.ui import inject_global_styles, render_mode_badges
+from continucare.services.demo_scenarios import load_layer2_scenario
+from continucare.ui import inject_global_styles, render_mode_badges, semantic_model_label
 
 
 def _scenario_outcome(result) -> str:
-    count = len(result.extraction.observations)
+    count = len(result.observations)
     return (
         f"原始 QuestionnaireResponse 已保存，形成 {count} 条 FHIR Observation；"
         "未启用未经批准的临床分级或报警规则。"
@@ -65,7 +65,7 @@ with step_one:
     with st.container(border=True):
         st.markdown('<div class="cc-kicker">01 · 患者</div>', unsafe_allow_html=True)
         st.markdown("#### 提交院外状态")
-        st.write("一句口语化描述被保存，并标出可核对的原文证据。")
+        st.write("Questionnaire 动态生成问题，按钮和数量回答被忠实保存。")
 with step_two:
     with st.container(border=True):
         st.markdown('<div class="cc-kicker">02 · 护士</div>', unsafe_allow_html=True)
@@ -100,7 +100,7 @@ for column, (title, message_text) in zip(scenario_columns, SCENARIOS.items()):
         st.markdown(f"**{title}**")
         st.code(message_text, language=None)
         if st.button(f"重置并载入 {title}", key=f"load_{title}", width="stretch"):
-            result = load_scenario(settings.db_path, title)
+            result = load_layer2_scenario(settings.db_path, title)
             st.success(f"{title}已载入：{_scenario_outcome(result)}")
 
 st.divider()
@@ -112,5 +112,6 @@ st.page_link("pages/4_audit_log.py", label="查看完整审计日志", icon="�
 
 with st.expander("演示模式与当前集成状态"):
     render_mode_badges(st)
-    st.write("外部 AI：关闭 · 飞书集成：关闭 · 无 API Key 可完整运行")
+    st.write(f"语义模型：{semantic_model_label()} · 飞书集成：关闭")
+    st.write("即使模型不可用，本地 Mock 仍可完成合成数据演示。")
     st.caption("飞书/Aily 当前未联调；第一版所有通知均为清楚标注的 Mock。")
