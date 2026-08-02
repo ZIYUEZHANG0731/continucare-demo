@@ -629,6 +629,34 @@ class SQLiteStore:
             questionnaire or load_glp1_questionnaire(),
         )
 
+    def list_completed_questionnaire_responses(
+        self, patient_id: str
+    ) -> list[dict]:
+        """Return only responses finalized by a completed CareSession.
+
+        This is the Layer-4 read boundary. Compatibility free-text responses
+        and in-progress session state are intentionally excluded.
+        """
+
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT q.resource_json
+                FROM fhir_questionnaire_responses q
+                JOIN care_sessions c
+                  ON c.questionnaire_response_id = q.resource_id
+                WHERE q.patient_id = ? AND c.status = 'completed'
+                ORDER BY q.created_at DESC
+                """,
+                (patient_id,),
+            ).fetchall()
+        return [
+            validate_questionnaire_response_against_questionnaire(
+                json.loads(row["resource_json"]), load_glp1_questionnaire()
+            )
+            for row in rows
+        ]
+
     def list_messages(self, patient_id: str) -> list[FollowUpMessage]:
         with connect(self.db_path) as connection:
             rows = connection.execute(
@@ -703,6 +731,26 @@ class SQLiteStore:
                 FROM fhir_observations o
                 JOIN observation_evidence e USING (observation_id)
                 WHERE o.patient_id = ? ORDER BY o.effective_time DESC
+                """,
+                (patient_id,),
+            ).fetchall()
+        return [row_to_observation(row) for row in rows]
+
+    def list_final_observations(self, patient_id: str) -> list[Observation]:
+        """Return only Observations derived from completed CareSession responses."""
+
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT o.*, e.confidence_tier, e.evidence_text,
+                       e.evidence_start, e.evidence_end, e.recorded_at,
+                       e.source_kind, e.terminology_match_json
+                FROM fhir_observations o
+                JOIN observation_evidence e USING (observation_id)
+                JOIN care_sessions c
+                  ON c.questionnaire_response_id = o.questionnaire_response_id
+                WHERE o.patient_id = ? AND c.status = 'completed'
+                ORDER BY o.effective_time DESC
                 """,
                 (patient_id,),
             ).fetchall()

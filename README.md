@@ -54,7 +54,7 @@ CONTINUCARE_LANGUAGE_PROMPT_VERSION=mimo-language-rewrite-v1
 
 MiMo 不生成医学代码。已知 Questionnaire 字段和患者自述新症状都必须经过 `continucare/terminology/data/glp1_symptom_catalog_v1.json` 检索与版本校验：唯一命中后显示确认卡，多候选（例如“头晕”）显示语义区分按钮，未命中则只保留原话并等待术语/医生复核。当前目录是基于官方 GLP-1 药品标签建立的原型覆盖集，不声称穷尽所有可能症状；医院部署时通过同一后端协议接入其 FHIR 术语服务器。
 
-2026-08-02 的 10 例单轮合成数据评测达到业务结果 10/10、完整三 Prompt 链路 10/10；原始模型一次输出完全干净为 8/10，其余偏差由硬规则或一次严格 JSON 重试吸收。该结果是工程回归，不是临床验证。
+2026-08-02 的冻结配置 10 例单轮合成数据评测达到业务结果 10/10、完整三 Prompt 链路 10/10、原始模型输出 10/10。Layer 3 工程发布清单、原始报告和 Git 回滚标签固定为 `continucare-layer3-v1.0.0` / `layer3-v1.0.0`。该结果是工程回归，不是临床验证。
 
 密钥不会进入 AgentRun、审计日志或 Git。当前只允许官方 `*.xiaomimimo.com` HTTPS 地址，并且只发送合成演示文本。[MiMo 官方快速接入](https://mimo.mi.com/docs/en-US/quick-start/summary/first-api-call) · [JSON mode](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/structured-output)
 
@@ -84,6 +84,7 @@ MiMo 不生成医学代码。已知 Questionnaire 字段和患者自述新症状
 - [第一层验收报告](docs/15_layer_1_acceptance.md)
 - [第二层验收报告](docs/16_layer_2_acceptance.md)
 - [第三层验收报告](docs/17_layer_3_acceptance.md)
+- [第三层 v1.0.0 发布基线与回滚说明](docs/releases/layer3_v1.0.0.md)
 - [FHIR R4 合规策略与上线门槛](docs/13_fhir_conformance_policy.md)
 - [GLP-1 指标、术语映射与权威临床信源](docs/clinical/glp1_14d_observation_evidence.md)
 - [GLP-1 患者可报告症状术语目录与检索流程](docs/clinical/glp1_symptom_terminology_catalog.md)

@@ -15,6 +15,7 @@ from continucare.agents.contracts import (
     SemanticCandidate,
     SemanticResult,
     SemanticTask,
+    SubjectType,
     Temporality,
 )
 from continucare.agents.errors import ModelNotConfiguredError, ModelResponseError
@@ -27,6 +28,7 @@ from continucare.care_agent.mimo_adapter import (
     _usage,
 )
 from continucare.care_agent.model_api import SemanticModelConfig
+from continucare.care_agent.subjects import classify_evidence_subject
 
 
 class _StrictModel(BaseModel):
@@ -343,6 +345,13 @@ def governed_missing_findings(
         evidence = item.evidence_text
         if item.status in {MissingItemStatus.SUPPORTED, MissingItemStatus.AMBIGUOUS}:
             if not evidence or evidence not in task.message_text:
+                continue
+            evidence_start = task.message_text.find(evidence)
+            if classify_evidence_subject(
+                task.message_text,
+                evidence_start,
+                evidence_start + len(evidence),
+            ) != SubjectType.PATIENT:
                 continue
             pattern = _MISSING_EVIDENCE_PATTERNS.get(item.link_id)
             if pattern is not None and not pattern.search(evidence):

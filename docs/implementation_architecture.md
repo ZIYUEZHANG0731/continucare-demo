@@ -48,6 +48,8 @@ SQLiteStore 原子提交
 
 手工结构化答案不经过 Mock 或 LLM。自由文本只由第三层提出候选；未经过 Safety Agent 与患者确认不能进入 CareSession。当前 `clinical_rules=[]`，完成采集后保持 `not_assessed / no Alert`。
 
+第四层的唯一读取入口是 `continucare.layer4.Layer4InputReader`。它只返回 completed CareSession 的最终 QuestionnaireResponse、由这些响应派生的最终 Observation 和 AuditEvent，不提供 AgentRun、聊天轮次、SemanticCandidate、模型响应或 Mock 正则中间状态。第四层因此必须从标准化最终事实重建记忆和工作流，不能耦合第三层实现细节。
+
 ## 第三层强制边界
 
 - `AgentRuntime`：只运行显式注册 Agent；当前独立注册 Care Agent 与 Safety Agent，二者工具白名单均为空，不能直接操作数据库或 FHIR。

@@ -269,6 +269,47 @@ def test_safety_critic_never_sees_or_restores_hard_rejected_candidate(
     ]
 
 
+def test_safety_critic_cannot_turn_other_person_text_into_missing_patient_fact(
+    monkeypatch, tmp_path
+):
+    config = _config(monkeypatch, language=False)
+    extraction_calls = []
+
+    def extraction_transport(*_args):
+        extraction_calls.append(True)
+        return _response({"blocked": False, "items": [], "symptom_mentions": []})
+
+    def safety_transport(url, headers, payload, timeout):
+        return _response(
+            {
+                "overall_verdict": "revise",
+                "candidate_reviews": [],
+                "missing_items": [
+                    {
+                        "link_id": "vomiting-count-24h",
+                        "status": "supported",
+                        "evidence_text": "过去24小时吐了2次",
+                        "reason_codes": ["explicit_count"],
+                        "explanation": "文字中包含呕吐次数。",
+                    }
+                ],
+            }
+        )
+
+    adapter = MiMoSemanticAdapter(config, transport=extraction_transport)
+    critic = MiMoSafetyCritic(config, transport=safety_transport)
+    _, session, service = _service(tmp_path, adapter, critic=critic)
+
+    interaction = service.analyze(
+        session.session_id, "我妈妈过去24小时吐了2次。"
+    )
+
+    assert interaction.result.status == SemanticStatus.NO_MATCH
+    assert interaction.result.missing_items == []
+    assert interaction.result.clarifications == []
+    assert len(extraction_calls) == 1
+
+
 def test_safety_critic_retries_one_invalid_json_contract(monkeypatch, tmp_path):
     config = _config(monkeypatch, language=False)
     extraction = _response(

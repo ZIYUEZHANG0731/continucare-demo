@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.care_agent import CareAgentService
+from continucare.care_agent.release import LAYER3_RELEASE
 from continucare.care_agent.model_api import (
     SemanticModelConfig,
     UnconfiguredModelAdapter,
@@ -20,6 +23,11 @@ CASES = Path(__file__).parents[1] / "tests" / "fixtures" / "semantic_cases_v1.js
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run the frozen offline Layer-3 synthetic contract evaluation."
+    )
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
     cases = json.loads(CASES.read_text(encoding="utf-8"))
     totals = {
         "cases": len(cases),
@@ -61,12 +69,20 @@ def main() -> None:
                 }
             )
     output = {
+        "release": LAYER3_RELEASE.as_dict(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "evaluation_scope": "synthetic_contract_regression_not_clinical_performance",
         "policy_version": "semantic_cases_v1",
         "totals": totals,
         "all_passed": all(item["passed"] for item in details),
         "details": details,
     }
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(output, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
     print(json.dumps(output, ensure_ascii=False, indent=2))
     raise SystemExit(0 if output["all_passed"] else 1)
 

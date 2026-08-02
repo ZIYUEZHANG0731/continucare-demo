@@ -1,0 +1,1701 @@
+{
+  "release": {
+    "release_id": "continucare-layer3-v1.0.0",
+    "version": "1.0.0",
+    "rollback_tag": "layer3-v1.0.0",
+    "fhir_version": "4.0.1",
+    "fhir_schema_url": "https://hl7.org/fhir/R4/fhir.schema.json.zip",
+    "fhir_schema_sha256": "75e5560da3cf503895a44c8ca7af17a83b4cca6c2cb5ba1883d2aec0d1cb5ac6",
+    "care_agent_version": "care-agent-v2",
+    "safety_agent_version": "safety-agent-hybrid-v4",
+    "model_adapter_version": "xiaomi-mimo-openai-v4",
+    "safety_critic_version": "mimo-safety-critic-v2",
+    "language_rewriter_version": "mimo-language-rewriter-v1",
+    "model_name": "mimo-v2.5",
+    "extraction_prompt_version": "mimo-semantic-extraction-v4",
+    "safety_prompt_version": "mimo-safety-critic-v2",
+    "language_prompt_version": "mimo-language-rewrite-v1",
+    "terminology_catalog_id": "continucare-glp1-patient-reported-symptoms",
+    "terminology_catalog_version": "1.0.0",
+    "offline_case_set": "semantic_cases_v1.json",
+    "live_case_set": "mimo_live_cases_v1.json"
+  },
+  "generated_at": "2026-08-02T09:51:35.574186+00:00",
+  "evaluation_scope": "single_run_synthetic_engineering_evaluation_not_clinical_validation",
+  "provider": "xiaomi_mimo",
+  "model": "mimo-v2.5",
+  "prompt_versions": {
+    "extraction": "mimo-semantic-extraction-v4",
+    "safety": "mimo-safety-critic-v2",
+    "language": "mimo-language-rewrite-v1"
+  },
+  "case_set": "mimo_live_cases_v1.json",
+  "totals": {
+    "cases": 10,
+    "business_result_exact": 10,
+    "full_pipeline_exact": 10,
+    "clean_model_output": 10,
+    "total_tokens": 34228,
+    "total_latency_ms": 84682,
+    "average_latency_ms": 8468
+  },
+  "all_business_results_exact": true,
+  "all_full_pipeline_exact": true,
+  "details": [
+    {
+      "case_id": "explicit_vomiting_and_mild_nausea",
+      "passed": true,
+      "business_result_exact": true,
+      "clean_model_output": true,
+      "latency_ms": 10687,
+      "tokens": 4227,
+      "checks": {
+        "live_provider_mode": true,
+        "safety_critic_live": true,
+        "language_rewriter_live_or_not_applicable": true,
+        "status_exact": true,
+        "candidate_links_exact": true,
+        "candidate_answers_exact": true,
+        "clarification_links_exact": true
+      },
+      "expected": {
+        "status": "needs_confirmation",
+        "candidates": {
+          "vomiting-count-24h": 2,
+          "nausea-present": true,
+          "nausea-severity": "LA6752-5"
+        },
+        "clarification_links": []
+      },
+      "actual": {
+        "mode": "model_api:xiaomi_mimo",
+        "status": "needs_confirmation",
+        "candidates": {
+          "nausea-present": true,
+          "nausea-severity": "LA6752-5",
+          "vomiting-count-24h": 2
+        },
+        "patient_messages": {
+          "nausea-present": "为了确保记录准确，您现在感到恶心，对吗？",
+          "nausea-severity": "我记录到您现在的恶心程度是轻度，对吗？",
+          "vomiting-count-24h": "为了确保记录准确：过去24小时您一共呕吐了2次，对吗？"
+        },
+        "clarification_links": [],
+        "clarification_prompts": [],
+        "candidate_issues": [],
+        "safety_violations": [],
+        "stage_traces": [
+          {
+            "stage": "care_extraction",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "needs_confirmation",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-semantic-extraction-v4",
+            "model_usage": {
+              "prompt_tokens": 1383,
+              "completion_tokens": 317,
+              "total_tokens": 1700
+            },
+            "provider_request_id": "4f801ea5-d280-4eab-b360-19946a294b14_803c8c35bd0d49a9ad112d06dbe45ce4",
+            "latency_ms": 4171,
+            "details": {}
+          },
+          {
+            "stage": "terminology_resolution",
+            "agent_name": "terminology_resolver",
+            "agent_version": "repository-catalog-1.0.0",
+            "mode": "deterministic_repository_lookup",
+            "status": "needs_confirmation",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "catalog_id": "continucare-glp1-patient-reported-symptoms",
+              "catalog_version": "1.0.0",
+              "matched_candidate_count": 3,
+              "clarification_count": 0,
+              "unresolved_mention_count": 0
+            }
+          },
+          {
+            "stage": "safety_hard_rules",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "deterministic_rules",
+            "status": "needs_confirmation",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "candidate_count": 3,
+              "clarification_count": 0,
+              "violation_count": 0
+            }
+          },
+          {
+            "stage": "safety_critic",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "pass",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-safety-critic-v2",
+            "model_usage": {
+              "prompt_tokens": 1220,
+              "completion_tokens": 519,
+              "total_tokens": 1739
+            },
+            "provider_request_id": "d31c13be-c709-4456-9fb7-a8510ffa5554_820bd24e89784ad8bf290887036bd756",
+            "latency_ms": 4243,
+            "details": {
+              "reviewed_candidate_count": 3,
+              "missing_supported_count": 0,
+              "missing_ambiguous_count": 0,
+              "attempt_count": 1
+            }
+          },
+          {
+            "stage": "temporal_context",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "deterministic_patient_local_time",
+            "status": "resolved",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "patient_timezone": "Asia/Shanghai",
+              "local_date": "2026-08-02",
+              "followup_occurrence_id": "occurrence-eca031c693f557e6903836a152636f82",
+              "detected_mentions": [
+                "过去24小时",
+                "现在"
+              ]
+            }
+          },
+          {
+            "stage": "language_rewrite",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "completed",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-language-rewrite-v1",
+            "model_usage": {
+              "prompt_tokens": 580,
+              "completion_tokens": 208,
+              "total_tokens": 788
+            },
+            "provider_request_id": "19b3092c-46af-4cf8-ba2c-4556b45f77e7_07e73d9f63d6441fb4c1d2c9b4abd0b1",
+            "latency_ms": 2253,
+            "details": {
+              "rewritten_count": 3,
+              "template_fallback_count": 0,
+              "fallback_reasons": {},
+              "attempt_count": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "today_vomiting_food_ambiguous_window",
+      "passed": true,
+      "business_result_exact": true,
+      "clean_model_output": true,
+      "latency_ms": 11426,
+      "tokens": 3078,
+      "checks": {
+        "live_provider_mode": true,
+        "safety_critic_live": true,
+        "language_rewriter_live_or_not_applicable": true,
+        "status_exact": true,
+        "candidate_links_exact": true,
+        "candidate_answers_exact": true,
+        "clarification_links_exact": true
+      },
+      "expected": {
+        "status": "needs_clarification",
+        "candidates": {},
+        "clarification_links": [
+          "vomiting-count-24h"
+        ]
+      },
+      "actual": {
+        "mode": "model_api:xiaomi_mimo",
+        "status": "needs_clarification",
+        "candidates": {},
+        "patient_messages": {},
+        "clarification_links": [
+          "vomiting-count-24h"
+        ],
+        "clarification_prompts": [
+          "我看到您提到呕吐了5次。为了记录准确，这5次都是发生在过去24小时内吗？"
+        ],
+        "candidate_issues": [
+          {
+            "link_id": "vomiting-count-24h",
+            "action": "clarification_required",
+            "reason_codes": [
+              "time_window_not_explicit"
+            ]
+          }
+        ],
+        "safety_violations": [],
+        "stage_traces": [
+          {
+            "stage": "care_extraction",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "needs_clarification",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-semantic-extraction-v4",
+            "model_usage": {
+              "prompt_tokens": 1377,
+              "completion_tokens": 136,
+              "total_tokens": 1513
+            },
+            "provider_request_id": "65527c62-1830-40e9-8976-53164f3a14c5_771ba3d38538428987e725cef9092fb7",
+            "latency_ms": 7268,
+            "details": {}
+          },
+          {
+            "stage": "terminology_resolution",
+            "agent_name": "terminology_resolver",
+            "agent_version": "repository-catalog-1.0.0",
+            "mode": "deterministic_repository_lookup",
+            "status": "needs_clarification",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "catalog_id": "continucare-glp1-patient-reported-symptoms",
+              "catalog_version": "1.0.0",
+              "matched_candidate_count": 0,
+              "clarification_count": 0,
+              "unresolved_mention_count": 0
+            }
+          },
+          {
+            "stage": "safety_hard_rules",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "deterministic_rules",
+            "status": "needs_clarification",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "candidate_count": 0,
+              "clarification_count": 1,
+              "violation_count": 0
+            }
+          },
+          {
+            "stage": "safety_critic",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "human_review",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-safety-critic-v2",
+            "model_usage": {
+              "prompt_tokens": 860,
+              "completion_tokens": 288,
+              "total_tokens": 1148
+            },
+            "provider_request_id": "debc9a3e-20c1-41a0-8d6a-c23a397d440e_d00affd5c6cc43c69091a68d27b414be",
+            "latency_ms": 2742,
+            "details": {
+              "reviewed_candidate_count": 0,
+              "missing_supported_count": 0,
+              "missing_ambiguous_count": 0,
+              "attempt_count": 1
+            }
+          },
+          {
+            "stage": "temporal_context",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "deterministic_patient_local_time",
+            "status": "resolved",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "patient_timezone": "Asia/Shanghai",
+              "local_date": "2026-08-02",
+              "followup_occurrence_id": "occurrence-a53432cb178f547e9ca86d48b879c961",
+              "detected_mentions": [
+                "今天"
+              ]
+            }
+          },
+          {
+            "stage": "language_rewrite",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "completed",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-language-rewrite-v1",
+            "model_usage": {
+              "prompt_tokens": 333,
+              "completion_tokens": 84,
+              "total_tokens": 417
+            },
+            "provider_request_id": "65ce6afc-0909-45ca-bc68-c66c77adf08e_0cd7e9097e524b048cc31f6d545be20a",
+            "latency_ms": 1400,
+            "details": {
+              "rewritten_count": 0,
+              "template_fallback_count": 1,
+              "fallback_reasons": {
+                "clarify-360496cc04c657b3b4ddb6c30d22cec3": [
+                  "numeric_fact_changed"
+                ]
+              },
+              "attempt_count": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "explicit_fluid_litres",
+      "passed": true,
+      "business_result_exact": true,
+      "clean_model_output": true,
+      "latency_ms": 12402,
+      "tokens": 4747,
+      "checks": {
+        "live_provider_mode": true,
+        "safety_critic_live": true,
+        "language_rewriter_live_or_not_applicable": true,
+        "status_exact": true,
+        "candidate_links_exact": true,
+        "candidate_answers_exact": true,
+        "clarification_links_exact": true
+      },
+      "expected": {
+        "status": "needs_confirmation",
+        "candidates": {
+          "fluid-intake-24h-estimated": {
+            "value": 1200,
+            "unit": "mL",
+            "system": "http://unitsofmeasure.org",
+            "code": "mL"
+          }
+        },
+        "clarification_links": []
+      },
+      "actual": {
+        "mode": "model_api:xiaomi_mimo",
+        "status": "needs_confirmation",
+        "candidates": {
+          "fluid-intake-24h-estimated": {
+            "value": 1200,
+            "unit": "mL",
+            "system": "http://unitsofmeasure.org",
+            "code": "mL"
+          }
+        },
+        "patient_messages": {
+          "fluid-intake-24h-estimated": "为了确保记录准确：过去24小时您的液体摄入大约是1200毫升，对吗？"
+        },
+        "clarification_links": [],
+        "clarification_prompts": [],
+        "candidate_issues": [],
+        "safety_violations": [],
+        "stage_traces": [
+          {
+            "stage": "care_extraction",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "needs_confirmation",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-semantic-extraction-v4",
+            "model_usage": {
+              "prompt_tokens": 1377,
+              "completion_tokens": 133,
+              "total_tokens": 1510
+            },
+            "provider_request_id": "8568a572-cea9-4fe2-8c01-e0b9d20e8348_30141a36f2814f8188fdfde4009c2836",
+            "latency_ms": 1904,
+            "details": {}
+          },
+          {
+            "stage": "terminology_resolution",
+            "agent_name": "terminology_resolver",
+            "agent_version": "repository-catalog-1.0.0",
+            "mode": "deterministic_repository_lookup",
+            "status": "needs_confirmation",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "catalog_id": "continucare-glp1-patient-reported-symptoms",
+              "catalog_version": "1.0.0",
+              "matched_candidate_count": 1,
+              "clarification_count": 0,
+              "unresolved_mention_count": 0
+            }
+          },
+          {
+            "stage": "safety_hard_rules",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "deterministic_rules",
+            "status": "needs_confirmation",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "candidate_count": 1,
+              "clarification_count": 0,
+              "violation_count": 0
+            }
+          },
+          {
+            "stage": "safety_critic",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "pass",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-safety-critic-v2",
+            "model_usage": {
+              "prompt_tokens": 2022,
+              "completion_tokens": 752,
+              "total_tokens": 2774
+            },
+            "provider_request_id": "75099a62-ad98-4c23-a45e-15e0fe941afd_d64ee1b28dfe46a89433f60b0e384c80",
+            "latency_ms": 8987,
+            "details": {
+              "reviewed_candidate_count": 1,
+              "missing_supported_count": 0,
+              "missing_ambiguous_count": 0,
+              "attempt_count": 2
+            }
+          },
+          {
+            "stage": "temporal_context",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "deterministic_patient_local_time",
+            "status": "resolved",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "patient_timezone": "Asia/Shanghai",
+              "local_date": "2026-08-02",
+              "followup_occurrence_id": "occurrence-5b4fae2b54915cfdaf507653c2e79d93",
+              "detected_mentions": [
+                "过去24小时"
+              ]
+            }
+          },
+          {
+            "stage": "language_rewrite",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "completed",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-language-rewrite-v1",
+            "model_usage": {
+              "prompt_tokens": 383,
+              "completion_tokens": 80,
+              "total_tokens": 463
+            },
+            "provider_request_id": "8fa626dc-a64d-46eb-9185-283142295ce1_a34803cbba094d03a64f3b4e99b73e2b",
+            "latency_ms": 1492,
+            "details": {
+              "rewritten_count": 0,
+              "template_fallback_count": 1,
+              "fallback_reasons": {
+                "candidate-5ffeac553e5f5fb688b50731626e9d71": [
+                  "immutable_fact_missing",
+                  "controlled_fact_changed"
+                ]
+              },
+              "attempt_count": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "current_nausea_negated",
+      "passed": true,
+      "business_result_exact": true,
+      "clean_model_output": true,
+      "latency_ms": 8405,
+      "tokens": 3153,
+      "checks": {
+        "live_provider_mode": true,
+        "safety_critic_live": true,
+        "language_rewriter_live_or_not_applicable": true,
+        "status_exact": true,
+        "candidate_links_exact": true,
+        "candidate_answers_exact": true,
+        "clarification_links_exact": true
+      },
+      "expected": {
+        "status": "needs_confirmation",
+        "candidates": {
+          "nausea-present": false
+        },
+        "clarification_links": []
+      },
+      "actual": {
+        "mode": "model_api:xiaomi_mimo",
+        "status": "needs_confirmation",
+        "candidates": {
+          "nausea-present": false
+        },
+        "patient_messages": {
+          "nausea-present": "为了确保记录准确：您现在没有恶心，对吗？"
+        },
+        "clarification_links": [],
+        "clarification_prompts": [],
+        "candidate_issues": [],
+        "safety_violations": [],
+        "stage_traces": [
+          {
+            "stage": "care_extraction",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "needs_confirmation",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-semantic-extraction-v4",
+            "model_usage": {
+              "prompt_tokens": 1367,
+              "completion_tokens": 127,
+              "total_tokens": 1494
+            },
+            "provider_request_id": "260dc26c-96a2-4a2c-9926-1bb8bf747862_294ec9df423e4708bd6c32c7fca0d69a",
+            "latency_ms": 1531,
+            "details": {}
+          },
+          {
+            "stage": "terminology_resolution",
+            "agent_name": "terminology_resolver",
+            "agent_version": "repository-catalog-1.0.0",
+            "mode": "deterministic_repository_lookup",
+            "status": "needs_confirmation",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "catalog_id": "continucare-glp1-patient-reported-symptoms",
+              "catalog_version": "1.0.0",
+              "matched_candidate_count": 1,
+              "clarification_count": 0,
+              "unresolved_mention_count": 0
+            }
+          },
+          {
+            "stage": "safety_hard_rules",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "deterministic_rules",
+            "status": "needs_confirmation",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "candidate_count": 1,
+              "clarification_count": 0,
+              "violation_count": 0
+            }
+          },
+          {
+            "stage": "safety_critic",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "pass",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-safety-critic-v2",
+            "model_usage": {
+              "prompt_tokens": 938,
+              "completion_tokens": 347,
+              "total_tokens": 1285
+            },
+            "provider_request_id": "984e111f-d7a9-4a55-bf01-3384caaa537d_bbbf43d42d8147d289b39cbe601b991b",
+            "latency_ms": 3748,
+            "details": {
+              "reviewed_candidate_count": 1,
+              "missing_supported_count": 0,
+              "missing_ambiguous_count": 0,
+              "attempt_count": 1
+            }
+          },
+          {
+            "stage": "temporal_context",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "deterministic_patient_local_time",
+            "status": "resolved",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "patient_timezone": "Asia/Shanghai",
+              "local_date": "2026-08-02",
+              "followup_occurrence_id": "occurrence-5eb135df85475c43af42c0f2c3ad8ab2",
+              "detected_mentions": [
+                "现在"
+              ]
+            }
+          },
+          {
+            "stage": "language_rewrite",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "completed",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-language-rewrite-v1",
+            "model_usage": {
+              "prompt_tokens": 312,
+              "completion_tokens": 62,
+              "total_tokens": 374
+            },
+            "provider_request_id": "edd96375-01bd-4ec3-9570-4d49e7481182_6301b9fb7a2f46cca68844edf65da424",
+            "latency_ms": 3105,
+            "details": {
+              "rewritten_count": 0,
+              "template_fallback_count": 1,
+              "fallback_reasons": {
+                "candidate-6adfde26cc18547aa88e2d6c08aaed9b": [
+                  "rewrite_must_contain_one_question"
+                ]
+              },
+              "attempt_count": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "current_abdominal_pain",
+      "passed": true,
+      "business_result_exact": true,
+      "clean_model_output": true,
+      "latency_ms": 6965,
+      "tokens": 3170,
+      "checks": {
+        "live_provider_mode": true,
+        "safety_critic_live": true,
+        "language_rewriter_live_or_not_applicable": true,
+        "status_exact": true,
+        "candidate_links_exact": true,
+        "candidate_answers_exact": true,
+        "clarification_links_exact": true
+      },
+      "expected": {
+        "status": "needs_confirmation",
+        "candidates": {
+          "abdominal-pain-present": true
+        },
+        "clarification_links": []
+      },
+      "actual": {
+        "mode": "model_api:xiaomi_mimo",
+        "status": "needs_confirmation",
+        "candidates": {
+          "abdominal-pain-present": true
+        },
+        "patient_messages": {
+          "abdominal-pain-present": "为了确保记录准确：您现在有腹痛，对吗？"
+        },
+        "clarification_links": [],
+        "clarification_prompts": [],
+        "candidate_issues": [],
+        "safety_violations": [],
+        "stage_traces": [
+          {
+            "stage": "care_extraction",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "needs_confirmation",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-semantic-extraction-v4",
+            "model_usage": {
+              "prompt_tokens": 1367,
+              "completion_tokens": 130,
+              "total_tokens": 1497
+            },
+            "provider_request_id": "d67cc04f-cc52-41d3-b60c-383bde30525f_351fb93dae5c47c0837534447c09499f",
+            "latency_ms": 1512,
+            "details": {}
+          },
+          {
+            "stage": "terminology_resolution",
+            "agent_name": "terminology_resolver",
+            "agent_version": "repository-catalog-1.0.0",
+            "mode": "deterministic_repository_lookup",
+            "status": "needs_confirmation",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "catalog_id": "continucare-glp1-patient-reported-symptoms",
+              "catalog_version": "1.0.0",
+              "matched_candidate_count": 1,
+              "clarification_count": 0,
+              "unresolved_mention_count": 0
+            }
+          },
+          {
+            "stage": "safety_hard_rules",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "deterministic_rules",
+            "status": "needs_confirmation",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "candidate_count": 1,
+              "clarification_count": 0,
+              "violation_count": 0
+            }
+          },
+          {
+            "stage": "safety_critic",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "pass",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-safety-critic-v2",
+            "model_usage": {
+              "prompt_tokens": 938,
+              "completion_tokens": 363,
+              "total_tokens": 1301
+            },
+            "provider_request_id": "d466b078-f741-4c2d-8955-64c095427437_108df0bb9619473cbb05060ee37b8905",
+            "latency_ms": 4196,
+            "details": {
+              "reviewed_candidate_count": 1,
+              "missing_supported_count": 0,
+              "missing_ambiguous_count": 0,
+              "attempt_count": 1
+            }
+          },
+          {
+            "stage": "temporal_context",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "deterministic_patient_local_time",
+            "status": "resolved",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "patient_timezone": "Asia/Shanghai",
+              "local_date": "2026-08-02",
+              "followup_occurrence_id": "occurrence-afc3bc212b3151b383e0ad2a4b435ed9",
+              "detected_mentions": [
+                "现在"
+              ]
+            }
+          },
+          {
+            "stage": "language_rewrite",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "completed",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-language-rewrite-v1",
+            "model_usage": {
+              "prompt_tokens": 311,
+              "completion_tokens": 61,
+              "total_tokens": 372
+            },
+            "provider_request_id": "1782c8a7-0bcc-4691-a0c9-cbc0d4f399d3_0f311c7d980144b8a341b73aa8dc0edd",
+            "latency_ms": 1240,
+            "details": {
+              "rewritten_count": 0,
+              "template_fallback_count": 1,
+              "fallback_reasons": {
+                "candidate-c211785cc4cd56fb9bc2dc510de5ae1c": [
+                  "rewrite_must_contain_one_question",
+                  "polarity_changed"
+                ]
+              },
+              "attempt_count": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "historical_vomiting_not_current",
+      "passed": true,
+      "business_result_exact": true,
+      "clean_model_output": true,
+      "latency_ms": 3750,
+      "tokens": 2453,
+      "checks": {
+        "live_provider_mode": true,
+        "safety_critic_live": true,
+        "language_rewriter_live_or_not_applicable": true,
+        "status_exact": true,
+        "candidate_links_exact": true,
+        "candidate_answers_exact": true,
+        "clarification_links_exact": true
+      },
+      "expected": {
+        "status": "no_match",
+        "candidates": {},
+        "clarification_links": []
+      },
+      "actual": {
+        "mode": "model_api:xiaomi_mimo",
+        "status": "no_match",
+        "candidates": {},
+        "patient_messages": {},
+        "clarification_links": [],
+        "clarification_prompts": [],
+        "candidate_issues": [],
+        "safety_violations": [],
+        "stage_traces": [
+          {
+            "stage": "care_extraction",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "no_match",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-semantic-extraction-v4",
+            "model_usage": {
+              "prompt_tokens": 1372,
+              "completion_tokens": 76,
+              "total_tokens": 1448
+            },
+            "provider_request_id": "a37f42b4-5394-404f-8083-6217a1a66f83_326e6daf49874a08a9343cf6acde9056",
+            "latency_ms": 1426,
+            "details": {}
+          },
+          {
+            "stage": "terminology_resolution",
+            "agent_name": "terminology_resolver",
+            "agent_version": "repository-catalog-1.0.0",
+            "mode": "deterministic_repository_lookup",
+            "status": "no_match",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "catalog_id": "continucare-glp1-patient-reported-symptoms",
+              "catalog_version": "1.0.0",
+              "matched_candidate_count": 0,
+              "clarification_count": 0,
+              "unresolved_mention_count": 0
+            }
+          },
+          {
+            "stage": "safety_hard_rules",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "deterministic_rules",
+            "status": "no_match",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "candidate_count": 0,
+              "clarification_count": 0,
+              "violation_count": 0
+            }
+          },
+          {
+            "stage": "safety_critic",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "pass",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-safety-critic-v2",
+            "model_usage": {
+              "prompt_tokens": 822,
+              "completion_tokens": 183,
+              "total_tokens": 1005
+            },
+            "provider_request_id": "7d0f14ae-0138-4753-87b4-97d5f7c90240_ed7645f6203043be80398688b42dc6a4",
+            "latency_ms": 2307,
+            "details": {
+              "reviewed_candidate_count": 0,
+              "missing_supported_count": 0,
+              "missing_ambiguous_count": 0,
+              "attempt_count": 1
+            }
+          },
+          {
+            "stage": "temporal_context",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "deterministic_patient_local_time",
+            "status": "resolved",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "patient_timezone": "Asia/Shanghai",
+              "local_date": "2026-08-02",
+              "followup_occurrence_id": "occurrence-75edac81827d5676913c401571bb09ac",
+              "detected_mentions": []
+            }
+          },
+          {
+            "stage": "language_rewrite",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "not_applicable",
+            "status": "completed",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-language-rewrite-v1",
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": 0,
+            "details": {
+              "rewritten_count": 0,
+              "template_fallback_count": 0,
+              "fallback_reasons": {},
+              "attempt_count": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "other_person_not_patient",
+      "passed": true,
+      "business_result_exact": true,
+      "clean_model_output": true,
+      "latency_ms": 5296,
+      "tokens": 2533,
+      "checks": {
+        "live_provider_mode": true,
+        "safety_critic_live": true,
+        "language_rewriter_live_or_not_applicable": true,
+        "status_exact": true,
+        "candidate_links_exact": true,
+        "candidate_answers_exact": true,
+        "clarification_links_exact": true
+      },
+      "expected": {
+        "status": "no_match",
+        "candidates": {},
+        "clarification_links": []
+      },
+      "actual": {
+        "mode": "model_api:xiaomi_mimo",
+        "status": "no_match",
+        "candidates": {},
+        "patient_messages": {},
+        "clarification_links": [],
+        "clarification_prompts": [],
+        "candidate_issues": [],
+        "safety_violations": [],
+        "stage_traces": [
+          {
+            "stage": "care_extraction",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "no_match",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-semantic-extraction-v4",
+            "model_usage": {
+              "prompt_tokens": 1378,
+              "completion_tokens": 76,
+              "total_tokens": 1454
+            },
+            "provider_request_id": "de840a48-8f48-4ebd-995c-05baa75f90bd_7a554e5784054eb7b2eeec3a7d259571",
+            "latency_ms": 1651,
+            "details": {}
+          },
+          {
+            "stage": "terminology_resolution",
+            "agent_name": "terminology_resolver",
+            "agent_version": "repository-catalog-1.0.0",
+            "mode": "deterministic_repository_lookup",
+            "status": "no_match",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "catalog_id": "continucare-glp1-patient-reported-symptoms",
+              "catalog_version": "1.0.0",
+              "matched_candidate_count": 0,
+              "clarification_count": 0,
+              "unresolved_mention_count": 0
+            }
+          },
+          {
+            "stage": "safety_hard_rules",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "deterministic_rules",
+            "status": "no_match",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "candidate_count": 0,
+              "clarification_count": 0,
+              "violation_count": 0
+            }
+          },
+          {
+            "stage": "safety_critic",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "pass",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-safety-critic-v2",
+            "model_usage": {
+              "prompt_tokens": 826,
+              "completion_tokens": 253,
+              "total_tokens": 1079
+            },
+            "provider_request_id": "28bbd7c4-eb27-44fd-ae64-8b56c067c2f1_ff82fae569ff452e8bb56c6661e900a6",
+            "latency_ms": 3634,
+            "details": {
+              "reviewed_candidate_count": 0,
+              "missing_supported_count": 0,
+              "missing_ambiguous_count": 0,
+              "attempt_count": 1
+            }
+          },
+          {
+            "stage": "temporal_context",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "deterministic_patient_local_time",
+            "status": "resolved",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "patient_timezone": "Asia/Shanghai",
+              "local_date": "2026-08-02",
+              "followup_occurrence_id": "occurrence-656651d9e9fe5d14b5d9d175aaf648ef",
+              "detected_mentions": [
+                "过去24小时"
+              ]
+            }
+          },
+          {
+            "stage": "language_rewrite",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "not_applicable",
+            "status": "completed",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-language-rewrite-v1",
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": 0,
+            "details": {
+              "rewritten_count": 0,
+              "template_fallback_count": 0,
+              "fallback_reasons": {},
+              "attempt_count": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "nausea_without_current_marker",
+      "passed": true,
+      "business_result_exact": true,
+      "clean_model_output": true,
+      "latency_ms": 7774,
+      "tokens": 3127,
+      "checks": {
+        "live_provider_mode": true,
+        "safety_critic_live": true,
+        "language_rewriter_live_or_not_applicable": true,
+        "status_exact": true,
+        "candidate_links_exact": true,
+        "candidate_answers_exact": true,
+        "clarification_links_exact": true
+      },
+      "expected": {
+        "status": "needs_clarification",
+        "candidates": {},
+        "clarification_links": [
+          "nausea-present"
+        ]
+      },
+      "actual": {
+        "mode": "model_api:xiaomi_mimo",
+        "status": "needs_clarification",
+        "candidates": {},
+        "patient_messages": {},
+        "clarification_links": [
+          "nausea-present"
+        ],
+        "clarification_prompts": [
+          "我看到您提到恶心。这是您现在的情况吗？"
+        ],
+        "candidate_issues": [
+          {
+            "link_id": "nausea-present",
+            "action": "clarification_required",
+            "reason_codes": [
+              "current_status_not_explicit"
+            ]
+          }
+        ],
+        "safety_violations": [],
+        "stage_traces": [
+          {
+            "stage": "care_extraction",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "needs_clarification",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-semantic-extraction-v4",
+            "model_usage": {
+              "prompt_tokens": 1367,
+              "completion_tokens": 127,
+              "total_tokens": 1494
+            },
+            "provider_request_id": "8538b5e1-ef58-4b74-aba3-e7f3a1671432_4676ee6588314a5fa0c77e88f9e1a4d3",
+            "latency_ms": 1752,
+            "details": {}
+          },
+          {
+            "stage": "terminology_resolution",
+            "agent_name": "terminology_resolver",
+            "agent_version": "repository-catalog-1.0.0",
+            "mode": "deterministic_repository_lookup",
+            "status": "needs_clarification",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "catalog_id": "continucare-glp1-patient-reported-symptoms",
+              "catalog_version": "1.0.0",
+              "matched_candidate_count": 0,
+              "clarification_count": 0,
+              "unresolved_mention_count": 0
+            }
+          },
+          {
+            "stage": "safety_hard_rules",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "deterministic_rules",
+            "status": "needs_clarification",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "candidate_count": 0,
+              "clarification_count": 1,
+              "violation_count": 0
+            }
+          },
+          {
+            "stage": "safety_critic",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "revise",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-safety-critic-v2",
+            "model_usage": {
+              "prompt_tokens": 846,
+              "completion_tokens": 399,
+              "total_tokens": 1245
+            },
+            "provider_request_id": "242c56fb-c10c-43c9-95d5-e55b48dda286_e9d9ee1aaca243ffa9b394055a05aca7",
+            "latency_ms": 4470,
+            "details": {
+              "reviewed_candidate_count": 0,
+              "missing_supported_count": 0,
+              "missing_ambiguous_count": 0,
+              "attempt_count": 1
+            }
+          },
+          {
+            "stage": "temporal_context",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "deterministic_patient_local_time",
+            "status": "resolved",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "patient_timezone": "Asia/Shanghai",
+              "local_date": "2026-08-02",
+              "followup_occurrence_id": "occurrence-a6c0e3a3fa0c56a2a54bdcb10f2ec811",
+              "detected_mentions": []
+            }
+          },
+          {
+            "stage": "language_rewrite",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "completed",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-language-rewrite-v1",
+            "model_usage": {
+              "prompt_tokens": 313,
+              "completion_tokens": 75,
+              "total_tokens": 388
+            },
+            "provider_request_id": "2e6edf4d-5a1e-44c4-b6cc-eb80ceacc433_2804318cb8584ce386b1bd6d782d4ebf",
+            "latency_ms": 1536,
+            "details": {
+              "rewritten_count": 0,
+              "template_fallback_count": 1,
+              "fallback_reasons": {
+                "clarify-17808806b2c952bca245a7fd00345c31": [
+                  "controlled_fact_changed"
+                ]
+              },
+              "attempt_count": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "food_intake_is_not_fluid",
+      "passed": true,
+      "business_result_exact": true,
+      "clean_model_output": true,
+      "latency_ms": 4184,
+      "tokens": 2465,
+      "checks": {
+        "live_provider_mode": true,
+        "safety_critic_live": true,
+        "language_rewriter_live_or_not_applicable": true,
+        "status_exact": true,
+        "candidate_links_exact": true,
+        "candidate_answers_exact": true,
+        "clarification_links_exact": true
+      },
+      "expected": {
+        "status": "no_match",
+        "candidates": {},
+        "clarification_links": []
+      },
+      "actual": {
+        "mode": "model_api:xiaomi_mimo",
+        "status": "no_match",
+        "candidates": {},
+        "patient_messages": {},
+        "clarification_links": [],
+        "clarification_prompts": [],
+        "candidate_issues": [],
+        "safety_violations": [],
+        "stage_traces": [
+          {
+            "stage": "care_extraction",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "no_match",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-semantic-extraction-v4",
+            "model_usage": {
+              "prompt_tokens": 1376,
+              "completion_tokens": 21,
+              "total_tokens": 1397
+            },
+            "provider_request_id": "a1a98343-8645-4401-9c3e-f3dfb48dc987_04492849097e415a930861195da981ae",
+            "latency_ms": 871,
+            "details": {}
+          },
+          {
+            "stage": "terminology_resolution",
+            "agent_name": "terminology_resolver",
+            "agent_version": "repository-catalog-1.0.0",
+            "mode": "deterministic_repository_lookup",
+            "status": "no_match",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "catalog_id": "continucare-glp1-patient-reported-symptoms",
+              "catalog_version": "1.0.0",
+              "matched_candidate_count": 0,
+              "clarification_count": 0,
+              "unresolved_mention_count": 0
+            }
+          },
+          {
+            "stage": "safety_hard_rules",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "deterministic_rules",
+            "status": "no_match",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "candidate_count": 0,
+              "clarification_count": 0,
+              "violation_count": 0
+            }
+          },
+          {
+            "stage": "safety_critic",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "revise",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-safety-critic-v2",
+            "model_usage": {
+              "prompt_tokens": 820,
+              "completion_tokens": 248,
+              "total_tokens": 1068
+            },
+            "provider_request_id": "949fee0f-e2f4-44b1-9671-9ac799ba39ab_4ffa14350cf3488ab0977602e6fe5079",
+            "latency_ms": 3291,
+            "details": {
+              "reviewed_candidate_count": 0,
+              "missing_supported_count": 0,
+              "missing_ambiguous_count": 0,
+              "attempt_count": 1
+            }
+          },
+          {
+            "stage": "temporal_context",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "deterministic_patient_local_time",
+            "status": "resolved",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "patient_timezone": "Asia/Shanghai",
+              "local_date": "2026-08-02",
+              "followup_occurrence_id": "occurrence-63a0748854e957a2be417e122b410969",
+              "detected_mentions": [
+                "今天"
+              ]
+            }
+          },
+          {
+            "stage": "language_rewrite",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "not_applicable",
+            "status": "completed",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-language-rewrite-v1",
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": 0,
+            "details": {
+              "rewritten_count": 0,
+              "template_fallback_count": 0,
+              "fallback_reasons": {},
+              "attempt_count": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "explicit_vomiting_with_nausea_negated",
+      "passed": true,
+      "business_result_exact": true,
+      "clean_model_output": true,
+      "latency_ms": 13793,
+      "tokens": 5275,
+      "checks": {
+        "live_provider_mode": true,
+        "safety_critic_live": true,
+        "language_rewriter_live_or_not_applicable": true,
+        "status_exact": true,
+        "candidate_links_exact": true,
+        "candidate_answers_exact": true,
+        "clarification_links_exact": true
+      },
+      "expected": {
+        "status": "needs_confirmation",
+        "candidates": {
+          "vomiting-count-24h": 5,
+          "nausea-present": false
+        },
+        "clarification_links": []
+      },
+      "actual": {
+        "mode": "model_api:xiaomi_mimo",
+        "status": "needs_confirmation",
+        "candidates": {
+          "vomiting-count-24h": 5,
+          "nausea-present": false
+        },
+        "patient_messages": {
+          "vomiting-count-24h": "为了确保记录准确：过去24小时您一共呕吐了5次，对吗？",
+          "nausea-present": "为了确保记录准确：您现在没有恶心，对吗？"
+        },
+        "clarification_links": [],
+        "clarification_prompts": [],
+        "candidate_issues": [],
+        "safety_violations": [],
+        "stage_traces": [
+          {
+            "stage": "care_extraction",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "needs_confirmation",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-semantic-extraction-v4",
+            "model_usage": {
+              "prompt_tokens": 1381,
+              "completion_tokens": 280,
+              "total_tokens": 1661
+            },
+            "provider_request_id": "ed083ddd-9d06-4ba4-bd58-0a97f663d2fc_e483d358f2fc49be9598dc61521f23cb",
+            "latency_ms": 3085,
+            "details": {}
+          },
+          {
+            "stage": "terminology_resolution",
+            "agent_name": "terminology_resolver",
+            "agent_version": "repository-catalog-1.0.0",
+            "mode": "deterministic_repository_lookup",
+            "status": "needs_confirmation",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "catalog_id": "continucare-glp1-patient-reported-symptoms",
+              "catalog_version": "1.0.0",
+              "matched_candidate_count": 2,
+              "clarification_count": 0,
+              "unresolved_mention_count": 0
+            }
+          },
+          {
+            "stage": "safety_hard_rules",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "deterministic_rules",
+            "status": "needs_confirmation",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "candidate_count": 2,
+              "clarification_count": 0,
+              "violation_count": 0
+            }
+          },
+          {
+            "stage": "safety_critic",
+            "agent_name": "safety_agent",
+            "agent_version": "safety-agent-hybrid-v4",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "pass",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-safety-critic-v2",
+            "model_usage": {
+              "prompt_tokens": 2204,
+              "completion_tokens": 820,
+              "total_tokens": 3024
+            },
+            "provider_request_id": "d1425909-7eaa-4ef9-b536-83c0ec19c9ca_829bd6e68b514a73a88ca92f03a3476b",
+            "latency_ms": 8678,
+            "details": {
+              "reviewed_candidate_count": 2,
+              "missing_supported_count": 0,
+              "missing_ambiguous_count": 0,
+              "attempt_count": 2
+            }
+          },
+          {
+            "stage": "temporal_context",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "deterministic_patient_local_time",
+            "status": "resolved",
+            "model_provider": null,
+            "model_name": null,
+            "prompt_version": null,
+            "model_usage": null,
+            "provider_request_id": null,
+            "latency_ms": null,
+            "details": {
+              "patient_timezone": "Asia/Shanghai",
+              "local_date": "2026-08-02",
+              "followup_occurrence_id": "occurrence-27b0de0197e85e898f418aa204c592de",
+              "detected_mentions": [
+                "过去24小时",
+                "现在"
+              ]
+            }
+          },
+          {
+            "stage": "language_rewrite",
+            "agent_name": "care_agent",
+            "agent_version": "care-agent-v2",
+            "mode": "model_api:xiaomi_mimo",
+            "status": "completed",
+            "model_provider": "xiaomi_mimo",
+            "model_name": "mimo-v2.5",
+            "prompt_version": "mimo-language-rewrite-v1",
+            "model_usage": {
+              "prompt_tokens": 451,
+              "completion_tokens": 139,
+              "total_tokens": 590
+            },
+            "provider_request_id": "29c70024-e9d7-41b9-a177-87977a4eb264_77c1209b79b74c42b189944542c78ba8",
+            "latency_ms": 2018,
+            "details": {
+              "rewritten_count": 2,
+              "template_fallback_count": 0,
+              "fallback_reasons": {},
+              "attempt_count": 1
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

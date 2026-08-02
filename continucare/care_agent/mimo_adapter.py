@@ -36,7 +36,7 @@ from continucare.agents.errors import (
 )
 from continucare.care_agent.language import PatientLanguageRenderer
 from continucare.care_agent.model_api import SemanticModelConfig
-from continucare.care_agent.numbers import parse_number_token
+from continucare.care_agent.numbers import count_from_evidence, parse_number_token
 from continucare.db import utc_now_iso
 
 
@@ -202,7 +202,11 @@ class MiMoSemanticAdapter:
             evidence_end = evidence_start + len(item.evidence_text)
             item = item.model_copy(
                 update={
-                    "answer": _normalize_governed_answer(item.answer, question),
+                    "answer": _normalize_governed_answer(
+                        item.answer,
+                        question,
+                        evidence_text=item.evidence_text,
+                    ),
                     "temporality": _local_temporality(
                         item,
                         task.message_text,
@@ -521,11 +525,15 @@ Allowed questionnaire items:
     ]
 
 
-def _normalize_governed_answer(answer: Any, question) -> Any:
+def _normalize_governed_answer(
+    answer: Any, question, *, evidence_text: str = ""
+) -> Any:
     """Normalize only unambiguous representations already governed by the item."""
 
     if question.item_type == "integer":
         parsed = parse_number_token(answer)
+        if parsed is None and question.link_id == "vomiting-count-24h":
+            parsed = count_from_evidence(evidence_text)
         return parsed if type(parsed) is int else answer
     if question.item_type == "quantity" and isinstance(answer, dict):
         parsed = parse_number_token(answer.get("value"))

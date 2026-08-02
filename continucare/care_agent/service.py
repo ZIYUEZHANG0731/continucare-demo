@@ -61,6 +61,7 @@ from continucare.care_agent.numbers import (
     parse_number_token,
 )
 from continucare.care_agent.safety import SafetyAgent
+from continucare.care_agent.subjects import classify_evidence_subject
 from continucare.care_agent.temporal import (
     build_temporal_context,
     candidate_temporal_resolution,
@@ -639,7 +640,7 @@ class CareAgentService:
                     evidence_text=evidence,
                     evidence_start=start,
                     evidence_end=end,
-                    subject=_mention_subject(task.message_text, start, end),
+                    subject=classify_evidence_subject(task.message_text, start, end),
                     temporality=_mention_temporality(task, start, end),
                     negated=_mention_negated(task.message_text, start),
                 )
@@ -1912,21 +1913,6 @@ def _mention_temporality(
 def _mention_negated(text: str, start: int) -> bool:
     prefix = text[max(0, start - 6) : start]
     return bool(re.search(r"(?:没有|没|未|无|不再|并无)\s*$", prefix))
-
-
-def _mention_subject(text: str, start: int, end: int) -> SubjectType:
-    left = max(text.rfind(mark, 0, start) for mark in "。！？；\n") + 1
-    right_candidates = [text.find(mark, end) for mark in "。！？；\n"]
-    right_candidates = [item for item in right_candidates if item >= 0]
-    right = min(right_candidates) if right_candidates else len(text)
-    sentence = text[left:right]
-    if re.search(
-        r"我(?:妈妈|妈|爸爸|爸|父亲|母亲|孩子|朋友|家人)|"
-        r"(?:他|她|家人|朋友|孩子)",
-        sentence,
-    ):
-        return SubjectType.OTHER_PERSON
-    return SubjectType.PATIENT
 
 
 _AFFIRMATIVE_REPLY = re.compile(

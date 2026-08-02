@@ -6,6 +6,7 @@ import argparse
 import json
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.agents.contracts import CandidateIssueAction
 from continucare.care_agent import CareAgentService
 from continucare.care_agent.model_api import SemanticModelConfig, build_model_adapter
+from continucare.care_agent.release import LAYER3_RELEASE
 from continucare.care_engine import CareEngine
 from continucare.demo_data import DEMO_PATIENT_ID
 
@@ -60,6 +62,23 @@ def main() -> None:
         raise SystemExit(
             "Enable CONTINUCARE_USE_SAFETY_LLM and "
             "CONTINUCARE_USE_LANGUAGE_LLM for the full Layer-3 evaluation."
+        )
+    release_config = {
+        "model": config.model_name,
+        "extraction": config.prompt_version,
+        "safety": config.safety_prompt_version,
+        "language": config.language_prompt_version,
+    }
+    expected_release_config = {
+        "model": LAYER3_RELEASE.model_name,
+        "extraction": LAYER3_RELEASE.extraction_prompt_version,
+        "safety": LAYER3_RELEASE.safety_prompt_version,
+        "language": LAYER3_RELEASE.language_prompt_version,
+    }
+    if release_config != expected_release_config:
+        raise SystemExit(
+            "Configured model/Prompt versions do not match the frozen Layer-3 "
+            f"release: expected {expected_release_config}, got {release_config}"
         )
 
     cases = json.loads(args.cases.read_text(encoding="utf-8"))
@@ -178,6 +197,8 @@ def main() -> None:
     business_passed = sum(item["business_result_exact"] for item in details)
     clean = sum(item["clean_model_output"] for item in details)
     output = {
+        "release": LAYER3_RELEASE.as_dict(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "evaluation_scope": (
             "single_run_synthetic_engineering_evaluation_not_clinical_validation"
         ),

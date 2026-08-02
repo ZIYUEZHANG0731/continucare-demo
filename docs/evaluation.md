@@ -6,7 +6,19 @@
 curl -L https://hl7.org/fhir/R4/fhir.schema.json.zip -o /tmp/fhir-r4-schema.zip
 FHIR_R4_SCHEMA_ZIP=/tmp/fhir-r4-schema.zip .venv/bin/python -m pytest -q
 .venv/bin/python scripts/validate_fhir_r4.py --schema /tmp/fhir-r4-schema.zip
+.venv/bin/python scripts/evaluate_semantic_layer.py --output docs/evaluations/layer3_v1.0.0_offline.json
 .venv/bin/python scripts/rehearse_demo.py
+```
+
+Layer 3 v1.0.0 的真实 MiMo 评测还会校验模型及三个 Prompt 是否与发布清单完全一致，不一致时拒绝运行：
+
+```bash
+CONTINUCARE_LLM_PROMPT_VERSION=mimo-semantic-extraction-v4 \
+CONTINUCARE_SAFETY_PROMPT_VERSION=mimo-safety-critic-v2 \
+CONTINUCARE_LANGUAGE_PROMPT_VERSION=mimo-language-rewrite-v1 \
+.venv/bin/python scripts/evaluate_mimo_live.py \
+  --output docs/evaluations/layer3_v1.0.0_mimo_live.json \
+  --fail-on-mismatch
 ```
 
 自动化断言包括：

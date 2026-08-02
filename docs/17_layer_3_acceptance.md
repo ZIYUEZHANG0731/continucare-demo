@@ -82,10 +82,10 @@ Safety LLM 是附加 Critic，不是最终裁判：它只能保留、拒绝或�
 
 本次基线验收结果：
 
-- 本地单元与集成测试：`85 passed, 1 skipped`；新增覆盖仓库术语匹配、已知字段代码追踪、新症状 Observation、头晕多候选按钮消歧、每日短期记忆、同日重复会话防护和跨日只读长期记录；跳过项只因本轮未传入可选的官方 R4 Schema 压缩包；
+- 官方 HL7 FHIR R4 Schema 全量测试：`89 passed`，0 failed，0 skipped；下载地址、SHA-256 和独立资源验证结果已写入机器可读报告；
 - 既有 Questionnaire、PlanDefinition、QuestionnaireResponse、Observation 官方 Schema 验证路径未改变；
 - 离线语义契约集：8/8 状态、linkId 集合、澄清数量和 Safety 结果完全匹配；
-- 2026-08-02 MiMo 单轮真实合成评测：业务结果 10/10 精确，完整三 Prompt 链路 10/10，原始模型输出无硬规则处置 8/10；总计 29,804 tokens，平均端到端延迟 8,805 ms；
+- 2026-08-02 冻结配置 MiMo 单轮真实合成评测：业务结果 10/10 精确，完整三 Prompt 链路 10/10，原始模型输出 10/10；总计 34,228 tokens，平均端到端延迟 8,468 ms；原始逐例报告已入库；
 - 连续对话/时间增量后的 MiMo v3/v2 真实合成烟雾测试：两次均稳定得到 `呃吐次数=2 / 恶心=是 / 恶心程度=轻度`，且 Language Rewriter 2/2 通过；Safety Critic 1/2 严格 JSON 通过，1/2 触发确定性硬规则回退，未影响最终候选和确认门；
 - 关键用例“过去24小时我吐了2次，现在有点恶心”稳定得到 `呕吐次数=2 / 恶心=是 / 恶心程度=轻度`，Safety Critic 与语言事实校验均通过；
 - “今天吐了五次”只进入24小时时间窗澄清；呕吐不能支持恶心，食量少不能支持液体摄入；字符串中文数字可在证据一致时确定性归一化；
@@ -100,7 +100,7 @@ Safety LLM 是附加 Critic，不是最终裁判：它只能保留、拒绝或�
 - 第二层仍是唯一 FHIR 构造与持久化入口，第三层没有复制映射逻辑。
 - 第三层输出引用当前锁定的 Questionnaire linkId/code/version。
 - 未配置或无法访问 MiMo 时仍可完成 UI、审计、确认和提交闭环。
-- 第四层可以直接消费患者最终确认的 QuestionnaireResponse、Observation、Communication/Audit，而不依赖本地 Mock 的内部正则。
+- 第四层只能通过 `Layer4InputReader` 消费与 completed CareSession 关联的最终 QuestionnaireResponse、由其派生的最终 Observation 和 AuditEvent；代码端口不暴露 AgentRun、候选、聊天轮次、模型原始输出或 Mock 正则中间结果，并有反向依赖测试。
 
 ## 6. 进入真实试点前仍缺失
 
@@ -110,7 +110,7 @@ Safety LLM 是附加 Critic，不是最终裁判：它只能保留、拒绝或�
 - 目标医院 SNOMED CT 地区版本/许可/术语服务器、医生与术语人员审批；当前目录是比赛原型覆盖集，不宣称穷尽所有可能症状；
 - 急症表达的医院批准固定流程；当前系统不是急救通道；
 - 对否定、时间、主体、数值冲突和方言的更大规模对抗评测；
-- Safety/Language Prompt 与固定回退文案的临床审批、版本发布和回滚流程；
-- 延迟与成本优化；当前三个模型阶段串行运行，真实评测平均约 8.8 秒。
+- Safety/Language Prompt 与固定回退文案仍需医院临床审批；工程版本、评测报告和 Git 回滚点已经固化为 `continucare-layer3-v1.0.0` / `layer3-v1.0.0`；
+- 延迟与成本优化；当前三个模型阶段串行运行，冻结评测平均约 8.5 秒。
 
 因此当前结论是“第三层比赛工程基线已具备可解释的语义防线”，不是“临床验证完成”或“可接入真实患者”。

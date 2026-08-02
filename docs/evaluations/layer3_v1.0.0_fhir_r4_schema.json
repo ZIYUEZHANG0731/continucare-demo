@@ -1,0 +1,23 @@
+{
+  "release_id": "continucare-layer3-v1.0.0",
+  "generated_at": "2026-08-02T09:52:44Z",
+  "fhir_version": "4.0.1",
+  "schema": {
+    "url": "https://hl7.org/fhir/R4/fhir.schema.json.zip",
+    "sha256": "75e5560da3cf503895a44c8ca7af17a83b4cca6c2cb5ba1883d2aec0d1cb5ac6",
+    "archive_member": "fhir.schema.json"
+  },
+  "pytest": {
+    "passed": 89,
+    "failed": 0,
+    "skipped": 0
+  },
+  "standalone_validation": [
+    "Questionnaire/glp1-14d-followup-v1",
+    "PlanDefinition/glp1-14d-followup-plan-v1",
+    "QuestionnaireResponse/message-validation-example",
+    "Observation/observation-validation-example"
+  ],
+  "result": "passed",
+  "scope": "engineering_conformance_not_hospital_profile_certification"
+}
