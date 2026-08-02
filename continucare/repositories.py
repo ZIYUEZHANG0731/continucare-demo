@@ -50,6 +50,12 @@ def row_to_observation(row: sqlite3.Row) -> Observation:
             "evidence_start": data["evidence_start"],
             "evidence_end": data["evidence_end"],
             "recorded_at": data["recorded_at"],
+            "source_kind": data.get("source_kind") or "pathway_monitored",
+            "terminology_match": (
+                json.loads(data["terminology_match_json"])
+                if data.get("terminology_match_json")
+                else None
+            ),
         },
     )
 

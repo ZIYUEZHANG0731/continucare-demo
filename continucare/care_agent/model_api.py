@@ -18,7 +18,11 @@ class SemanticModelConfig:
     model_name: str | None = None
     base_url: str | None = None
     api_key_env: str = "CONTINUCARE_LLM_API_KEY"
-    prompt_version: str = "semantic-extraction-v1"
+    prompt_version: str = "mimo-semantic-extraction-v4"
+    safety_llm_enabled: bool = False
+    language_llm_enabled: bool = False
+    safety_prompt_version: str = "mimo-safety-critic-v2"
+    language_prompt_version: str = "mimo-language-rewrite-v1"
     timeout_seconds: float = 8.0
 
     @classmethod
@@ -34,7 +38,15 @@ class SemanticModelConfig:
                 "CONTINUCARE_LLM_API_KEY_ENV", "CONTINUCARE_LLM_API_KEY"
             ),
             prompt_version=os.getenv(
-                "CONTINUCARE_LLM_PROMPT_VERSION", "semantic-extraction-v1"
+                "CONTINUCARE_LLM_PROMPT_VERSION", "mimo-semantic-extraction-v4"
+            ),
+            safety_llm_enabled=_env_bool("CONTINUCARE_USE_SAFETY_LLM"),
+            language_llm_enabled=_env_bool("CONTINUCARE_USE_LANGUAGE_LLM"),
+            safety_prompt_version=os.getenv(
+                "CONTINUCARE_SAFETY_PROMPT_VERSION", "mimo-safety-critic-v2"
+            ),
+            language_prompt_version=os.getenv(
+                "CONTINUCARE_LANGUAGE_PROMPT_VERSION", "mimo-language-rewrite-v1"
             ),
             timeout_seconds=float(os.getenv("CONTINUCARE_LLM_TIMEOUT_SECONDS", "8")),
         )
@@ -90,3 +102,7 @@ def build_model_adapter(
 
         return MiMoSemanticAdapter(config)
     return UnconfiguredModelAdapter(config)
+
+
+def _env_bool(name: str) -> bool:
+    return os.getenv(name, "false").strip().lower() in {"1", "true", "yes", "on"}

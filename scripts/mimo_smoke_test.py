@@ -73,9 +73,25 @@ def main() -> None:
                     "candidate_link_ids": [
                         item.link_id for item in interaction.result.candidates
                     ],
+                    "candidates": [
+                        {
+                            "link_id": item.link_id,
+                            "answer": item.answer,
+                            "evidence_text": item.evidence_text,
+                            "patient_message": item.patient_message,
+                        }
+                        for item in interaction.result.candidates
+                    ],
                     "clarification_count": len(
                         interaction.result.clarifications
                     ),
+                    "clarifications": [
+                        {
+                            "kind": item.kind.value,
+                            "prompt": item.prompt,
+                        }
+                        for item in interaction.result.clarifications
+                    ],
                     "safety_violation_count": len(
                         interaction.result.safety_violations
                     ),
@@ -89,6 +105,18 @@ def main() -> None:
                     ],
                     "usage": interaction.result.model_usage,
                     "request_id": interaction.result.provider_request_id,
+                    "stage_traces": [
+                        {
+                            "stage": trace.stage,
+                            "mode": trace.mode,
+                            "status": trace.status,
+                            "prompt_version": trace.prompt_version,
+                            "usage": trace.model_usage,
+                            "latency_ms": trace.latency_ms,
+                            "details": trace.details,
+                        }
+                        for trace in interaction.result.stage_traces
+                    ],
                 },
                 ensure_ascii=False,
                 indent=2,

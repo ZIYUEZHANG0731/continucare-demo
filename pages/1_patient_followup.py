@@ -25,6 +25,7 @@ from continucare.fhir.questionnaires import (
 from continucare.fhir.r4 import FHIRValidationError
 from continucare.fhir.terminology import UCUM
 from continucare.presentation import observation_text
+from continucare.models import CareSessionStatus
 from continucare.ui import inject_global_styles, render_mode_badges
 
 
@@ -168,7 +169,15 @@ def _render_latest_submission() -> None:
             st.markdown("**系统记录的患者报告事实**")
             if observations:
                 for observation in observations:
-                    st.markdown(f"- {observation_text(observation)}")
+                    source_label = (
+                        "患者自述新症状"
+                        if observation.evidence.source_kind
+                        == "patient_reported_new"
+                        else "Pathway 已确认监测项"
+                    )
+                    st.markdown(
+                        f"- {observation_text(observation)} · `{source_label}`"
+                    )
             else:
                 st.caption("原始回答已经保存，本次没有形成当前映射范围内的 Observation。")
         with next_col:
@@ -195,6 +204,19 @@ def _render_latest_submission() -> None:
                         "FHIR code": item.code,
                         "结构化值": item.value_display,
                         "来源": f"QuestionnaireResponse/{item.message_id}",
+                        "记录分栏": (
+                            "患者自述新症状"
+                            if item.evidence.source_kind == "patient_reported_new"
+                            else "Pathway 已确认监测项"
+                        ),
+                        "术语匹配": (
+                            (
+                                f"{item.evidence.terminology_match.get('catalog_id')} "
+                                f"v{item.evidence.terminology_match.get('catalog_version')}"
+                            )
+                            if item.evidence.terminology_match
+                            else "—"
+                        ),
                         "确认级别": item.confidence_tier.value,
                     }
                     for item in observations
@@ -213,16 +235,42 @@ def _render_conversation_assist() -> None:
 
     st.markdown("### 先用一句话告诉我今天的情况")
     st.caption(
-        "Care Agent 只提出问卷候选答案；Safety Agent 校验后，仍需您确认才会写入草稿。"
+        "自然语言用于发现事实和检索术语；按钮用于确认含义。只有确认后，才会写入问卷草稿或“患者自述新症状”。"
     )
     with st.chat_message("assistant"):
         st.write(
             "您可以像聊天一样描述，例如：过去24小时吐了2次，现在有点恶心。"
         )
+        st.caption(
+            f"当前按患者时区 {agent_service.patient_timezone} 解析“今天/昨天”；"
+            "也可直接回答上一轮的“是的/不是/不确定”。"
+        )
+        st.caption(
+            "短期记忆覆盖本次每日随访的全部轮次；提交后形成的 Observation "
+            "进入跨日长期记录，不能反推为今天仍有症状。"
+        )
         st.caption("请勿输入真实患者信息；当前仅用于合成数据演示。")
 
     run_key = _semantic_state_key("latest_run")
     run_id = st.session_state.get(run_key)
+    recent_records = list(reversed(store.list_agent_runs(session.session_id)[:5]))
+    for prior in recent_records:
+        if prior.run_id == run_id:
+            continue
+        prior_result = SemanticResult.model_validate(prior.output_json)
+        with st.chat_message("user"):
+            st.write(prior.input_text)
+        with st.chat_message("assistant"):
+            if prior_result.context_resolution is not None:
+                st.write(prior_result.context_resolution.explanation)
+            elif prior_result.clarifications:
+                st.write(prior_result.clarifications[0].prompt)
+            elif prior_result.candidates:
+                st.write(
+                    f"已安全整理 {len(prior_result.candidates)} 项候选，等待患者确认。"
+                )
+            else:
+                st.write("这一轮没有形成可写入的结构化候选。")
     if run_id:
         record = store.get_agent_run(run_id)
         if record and record.session_id == session.session_id:
@@ -260,15 +308,35 @@ def _render_semantic_result(record, result: SemanticResult) -> None:
         st.write(record.input_text)
     with st.chat_message("assistant"):
         if result.mode == "local_semantic_mock":
-            st.caption("本地语义 Mock · 未调用外部模型 · Safety Agent v2 已检查")
+            st.caption("本地语义 Mock · Safety Agent v4 硬规则已检查")
         else:
+            stage_by_name = {item.stage: item for item in result.stage_traces}
+            safety_mode = stage_by_name.get("safety_critic")
+            language_mode = stage_by_name.get("language_rewrite")
+            stage_labels = ["Safety Agent v4 已检查"]
+            if safety_mode and safety_mode.mode == "model_api:xiaomi_mimo":
+                stage_labels.append("MiMo Safety Critic 已复核")
+            if language_mode and language_mode.details.get("rewritten_count", 0):
+                stage_labels.append("亲和力表达已优化")
             st.caption(
                 f"小米 MiMo {record.model_name or ''} · JSON mode · "
-                "Safety Agent v2 已检查"
+                + " · ".join(stage_labels)
             )
 
         if result.status == SemanticStatus.BLOCKED:
             st.warning(_human_reason(result) or "这段文字不能安全转换为健康记录。")
+            return
+
+        if result.status == SemanticStatus.CONTEXT_RESOLVED:
+            resolution = result.context_resolution
+            if resolution is not None:
+                st.success(resolution.explanation)
+                if resolution.applied_link_ids:
+                    st.caption(
+                        "已写入问卷草稿："
+                        + "、".join(resolution.applied_link_ids)
+                    )
+            _render_stage_traces(result)
             return
 
         confirmed_key = _semantic_state_key("confirmed", result.run_id)
@@ -283,6 +351,18 @@ def _render_semantic_result(record, result: SemanticResult) -> None:
                 with st.container(border=True):
                     st.write(candidate.patient_message)
                     st.caption(f"依据原话：‘{candidate.evidence_text}’")
+                    if candidate.terminology_match is not None:
+                        match = candidate.terminology_match
+                        origin_label = (
+                            "患者自述新症状"
+                            if candidate.origin.value == "patient_reported_new"
+                            else "Pathway 已确认监测项"
+                        )
+                        st.caption(
+                            f"仓库匹配：{match.catalog_id} v{match.catalog_version} · "
+                            f"{match.coding.system} | {match.coding.code} · "
+                            f"{origin_label}"
+                        )
                     if st.checkbox(
                         "这项记录正确",
                         value=True,
@@ -367,7 +447,18 @@ def _render_semantic_result(record, result: SemanticResult) -> None:
                 except ValueError as exc:
                     st.warning(str(exc))
 
+        if result.reported_symptom_mentions:
+            st.warning(
+                "以下原话尚未在当前 GLP-1 术语目录中唯一命中，系统不会猜代码："
+                + "、".join(
+                    f"“{item.evidence_text}”"
+                    for item in result.reported_symptom_mentions
+                )
+                + "。原话会随本次记录保留，待医生或术语人员复核。"
+            )
+
         _render_candidate_issues(result)
+        _render_stage_traces(result)
 
 
 def _render_candidate_issues(result: SemanticResult) -> None:
@@ -389,6 +480,28 @@ def _render_candidate_issues(result: SemanticResult) -> None:
                 "判断依据："
                 + "；".join(_display_reason_code(code) for code in issue.reason_codes)
             )
+
+
+def _render_stage_traces(result: SemanticResult) -> None:
+    if not result.stage_traces:
+        return
+    with st.expander("查看 Agent 分阶段记录"):
+        st.dataframe(
+            [
+                {
+                    "阶段": trace.stage,
+                    "Agent": trace.agent_name,
+                    "模式": trace.mode,
+                    "状态": trace.status,
+                    "Prompt": trace.prompt_version or "—",
+                    "Token": (trace.model_usage or {}).get("total_tokens", 0),
+                    "延迟(ms)": trace.latency_ms or 0,
+                }
+                for trace in result.stage_traces
+            ],
+            hide_index=True,
+            width="stretch",
+        )
 
 
 def _display_issue_answer(answer: Any) -> str:
@@ -424,6 +537,37 @@ def _human_reason(result: SemanticResult) -> str | None:
     )
 
 
+def _render_pending_new_symptoms() -> None:
+    reports = store.list_active_symptom_reports(session.session_id)
+    if not reports:
+        return
+    st.markdown("#### 本次已确认的扩展症状")
+    st.caption("这些项目不改写锁定问卷；提交时会生成同样受校验的 FHIR Observation。")
+    st.dataframe(
+        [
+            {
+                "分栏": (
+                    "患者自述新症状"
+                    if item.source_kind == "patient_reported_new"
+                    else "Pathway 已确认监测项"
+                ),
+                "症状": item.preferred_zh,
+                "FHIR system": item.coding["system"],
+                "code": item.coding["code"],
+                "目录": (
+                    f"{item.terminology_match['catalog_id']} "
+                    f"v{item.terminology_match['catalog_version']}"
+                ),
+                "患者原话": item.evidence_text,
+                "报告时间": item.reported_at,
+            }
+            for item in reports
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+
+
 st.set_page_config(
     page_title="患者随访 · ContinuCare",
     page_icon="💬",
@@ -434,14 +578,19 @@ inject_global_styles(st)
 st.title("患者随访（合成数据）")
 st.error("仅用于合成数据演示 · 不提供诊断、治疗或用药建议 · 不是急救通道")
 
-store = SQLiteStore(get_settings().db_path)
+settings = get_settings()
+store = SQLiteStore(settings.db_path)
 patient = store.get_patient(DEMO_PATIENT_ID)
 if patient is None:
     st.error("合成患者初始化失败，请返回首页重置 Demo。")
     st.stop()
 
 engine = CareEngine(store)
-session = engine.start_or_resume(DEMO_PATIENT_ID)
+session = engine.start_or_resume(
+    DEMO_PATIENT_ID,
+    allow_repeat_same_day=False,
+    patient_timezone=settings.patient_timezone,
+)
 questionnaire = engine.questionnaire_for_session(session)
 agent_service = CareAgentService(store, care_engine=engine)
 
@@ -451,6 +600,13 @@ if notice:
 
 st.markdown("## 最近一次随访结果")
 _render_latest_submission()
+
+if session.status == CareSessionStatus.COMPLETED:
+    st.info(
+        "患者当地日期的今日随访已经完成。短期对话已关闭，确认后的 Observation "
+        "已进入长期记录；下一当地日期会自动开启新的每日会话。"
+    )
+    st.stop()
 
 st.markdown("## 完成本次随访")
 profile, form_area = st.columns([1, 2.15], gap="large")
@@ -472,6 +628,7 @@ with profile:
 with form_area:
     with st.container(border=True):
         _render_conversation_assist()
+        _render_pending_new_symptoms()
 
     st.markdown("### 或直接填写完整问卷")
     st.caption("对话整理的确认结果会同步到这里；完整问卷始终是可检查、可修改的兜底入口。")
@@ -554,3 +711,26 @@ with st.expander("第二层与第三层执行边界"):
     else:
         st.write("MiMo API Key 未配置；系统使用本地语义 Mock 安全回退。")
     st.caption("当前 Pathway 为 draft / synthetic_only / not_reviewed。")
+
+with st.expander("查看当前 GLP-1 症状术语目录"):
+    catalog = agent_service.terminology.catalog
+    st.caption(
+        f"{catalog.catalog_id} v{catalog.version} · {catalog.status} · "
+        f"SNOMED CT {catalog.code_system_release.rsplit('/', 1)[-1]}"
+    )
+    st.warning(catalog.completeness_statement)
+    st.dataframe(
+        [
+            {
+                "中文概念": item.preferred_zh,
+                "SNOMED CT": item.coding.code,
+                "英文显示": item.coding.display,
+                "类别": item.category,
+                "中文别名": "、".join(item.aliases_zh),
+                "审核状态": item.approval_status,
+            }
+            for item in catalog.concepts
+        ],
+        hide_index=True,
+        width="stretch",
+    )

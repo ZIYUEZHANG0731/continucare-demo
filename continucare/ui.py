@@ -70,7 +70,7 @@ def render_mode_badges(st) -> None:
         f"""
         <span class="cc-mode-chip">本地稳定演示</span>
         <span class="cc-mode-chip">{model_label}</span>
-        <span class="cc-mode-chip">Safety Agent v2</span>
+        <span class="cc-mode-chip">Safety Agent v4 · 规则 + 可选 MiMo Critic</span>
         <span class="cc-mode-chip">SQLite 持久化</span>
         <span class="cc-mode-chip">飞书通知 Mock · 未联调</span>
         """,

@@ -16,16 +16,30 @@ Patient.pathway_code
                       ├─ 确定性 Observation Mapping Policy
                       │    └─ FHIR Observation + derivedFrom
             └─ Care Agent 对话辅助
-                 ├─ SemanticTask（只含锁定问卷白名单）
-                 ├─ MiMoSemanticAdapter（OpenAI-compatible JSON mode）
+                 ├─ SemanticTask（锁定问卷 + 短期上下文 + 时间锚点）
+                 ├─ ConversationContext（本次每日随访全部轮次 / 待确认 action）
+                 ├─ TemporalContext（患者时区 / 当地日期 / 每日 occurrence）
+                 ├─ MiMoSemanticAdapter（抽取字段 + 不带 code 的症状检索词）
+                 ├─ Repository Terminology Resolver
+                 │    ├─ GLP-1 版本化症状目录 / Questionnaire bindings
+                 │    ├─ 唯一匹配 / 多候选消歧 / 未匹配待复核
+                 │    └─ FHIR Terminology Server / RAG backend 可替换接口
                  ├─ 本地语义 Mock 回退
-                 ├─ Safety Agent v2
-                 └─ 候选卡片 / 动态澄清
+                 ├─ Safety Agent v4
+                 │    ├─ 确定性硬规则
+                 │    ├─ MiMo Safety Critic（只能降级）
+                 │    └─ 遗漏 linkId 定向补抽取 / 问卷澄清
+                 ├─ Care Agent 内部 MiMo Language Rewriter
+                 │    └─ 本地事实完整性检查 / 固定模板回退
+                 └─ 候选卡片 / 动态澄清 / 分阶段审计
                       └─ 患者确认后 CareEngine.save_draft
 
 SQLiteStore 原子提交
   ├─ CareSession
   ├─ AgentRun（版本、模式、输入哈希、结构化输出）
+  ├─ Conversation action resolution（上轮候选/澄清的接受、拒绝、不确定）
+  ├─ Confirmed answer context（原话、occurrence、患者时区、effective start/end）
+  ├─ Confirmed symptom report（目录概念、code、原话、来源分栏、时间）
   ├─ 完整 FHIR JSON
   ├─ 检索投影和证据元数据
   ├─ Summary / Review
@@ -36,13 +50,19 @@ SQLiteStore 原子提交
 
 ## 第三层强制边界
 
-- `AgentRuntime`：只运行显式注册 Agent；当前 Care Agent 工具白名单为空，不能直接操作数据库或 FHIR。
+- `AgentRuntime`：只运行显式注册 Agent；当前独立注册 Care Agent 与 Safety Agent，二者工具白名单均为空，不能直接操作数据库或 FHIR。
 - `SemanticModelAdapter`：Provider-neutral 适配协议；仓库不包含密钥。
 - `MiMoSemanticAdapter`：仅允许小米官方 HTTPS 域名，严格解析 JSON/Pydantic 契约，不信任模型提供的 FHIR code 或患者措辞。
 - `CareSemanticAgent`：MiMo 可用时调用适配器，失败或未配置时回退本地 Mock。
-- `SafetyAgent`：拒绝未知 linkId/code、无效 answerOption/UCUM、错误证据跨度、错误主语/时间和无需确认的候选。
-- `PatientLanguageRenderer`：只负责版本化措辞，不改变 linkId、值、时间范围或单位。
+- `SafetyAgent`：硬规则拒绝未知 linkId/code、无效 answerOption/UCUM、未满足的 enableWhen、错误证据跨度、候选值与证据冲突、错误主语/时间和无需确认的候选；可选 MiMo Critic 只能进一步降级。
+- `MiMoSafetyCritic`：独立 Prompt 复核所有硬规则幸存候选，并检查有逐字证据但遗漏的已发布字段；发现遗漏时只触发该 linkId 的定向补抽取，不能新增问题或恢复硬拒绝。
+- `MiMoLanguageRewriter`：作为 Care Agent 内部能力优化患者措辞；本地校验数字、单位、症状、程度、肯否和时间，任何改变都回退 `PatientLanguageRenderer` 固定模板。
+- `stage_traces`：在单个顶层 AgentRun 中记录每个阶段的 Agent/Prompt/模型、Token、延迟、请求 ID、重试与回退，不另造重复业务任务。
 - `CareAgentService`：只有患者接受候选或澄清选项时才能调用 `CareEngine.save_draft`。
+- `ConversationContext`：短期记忆覆盖本次每日 follow-up occurrence，而非固定 5 轮；短回答只能绑定唯一待处理动作。
+- `long_term_memory`：只读取此前已完成的 Observation，不读取草稿或模型摘要；只能作上下文，不能成为今天候选的证据。
+- `RepositoryTerminologyBackend`：已知与新增症状走同一检索合同；模型只给检索词，不给 code。部署时可以替换为医院 FHIR `$expand/$lookup/$validate-code` 服务或检索增强后端。
+- `TemporalContext`：所有相对时间使用患者 IANA 时区和该轮 `received_at` 解析；`scheduled / submitted / effective` 不复用一个时间字段。
 - Agent 不生成诊断、治疗、用药建议、风险等级或 Alert。
 
 ## 兼容测试流程

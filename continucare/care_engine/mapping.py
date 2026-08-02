@@ -18,8 +18,10 @@ from continucare.fhir.questionnaires import (
 )
 from continucare.fhir.r4 import FHIRValidationError
 from continucare.fhir.terminology import CodingDefinition
-from continucare.models import ConfidenceTier, Observation
+from continucare.agents.contracts import CodingContract
+from continucare.models import ConfidenceTier, ConfirmedAnswerContext, Observation
 from continucare.pathways.mappings import ObservationMappingPolicy
+from continucare.terminology import load_glp1_symptom_catalog
 
 
 def map_response_to_observations(
@@ -27,6 +29,7 @@ def map_response_to_observations(
     response: dict[str, Any],
     questionnaire: dict[str, Any],
     policy: ObservationMappingPolicy,
+    answer_contexts: dict[str, ConfirmedAnswerContext] | None = None,
 ) -> list[Observation]:
     """Apply only the explicit, governed mapping policy; never infer values."""
 
@@ -43,6 +46,7 @@ def map_response_to_observations(
     }
     source_text, fragments = questionnaire_response_summary(response, questionnaire)
     observations: list[Observation] = []
+    answer_contexts = answer_contexts or {}
 
     for mapping in policy.mappings:
         if mapping.link_id not in questions:
@@ -62,15 +66,48 @@ def map_response_to_observations(
         if evidence_start < 0:
             raise FHIRValidationError("structured answer evidence fragment was not retained")
         observation_id = f"observation-{uuid5(NAMESPACE_URL, response['id'] + '|' + mapping.link_id).hex}"
+        answer_context = answer_contexts.get(mapping.link_id)
+        terminology_match = (
+            answer_context.terminology_match
+            if answer_context and answer_context.terminology_match is not None
+            else load_glp1_symptom_catalog()
+            .match_for_questionnaire(
+                link_id=mapping.link_id,
+                coding=CodingContract(
+                    system=code.system,
+                    code=code.code,
+                    display=code.display,
+                    version=code.version,
+                ),
+                matched_text=question.get("text", mapping.link_id),
+            )
+            .model_dump(mode="json")
+        )
+        effective_time = (
+            answer_context.reported_at if answer_context else response["authored"]
+        )
         resource = build_patient_reported_observation(
             observation_id=observation_id,
             patient_id=patient_id,
             questionnaire_response_id=response["id"],
-            effective_time=response["authored"],
+            effective_time=effective_time,
+            issued_time=response["authored"],
             code=code,
             value_element=value_element,
             value=value,
             effective_period_hours=mapping.effective_period_hours,
+            effective_period_start=(
+                answer_context.effective_start
+                if answer_context
+                and answer_context.temporal_kind != "point_in_time"
+                else None
+            ),
+            effective_period_end=(
+                answer_context.effective_end
+                if answer_context
+                and answer_context.temporal_kind != "point_in_time"
+                else None
+            ),
         )
         observations.append(
             Observation(
@@ -82,6 +119,8 @@ def map_response_to_observations(
                     "evidence_start": evidence_start,
                     "evidence_end": evidence_start + len(fragment),
                     "recorded_at": response["authored"],
+                    "source_kind": "pathway_monitored",
+                    "terminology_match": terminology_match,
                 },
             )
         )

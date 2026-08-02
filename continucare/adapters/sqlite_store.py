@@ -17,6 +17,8 @@ from continucare.models import (
     AuditEvent,
     CareSession,
     CareSessionStatus,
+    ConfirmedAnswerContext,
+    ConfirmedSymptomReport,
     FollowUpMessage,
     Observation,
     Patient,
@@ -195,6 +197,228 @@ class SQLiteStore:
             ).fetchall()
         return [row_to_agent_run(row) for row in rows]
 
+    def resolve_conversation_action(
+        self,
+        *,
+        action_id: str,
+        source_run_id: str,
+        session_id: str,
+        decision: str,
+        resolved_at: str,
+        option_id: str | None = None,
+        response_run_id: str | None = None,
+        response_text: str | None = None,
+    ) -> None:
+        """Close a candidate/clarification once, preserving the first decision."""
+
+        with connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO conversation_action_resolutions (
+                    action_id, source_run_id, session_id, response_run_id,
+                    decision, option_id, response_text, resolved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(action_id) DO NOTHING
+                """,
+                (
+                    action_id,
+                    source_run_id,
+                    session_id,
+                    response_run_id,
+                    decision,
+                    option_id,
+                    response_text,
+                    resolved_at,
+                ),
+            )
+
+    def resolved_conversation_action_ids(self, session_id: str) -> set[str]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT action_id FROM conversation_action_resolutions
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchall()
+        return {row["action_id"] for row in rows}
+
+    def save_confirmed_answer_context(self, context: ConfirmedAnswerContext) -> None:
+        """Append a revision and keep exactly one active context per answer."""
+
+        with connect(self.db_path) as connection:
+            connection.execute(
+                """
+                UPDATE confirmed_answer_contexts SET status = 'superseded'
+                WHERE session_id = ? AND link_id = ? AND status = 'active'
+                """,
+                (context.session_id, context.link_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO confirmed_answer_contexts (
+                    answer_context_id, session_id, link_id, answer_json,
+                    source_run_id, followup_occurrence_id, patient_timezone,
+                    reported_at, effective_start, effective_end, temporal_kind,
+                    resolution_basis, raw_text, terminology_match_json,
+                    status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(answer_context_id) DO UPDATE SET status = 'active'
+                """,
+                (
+                    context.answer_context_id,
+                    context.session_id,
+                    context.link_id,
+                    json.dumps(context.answer, ensure_ascii=False),
+                    context.source_run_id,
+                    context.followup_occurrence_id,
+                    context.patient_timezone,
+                    context.reported_at,
+                    context.effective_start,
+                    context.effective_end,
+                    context.temporal_kind,
+                    context.resolution_basis,
+                    context.raw_text,
+                    (
+                        json.dumps(context.terminology_match, ensure_ascii=False)
+                        if context.terminology_match is not None
+                        else None
+                    ),
+                    context.status,
+                    context.created_at,
+                ),
+            )
+
+    def list_active_answer_contexts(
+        self, session_id: str
+    ) -> list[ConfirmedAnswerContext]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM confirmed_answer_contexts
+                WHERE session_id = ? AND status = 'active'
+                ORDER BY created_at
+                """,
+                (session_id,),
+            ).fetchall()
+        return [
+            ConfirmedAnswerContext(
+                answer_context_id=row["answer_context_id"],
+                session_id=row["session_id"],
+                link_id=row["link_id"],
+                answer=json.loads(row["answer_json"]),
+                source_run_id=row["source_run_id"],
+                followup_occurrence_id=row["followup_occurrence_id"],
+                patient_timezone=row["patient_timezone"],
+                reported_at=row["reported_at"],
+                effective_start=row["effective_start"],
+                effective_end=row["effective_end"],
+                temporal_kind=row["temporal_kind"],
+                resolution_basis=row["resolution_basis"],
+                raw_text=row["raw_text"],
+                terminology_match=(
+                    json.loads(row["terminology_match_json"])
+                    if row["terminology_match_json"]
+                    else None
+                ),
+                status=row["status"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def save_confirmed_symptom_report(
+        self, report: ConfirmedSymptomReport
+    ) -> None:
+        with connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO confirmed_symptom_reports (
+                    report_id, session_id, concept_id, preferred_zh, coding_json,
+                    terminology_match_json, source_kind, source_run_id, evidence_text,
+                    evidence_start, evidence_end, followup_occurrence_id,
+                    patient_timezone, reported_at, effective_start, effective_end,
+                    temporal_kind, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, concept_id) DO UPDATE SET
+                    report_id = excluded.report_id,
+                    preferred_zh = excluded.preferred_zh,
+                    coding_json = excluded.coding_json,
+                    terminology_match_json = excluded.terminology_match_json,
+                    source_kind = excluded.source_kind,
+                    source_run_id = excluded.source_run_id,
+                    evidence_text = excluded.evidence_text,
+                    evidence_start = excluded.evidence_start,
+                    evidence_end = excluded.evidence_end,
+                    followup_occurrence_id = excluded.followup_occurrence_id,
+                    patient_timezone = excluded.patient_timezone,
+                    reported_at = excluded.reported_at,
+                    effective_start = excluded.effective_start,
+                    effective_end = excluded.effective_end,
+                    temporal_kind = excluded.temporal_kind,
+                    status = 'active',
+                    created_at = excluded.created_at
+                """,
+                (
+                    report.report_id,
+                    report.session_id,
+                    report.concept_id,
+                    report.preferred_zh,
+                    json.dumps(report.coding, ensure_ascii=False),
+                    json.dumps(report.terminology_match, ensure_ascii=False),
+                    report.source_kind,
+                    report.source_run_id,
+                    report.evidence_text,
+                    report.evidence_start,
+                    report.evidence_end,
+                    report.followup_occurrence_id,
+                    report.patient_timezone,
+                    report.reported_at,
+                    report.effective_start,
+                    report.effective_end,
+                    report.temporal_kind,
+                    report.status,
+                    report.created_at,
+                ),
+            )
+
+    def list_active_symptom_reports(
+        self, session_id: str
+    ) -> list[ConfirmedSymptomReport]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM confirmed_symptom_reports
+                WHERE session_id = ? AND status = 'active'
+                ORDER BY created_at
+                """,
+                (session_id,),
+            ).fetchall()
+        return [
+            ConfirmedSymptomReport(
+                report_id=row["report_id"],
+                session_id=row["session_id"],
+                concept_id=row["concept_id"],
+                preferred_zh=row["preferred_zh"],
+                coding=json.loads(row["coding_json"]),
+                terminology_match=json.loads(row["terminology_match_json"]),
+                source_kind=row["source_kind"],
+                source_run_id=row["source_run_id"],
+                evidence_text=row["evidence_text"],
+                evidence_start=row["evidence_start"],
+                evidence_end=row["evidence_end"],
+                followup_occurrence_id=row["followup_occurrence_id"],
+                patient_timezone=row["patient_timezone"],
+                reported_at=row["reported_at"],
+                effective_start=row["effective_start"],
+                effective_end=row["effective_end"],
+                temporal_kind=row["temporal_kind"],
+                status=row["status"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
     def complete_care_session_submission(
         self,
         *,
@@ -286,8 +510,9 @@ class SQLiteStore:
                     """
                     INSERT INTO observation_evidence (
                         observation_id, confidence_tier, evidence_text,
-                        evidence_start, evidence_end, recorded_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        evidence_start, evidence_end, recorded_at, source_kind,
+                        terminology_match_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item.observation_id,
@@ -296,6 +521,14 @@ class SQLiteStore:
                         item.evidence_start,
                         item.evidence_end,
                         item.created_at,
+                        item.evidence.source_kind,
+                        (
+                            json.dumps(
+                                item.evidence.terminology_match, ensure_ascii=False
+                            )
+                            if item.evidence.terminology_match is not None
+                            else None
+                        ),
                     ),
                 )
             cursor = connection.execute(
@@ -438,8 +671,9 @@ class SQLiteStore:
                     """
                     INSERT INTO observation_evidence (
                         observation_id, confidence_tier, evidence_text,
-                        evidence_start, evidence_end, recorded_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        evidence_start, evidence_end, recorded_at, source_kind,
+                        terminology_match_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         item.observation_id,
@@ -448,6 +682,14 @@ class SQLiteStore:
                         item.evidence_start,
                         item.evidence_end,
                         item.created_at,
+                        item.evidence.source_kind,
+                        (
+                            json.dumps(
+                                item.evidence.terminology_match, ensure_ascii=False
+                            )
+                            if item.evidence.terminology_match is not None
+                            else None
+                        ),
                     ),
                 )
 
@@ -456,7 +698,8 @@ class SQLiteStore:
             rows = connection.execute(
                 """
                 SELECT o.*, e.confidence_tier, e.evidence_text,
-                       e.evidence_start, e.evidence_end, e.recorded_at
+                       e.evidence_start, e.evidence_end, e.recorded_at,
+                       e.source_kind, e.terminology_match_json
                 FROM fhir_observations o
                 JOIN observation_evidence e USING (observation_id)
                 WHERE o.patient_id = ? ORDER BY o.effective_time DESC
@@ -470,7 +713,8 @@ class SQLiteStore:
             rows = connection.execute(
                 """
                 SELECT o.*, e.confidence_tier, e.evidence_text,
-                       e.evidence_start, e.evidence_end, e.recorded_at
+                       e.evidence_start, e.evidence_end, e.recorded_at,
+                       e.source_kind, e.terminology_match_json
                 FROM fhir_observations o
                 JOIN observation_evidence e USING (observation_id)
                 WHERE o.questionnaire_response_id = ? ORDER BY e.evidence_start
@@ -484,7 +728,8 @@ class SQLiteStore:
             row = connection.execute(
                 """
                 SELECT o.*, e.confidence_tier, e.evidence_text,
-                       e.evidence_start, e.evidence_end, e.recorded_at
+                       e.evidence_start, e.evidence_end, e.recorded_at,
+                       e.source_kind, e.terminology_match_json
                 FROM fhir_observations o
                 JOIN observation_evidence e USING (observation_id)
                 WHERE o.observation_id = ?

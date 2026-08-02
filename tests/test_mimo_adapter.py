@@ -198,7 +198,7 @@ def test_today_vomiting_is_clarified_and_does_not_imply_nausea(
                 },
                 {
                     "link_id": "vomiting-count-24h",
-                    "answer": 5,
+                    "answer": "五",
                     "evidence_text": "吐了五次",
                     "subject": "patient",
                     "temporality": "current",

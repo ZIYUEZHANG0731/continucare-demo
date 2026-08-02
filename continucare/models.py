@@ -74,6 +74,51 @@ class CareSession(StrictModel):
     completed_at: str | None = None
 
 
+class ConfirmedAnswerContext(StrictModel):
+    """Layer-3 provenance and effective time for one confirmed draft answer."""
+
+    answer_context_id: str
+    session_id: str
+    link_id: str
+    answer: Any
+    source_run_id: str
+    followup_occurrence_id: str
+    patient_timezone: str
+    reported_at: str
+    effective_start: str | None = None
+    effective_end: str | None = None
+    temporal_kind: str | None = None
+    resolution_basis: str | None = None
+    raw_text: str = Field(min_length=1)
+    terminology_match: dict[str, Any] | None = None
+    status: str = "active"
+    created_at: str
+
+
+class ConfirmedSymptomReport(StrictModel):
+    """A patient-confirmed symptom outside the locked Questionnaire fields."""
+
+    report_id: str
+    session_id: str
+    concept_id: str
+    preferred_zh: str
+    coding: dict[str, Any]
+    terminology_match: dict[str, Any]
+    source_kind: str
+    source_run_id: str
+    evidence_text: str = Field(min_length=1)
+    evidence_start: int = Field(ge=0)
+    evidence_end: int = Field(gt=0)
+    followup_occurrence_id: str
+    patient_timezone: str
+    reported_at: str
+    effective_start: str | None = None
+    effective_end: str | None = None
+    temporal_kind: str | None = None
+    status: str = "active"
+    created_at: str
+
+
 class ObservationEvidence(StrictModel):
     """Application evidence metadata kept outside the FHIR resource body."""
 
@@ -83,6 +128,8 @@ class ObservationEvidence(StrictModel):
     evidence_start: int = Field(ge=0)
     evidence_end: int = Field(ge=0)
     recorded_at: str
+    source_kind: str = "pathway_monitored"
+    terminology_match: dict[str, Any] | None = None
 
     @field_validator("evidence_end")
     @classmethod

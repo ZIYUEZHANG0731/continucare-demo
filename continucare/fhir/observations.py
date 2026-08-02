@@ -19,11 +19,14 @@ def build_patient_reported_observation(
     patient_id: str,
     questionnaire_response_id: str,
     effective_time: str,
+    issued_time: str | None = None,
     code: CodingDefinition,
     value_element: str,
     value: Any,
     observation_id: str | None = None,
     effective_period_hours: int | None = None,
+    effective_period_start: str | None = None,
+    effective_period_end: str | None = None,
 ) -> dict[str, Any]:
     """Build a base FHIR R4 Observation and fail closed on invalid output."""
 
@@ -46,14 +49,21 @@ def build_patient_reported_observation(
         ],
         "code": {"coding": [code.as_fhir()], "text": code.display},
         "subject": {"reference": f"Patient/{patient_id}"},
-        "issued": effective_time,
+        "issued": issued_time or effective_time,
         "performer": [{"reference": f"Patient/{patient_id}"}],
         value_element: value,
         "derivedFrom": [
             {"reference": f"QuestionnaireResponse/{questionnaire_response_id}"}
         ],
     }
-    if effective_period_hours is None:
+    if (effective_period_start is None) != (effective_period_end is None):
+        raise ValueError("explicit effective period requires both start and end")
+    if effective_period_start is not None and effective_period_end is not None:
+        observation["effectivePeriod"] = {
+            "start": effective_period_start,
+            "end": effective_period_end,
+        }
+    elif effective_period_hours is None:
         observation["effectiveDateTime"] = effective_time
     else:
         end = datetime.fromisoformat(effective_time)

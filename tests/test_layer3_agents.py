@@ -177,6 +177,37 @@ def test_safety_agent_rejects_unknown_link_code_and_invalid_evidence(tmp_path):
     code_errors = SafetyAgent().review_candidate(task, bad_code)
     assert any("code_not_governed" in item for item in code_errors)
 
+    wrong_value = valid.model_copy(
+        update={
+            "candidate_id": "candidate-wrong-value",
+            "answer": 9,
+        }
+    )
+    value_errors = SafetyAgent().review_candidate(task, wrong_value)
+    assert any("answer_evidence_mismatch" in item for item in value_errors)
+
+
+def test_safety_agent_rejects_severity_that_disagrees_with_evidence(tmp_path):
+    _, _, session, service = _service(tmp_path)
+    interaction = service.analyze(
+        session.session_id, "我现在有点恶心。"
+    )
+    severity = next(
+        item
+        for item in interaction.result.candidates
+        if item.link_id == "nausea-severity"
+    )
+    wrong_severity = severity.model_copy(
+        update={
+            "candidate_id": "candidate-wrong-severity",
+            "answer": "LA6750-9",
+        }
+    )
+
+    errors = SafetyAgent().review_candidate(interaction.task, wrong_severity)
+
+    assert any("answer_evidence_mismatch" in item for item in errors)
+
 
 def test_agent_runtime_denies_unregistered_tools_even_after_cached_run(tmp_path):
     _, _, session, service = _service(tmp_path)

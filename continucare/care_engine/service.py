@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict
 
@@ -13,6 +15,8 @@ from continucare.fhir.questionnaires import (
     build_questionnaire_response,
     questionnaire_response_summary,
 )
+from continucare.fhir.observations import build_patient_reported_observation
+from continucare.fhir.terminology import CodingDefinition
 from continucare.models import (
     CareSession,
     CareSessionStatus,
@@ -39,7 +43,14 @@ class CareEngine:
         self.store = store
         self.registry = load_builtin_pathways()
 
-    def start_or_resume(self, patient_id: str) -> CareSession:
+    def start_or_resume(
+        self,
+        patient_id: str,
+        *,
+        allow_repeat_same_day: bool = True,
+        patient_timezone: str = "Asia/Shanghai",
+        now: str | None = None,
+    ) -> CareSession:
         patient = self._synthetic_patient(patient_id)
         existing = self.store.get_active_care_session(
             patient_id, patient.pathway_code
@@ -47,9 +58,21 @@ class CareEngine:
         if existing:
             return existing
 
+        if not allow_repeat_same_day:
+            anchor = datetime.fromisoformat(now or utc_now_iso()).astimezone(
+                ZoneInfo(patient_timezone)
+            )
+            latest = next(iter(self.store.list_care_sessions(patient_id)), None)
+            if latest is not None and latest.status == CareSessionStatus.COMPLETED:
+                completed = datetime.fromisoformat(
+                    latest.completed_at or latest.updated_at
+                ).astimezone(ZoneInfo(patient_timezone))
+                if completed.date() == anchor.date():
+                    return latest
+
         pathway = self.registry.get(patient.pathway_code)
         questionnaire = self._questionnaire(pathway.code, pathway.version)
-        now = utc_now_iso()
+        now = now or utc_now_iso()
         session = CareSession(
             session_id=f"session-{uuid4().hex}",
             patient_id=patient_id,
@@ -159,6 +182,17 @@ class CareEngine:
             response=response,
             questionnaire=questionnaire,
             policy=policy,
+            answer_contexts={
+                item.link_id: item
+                for item in self.store.list_active_answer_contexts(session.session_id)
+                if answers.get(item.link_id) == item.answer
+            },
+        )
+        observations.extend(
+            self._patient_reported_symptom_observations(
+                session=session,
+                response=response,
+            )
         )
         message_text, _ = questionnaire_response_summary(response, questionnaire)
         message = FollowUpMessage(
@@ -198,6 +232,59 @@ class CareEngine:
             questionnaire_response=response,
             observations=observations,
         )
+
+    def _patient_reported_symptom_observations(
+        self, *, session: CareSession, response: dict[str, Any]
+    ) -> list[Observation]:
+        """Map patient-confirmed catalog concepts not preselected by the Pathway."""
+
+        reports = self.store.list_active_symptom_reports(session.session_id)
+        source_text, _ = questionnaire_response_summary(
+            response, self.questionnaire_for_session(session)
+        )
+        observations: list[Observation] = []
+        for report in reports:
+            evidence_start = source_text.find(report.evidence_text)
+            if evidence_start < 0:
+                raise ValueError("患者自述症状原文未保留在 QuestionnaireResponse 中")
+            coding = CodingDefinition(**report.coding)
+            effective = report.effective_end or report.reported_at
+            resource = build_patient_reported_observation(
+                observation_id=f"observation-{uuid4().hex}",
+                patient_id=session.patient_id,
+                questionnaire_response_id=response["id"],
+                effective_time=effective,
+                issued_time=response["authored"],
+                code=coding,
+                value_element="valueBoolean",
+                value=True,
+                effective_period_start=(
+                    report.effective_start
+                    if report.temporal_kind not in {None, "point_in_time"}
+                    else None
+                ),
+                effective_period_end=(
+                    report.effective_end
+                    if report.temporal_kind not in {None, "point_in_time"}
+                    else None
+                ),
+            )
+            observations.append(
+                Observation(
+                    resource=resource,
+                    evidence={
+                        "questionnaire_response_id": response["id"],
+                        "confidence_tier": "patient_confirmed",
+                        "evidence_text": report.evidence_text,
+                        "evidence_start": evidence_start,
+                        "evidence_end": evidence_start + len(report.evidence_text),
+                        "recorded_at": response["authored"],
+                        "source_kind": report.source_kind,
+                        "terminology_match": report.terminology_match,
+                    },
+                )
+            )
+        return observations
 
     def stop(self, session_id: str) -> CareSession:
         session = self._in_progress_session(session_id)

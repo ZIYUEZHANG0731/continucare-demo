@@ -2,7 +2,7 @@
 
 ## 0. 实施状态
 
-本节同时描述六 Agent 目标架构和当前第三层实现。现已实现受控 Agent Runtime、小米 MiMo Care Agent 语义适配器、本地 Mock 回退、Safety Agent v2、字段级证据一致性、动态澄清、可解释候选去向和患者确认门。Guideline/Memory/Risk/Summary Agent 仍属于后续层或后续阶段，当前临床规则为空并采取 fail-closed，不能据此宣称六 Agent 模型效果或临床准确率。
+本节同时描述六 Agent 目标架构和当前第三层实现。六个顶层业务角色没有增加：当前真正进入运行时的是 Care Agent 与 Safety Agent；Language Rewriter、Conversation Context Resolver、Temporal Resolver 和 Terminology Resolver 是受控内部能力，不是新的顶层业务 Agent。现已实现小米 MiMo 抽取、Safety Agent v4（确定性硬规则 + MiMo Critic）、遗漏字段定向补抽取、事实锁定的 MiMo 语言改写、按每日随访会话保存的短期上下文、已完成 Observation 的基础只读长期上下文、仓库术语检索、多候选消歧、患者本地时间解析、本地回退和患者确认门。Guideline/完整 Clinical Memory/Risk/Summary Agent 仍属于后续层或后续阶段，当前临床规则为空并采取 fail-closed，不能据此宣称六 Agent 模型效果或临床准确率。
 
 ## 1. Agent设计原则
 
@@ -145,10 +145,14 @@ flowchart TD
 1. Pathway Engine触发随访任务。
 2. Care Agent生成患者问题。
 3. 患者回复。
-4. Agent 只生成 Questionnaire 答案候选并给出原文证据跨度。
-5. Safety Agent 校验；信息模糊时一次追问一个问题。
-6. 患者确认后交给 Care Engine 写入 QuestionnaireResponse/Observation。
-7. 后续由经临床批准的 Rule Engine 执行风险工作流；当前保持 not_assessed。
+4. Care Agent 先构建 `ConversationContext + TemporalContext`；简短回答只能绑定唯一个已发布的未完成问题，相对时间按患者 IANA 时区解析。
+5. Agent 生成 Questionnaire 答案候选和不带 code 的症状检索词，并给出原文证据跨度。
+6. Terminology Resolver 对已知字段和新症状统一查询版本化仓库目录；多 code 时追问，未命中时保留原话，不猜代码。
+7. Safety Agent 先执行确定性硬规则，再由 MiMo Critic 复核幸存候选和遗漏项；Critic 只能降级，不能恢复硬拒绝。
+8. Critic 发现有逐字证据的遗漏时，Care Agent 只对对应的已发布 linkId 定向补抽取；仍不明确则回到 Questionnaire 澄清。
+9. Care Agent 内部 Language Rewriter 优化患者措辞；事实锁定失败时保留固定模板。
+10. 患者按钮或明确自然语言确认后，已知项进入问卷草稿，新症状进入 `ConfirmedSymptomReport`；提交时统一生成 QuestionnaireResponse/Observation。
+11. 后续由经临床批准的 Rule Engine 执行风险工作流；当前保持 not_assessed。
 
 ## 5. Clinical Memory Agent
 
@@ -318,6 +322,8 @@ flowchart TD
 
 目标职责是检查关键AI输出是否满足证据链、边界表达和人工审批要求。该检查用于降低风险，不构成对输出正确性的保证。
 
+当前第三层实现采用两道门：第一道是不可被 LLM 覆盖的确定性硬规则；第二道是 MiMo Safety Critic 的语义复核与遗漏检查。Safety Agent v4 额外校验简短回答的 `context_binding` 必须精确对应唯一未完成问题。Critic 不拥有数据库/FHIR 工具，不能恢复已拒绝候选，也不能把普通历史描述升级为系统级注入阻断。
+
 ### 8.2 输入
 
 - Agent输出。
@@ -358,6 +364,8 @@ flowchart TD
 - 是否低置信但未标记。
 - 是否应触发急症流程。
 - 是否需要人工审批。
+
+当前第三层尚不执行风险分级、Alert、Task 或 Emergency Workflow；相关项目只是六 Agent 目标架构，必须在第四层接入经医院批准的固定规则后实现。
 
 ## 9. Agent输出Schema要求
 

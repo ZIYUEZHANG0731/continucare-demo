@@ -1,4 +1,4 @@
-"""Deterministic Safety Agent v2 for semantic candidates."""
+"""Hybrid Safety Agent: deterministic hard gates plus optional LLM critic."""
 
 from __future__ import annotations
 
@@ -7,15 +7,29 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from continucare.agents.contracts import (
+    AgentStageTrace,
     CandidateIssue,
     CandidateIssueAction,
     ClarificationKind,
+    ClarificationOption,
+    ClarificationRequest,
     SemanticCandidate,
     SemanticResult,
     SemanticStatus,
     SemanticTask,
+    SafetyReviewTask,
     SubjectType,
     Temporality,
+)
+from continucare.care_agent.mimo_enhancements import (
+    SafetyCritic,
+    governed_missing_findings,
+    questionnaire_item_enabled,
+)
+from continucare.care_agent.numbers import (
+    count_from_evidence,
+    millilitres_from_evidence,
+    parse_number_token,
 )
 from continucare.fhir.terminology import UCUM
 
@@ -58,6 +72,9 @@ _REASON_TEXT = {
     "negation_answer_conflict": "候选答案与模型给出的否定标签互相矛盾。",
     "unknown_link_id": "候选字段不属于当前锁定问卷。",
     "conflicting_answers": "同一个问卷字段出现了互相冲突的答案。",
+    "enable_when_not_satisfied": "当前已确认信息尚未满足该问题的启用条件。",
+    "answer_evidence_mismatch": "候选值与引用原话中的数值、选项或程度不一致。",
+    "invalid_context_binding": "当前回答无法与唯一的上一轮已批准问题建立可追溯绑定。",
 }
 
 
@@ -68,7 +85,7 @@ def instruction_like_text(text: str) -> bool:
 
 
 class SafetyAgent:
-    VERSION = "safety-agent-rules-v2"
+    VERSION = "safety-agent-hybrid-v4"
     _FORBIDDEN_PATIENT_WORDING = ("诊断为", "建议停药", "建议加药", "治疗方案", "风险等级")
     _EXPLICIT_24H_LINKS = {
         "vomiting-count-24h",
@@ -79,6 +96,171 @@ class SafetyAgent:
         "nausea-severity",
         "abdominal-pain-present",
     }
+
+    def __init__(self, critic: SafetyCritic | None = None):
+        self.critic = critic
+
+    def analyze(self, review_task: SafetyReviewTask) -> SemanticResult:
+        task = review_task.semantic_task
+        hard_result = self.review(task, review_task.draft)
+        hard_trace = AgentStageTrace(
+            stage="safety_hard_rules",
+            agent_name="safety_agent",
+            agent_version=self.VERSION,
+            mode="deterministic_rules",
+            status=hard_result.status.value,
+            details={
+                "candidate_count": len(hard_result.candidates),
+                "clarification_count": len(hard_result.clarifications),
+                "violation_count": len(hard_result.safety_violations),
+            },
+        )
+        hard_result = hard_result.model_copy(
+            update={"stage_traces": [*hard_result.stage_traces, hard_trace]}
+        )
+        if (
+            self.critic is None
+            or not self.critic.configured
+            or hard_result.status == SemanticStatus.BLOCKED
+        ):
+            return hard_result.model_copy(
+                update={
+                    "stage_traces": [
+                        *hard_result.stage_traces,
+                        AgentStageTrace(
+                            stage="safety_critic",
+                            agent_name="safety_agent",
+                            agent_version=self.VERSION,
+                            mode="disabled_or_not_applicable",
+                            status="skipped",
+                        ),
+                    ]
+                }
+            )
+        try:
+            outcome = self.critic.review(task, hard_result)
+        except Exception as exc:
+            return hard_result.model_copy(
+                update={
+                    "ignored_reasons": [
+                        *hard_result.ignored_reasons,
+                        f"safety_critic_fallback:{type(exc).__name__}",
+                    ],
+                    "stage_traces": [
+                        *hard_result.stage_traces,
+                        AgentStageTrace(
+                            stage="safety_critic",
+                            agent_name="safety_agent",
+                            agent_version=self.VERSION,
+                            mode="deterministic_fallback",
+                            status="failed",
+                            details={"error_type": type(exc).__name__},
+                        ),
+                    ],
+                }
+            )
+        return self._apply_critic(task, hard_result, outcome)
+
+    def _apply_critic(self, task, hard_result, outcome) -> SemanticResult:
+        decision = outcome.decision
+        review_groups = {}
+        for item in decision.candidate_reviews:
+            review_groups.setdefault(item.candidate_id, []).append(item)
+        candidates: list[SemanticCandidate] = []
+        clarifications = list(hard_result.clarifications)
+        issues = list(hard_result.candidate_issues)
+        violations = list(hard_result.safety_violations)
+        global_downgrade = decision.overall_verdict in {"block", "human_review"}
+        for candidate in hard_result.candidates:
+            candidate_reviews = review_groups.get(candidate.candidate_id, [])
+            review = candidate_reviews[0] if len(candidate_reviews) == 1 else None
+            verdict = review.verdict if review is not None else "human_review"
+            if review is not None and verdict == "pass":
+                if review.evidence_status == "ambiguous":
+                    verdict = "clarification_required"
+                elif review.evidence_status == "unsupported":
+                    verdict = "reject"
+            if global_downgrade and verdict == "pass":
+                verdict = "human_review"
+            if verdict == "pass":
+                candidates.append(candidate)
+                continue
+            reason_codes = (
+                review.reason_codes
+                if review is not None and review.reason_codes
+                else ["safety_critic_review_required"]
+            )
+            explanation = (
+                review.explanation
+                if review is not None
+                else "Safety Critic 未返回该候选的明确审核结果，系统要求进一步确认。"
+            )
+            if verdict in {"clarification_required", "human_review"}:
+                clarifications.append(
+                    _critic_clarification(candidate, explanation)
+                )
+                issues.append(
+                    _critic_issue(
+                        task,
+                        candidate,
+                        reason_codes,
+                        explanation,
+                        CandidateIssueAction.CLARIFICATION_REQUIRED,
+                    )
+                )
+            else:
+                violations.extend(
+                    f"{candidate.candidate_id}:{code}" for code in reason_codes
+                )
+                issues.append(
+                    _critic_issue(
+                        task,
+                        candidate,
+                        reason_codes,
+                        explanation,
+                        CandidateIssueAction.REJECTED,
+                    )
+                )
+        findings = governed_missing_findings(task, hard_result, outcome)
+        status = _result_status(
+            candidates,
+            clarifications,
+            blocked=hard_result.status == SemanticStatus.BLOCKED,
+        )
+        trace = AgentStageTrace(
+            stage="safety_critic",
+            agent_name="safety_agent",
+            agent_version=self.VERSION,
+            mode=outcome.mode,
+            status=decision.overall_verdict,
+            model_provider="xiaomi_mimo",
+            model_name=self.critic.config.model_name,
+            prompt_version=outcome.prompt_version,
+            model_usage=outcome.model_usage,
+            provider_request_id=outcome.provider_request_id,
+            latency_ms=outcome.latency_ms,
+            details={
+                "reviewed_candidate_count": len(decision.candidate_reviews),
+                "missing_supported_count": sum(
+                    item.status.value == "supported" for item in findings
+                ),
+                "missing_ambiguous_count": sum(
+                    item.status.value == "ambiguous" for item in findings
+                ),
+                "attempt_count": outcome.attempt_count,
+            },
+        )
+        return hard_result.model_copy(
+            update={
+                "status": status,
+                "candidates": candidates,
+                "clarifications": clarifications,
+                "candidate_issues": _deduplicate_issues(issues),
+                "missing_items": findings,
+                "safety_violations": sorted(set(violations)),
+                "stage_traces": [*hard_result.stage_traces, trace],
+            }
+        )
 
     def review(self, task: SemanticTask, draft: SemanticResult) -> SemanticResult:
         violations = list(draft.safety_violations)
@@ -98,6 +280,25 @@ class SafetyAgent:
             else:
                 safe_candidates.append(candidate)
 
+        governed_answers = dict(task.existing_answers)
+        governed_answers.update(
+            {item.link_id: item.answer for item in safe_candidates}
+        )
+        dependency_safe_candidates: list[SemanticCandidate] = []
+        for candidate in safe_candidates:
+            item = next(
+                item
+                for item in task.allowed_items
+                if item.link_id == candidate.link_id
+            )
+            if questionnaire_item_enabled(item, governed_answers):
+                dependency_safe_candidates.append(candidate)
+                continue
+            errors = [f"{candidate.candidate_id}:enable_when_not_satisfied"]
+            violations.extend(errors)
+            candidate_issues.append(_candidate_issue(task, candidate, errors))
+        safe_candidates = dependency_safe_candidates
+
         safe_clarifications = []
         for clarification in draft.clarifications:
             proposed = clarification.proposed_candidate
@@ -111,6 +312,15 @@ class SafetyAgent:
             errors = self.review_candidate(
                 task, proposed, allow_unspecified_temporality=allow_unspecified
             )
+            item = next(
+                item
+                for item in task.allowed_items
+                if item.link_id == proposed.link_id
+            )
+            if not questionnaire_item_enabled(item, governed_answers):
+                errors.append(
+                    f"{proposed.candidate_id}:enable_when_not_satisfied"
+                )
             if errors:
                 violations.extend(errors)
                 candidate_issues.append(_candidate_issue(task, proposed, errors))
@@ -150,9 +360,12 @@ class SafetyAgent:
             errors.append(f"{prefix}:subject_not_patient")
         if not candidate.requires_patient_confirmation:
             errors.append(f"{prefix}:confirmation_required")
+        context_bound = _valid_context_binding(task, candidate)
+        if candidate.context_binding is not None and not context_bound:
+            errors.append(f"{prefix}:invalid_context_binding")
         if not _evidence_matches(task.message_text, candidate):
             errors.append(f"{prefix}:invalid_evidence_span")
-        elif not _evidence_supports_field(candidate):
+        elif not _evidence_supports_field(candidate) and not context_bound:
             errors.append(f"{prefix}:evidence_concept_mismatch")
         if any(word in candidate.patient_message for word in self._FORBIDDEN_PATIENT_WORDING):
             errors.append(f"{prefix}:unsafe_patient_wording")
@@ -167,10 +380,34 @@ class SafetyAgent:
                 errors.append(f"{prefix}:code_not_governed")
         elif candidate.questionnaire_code is not None:
             errors.append(f"{prefix}:unexpected_code")
+        if task.terminology_catalog_id is not None:
+            match = candidate.terminology_match
+            if match is None:
+                errors.append(f"{prefix}:terminology_match_missing")
+            else:
+                if (
+                    match.catalog_id != task.terminology_catalog_id
+                    or match.catalog_version != task.terminology_catalog_version
+                ):
+                    errors.append(f"{prefix}:terminology_catalog_mismatch")
+                actual = candidate.questionnaire_code
+                if actual is None or (
+                    actual.system,
+                    actual.code,
+                    actual.version,
+                ) != (
+                    match.target_coding.system,
+                    match.target_coding.code,
+                    match.target_coding.version,
+                ):
+                    errors.append(f"{prefix}:terminology_target_code_mismatch")
+                if match.validation_status != "repository_release_validated":
+                    errors.append(f"{prefix}:terminology_code_not_validated")
 
-        errors.extend(
-            f"{prefix}:{error}" for error in _answer_errors(item, candidate.answer)
-        )
+        answer_errors = _answer_errors(item, candidate.answer)
+        errors.extend(f"{prefix}:{error}" for error in answer_errors)
+        if not answer_errors and not _answer_matches_evidence(item, candidate):
+            errors.append(f"{prefix}:answer_evidence_mismatch")
         if candidate.link_id in self._EXPLICIT_24H_LINKS:
             if not (
                 candidate.temporality == Temporality.EXPLICIT_24H
@@ -221,12 +458,61 @@ def _answer_errors(item, answer: Any) -> list[str]:
     return []
 
 
+def _answer_matches_evidence(item, candidate: SemanticCandidate) -> bool:
+    if item.item_type == "integer":
+        value = count_from_evidence(candidate.evidence_text)
+        if value is None and candidate.context_binding is not None:
+            match = re.search(
+                r"\d+|[零〇一二两三四五六七八九十]+",
+                candidate.evidence_text,
+            )
+            value = parse_number_token(match.group(0)) if match else None
+        return value == candidate.answer
+    if item.item_type == "quantity":
+        value = millilitres_from_evidence(candidate.evidence_text)
+        if value is None and candidate.context_binding is not None:
+            match = re.search(
+                r"\d+(?:\.\d+)?|[零〇一二两三四五六七八九十]+",
+                candidate.evidence_text,
+            )
+            value = parse_number_token(match.group(0)) if match else None
+        return value == candidate.answer["value"]
+    if item.item_type == "choice":
+        matched_codes = {
+            option.code
+            for option in item.answer_options
+            if any(
+                term and term in candidate.evidence_text
+                for term in [option.display, *option.semantic_aliases]
+            )
+        }
+        return matched_codes == {candidate.answer}
+    return True
+
+
 def _evidence_matches(text: str, candidate: SemanticCandidate) -> bool:
     return (
         candidate.evidence_end <= len(text)
         and text[candidate.evidence_start : candidate.evidence_end]
         == candidate.evidence_text
     )
+
+
+def _valid_context_binding(
+    task: SemanticTask, candidate: SemanticCandidate
+) -> bool:
+    binding = candidate.context_binding
+    if binding is None:
+        return False
+    matching = [
+        item
+        for item in task.conversation_context.pending_actions
+        if item.action_id == binding.source_action_id
+        and item.source_run_id == binding.source_run_id
+        and item.link_id == candidate.link_id
+        and item.action_type.value == "clarification"
+    ]
+    return len(task.conversation_context.pending_actions) == 1 and len(matching) == 1
 
 
 def _evidence_supports_field(candidate: SemanticCandidate) -> bool:
@@ -283,6 +569,74 @@ def _candidate_issue(
         action=CandidateIssueAction.REJECTED,
         reason_codes=reason_codes,
         explanation=explanation,
+    )
+
+
+def _critic_issue(
+    task: SemanticTask,
+    candidate: SemanticCandidate,
+    reason_codes: list[str],
+    explanation: str,
+    action: CandidateIssueAction,
+) -> CandidateIssue:
+    item = next(
+        (item for item in task.allowed_items if item.link_id == candidate.link_id),
+        None,
+    )
+    field_label = _FIELD_LABELS.get(
+        candidate.link_id,
+        item.text if item is not None else candidate.link_id,
+    )
+    normalized_codes = list(dict.fromkeys(reason_codes)) or [
+        "safety_critic_review_required"
+    ]
+    return CandidateIssue(
+        issue_id="issue-"
+        + uuid5(
+            NAMESPACE_URL,
+            "|".join(
+                (
+                    candidate.candidate_id,
+                    action.value,
+                    *normalized_codes,
+                )
+            ),
+        ).hex,
+        candidate_id=candidate.candidate_id,
+        link_id=candidate.link_id,
+        field_label=field_label,
+        proposed_answer=candidate.answer,
+        evidence_text=candidate.evidence_text,
+        action=action,
+        reason_codes=normalized_codes,
+        explanation=explanation,
+    )
+
+
+def _critic_clarification(
+    candidate: SemanticCandidate, explanation: str
+) -> ClarificationRequest:
+    return ClarificationRequest(
+        clarification_id="clarify-"
+        + uuid5(
+            NAMESPACE_URL,
+            f"{candidate.candidate_id}|semantic-review",
+        ).hex,
+        kind=ClarificationKind.SEMANTIC_REVIEW,
+        prompt=(
+            f"{candidate.patient_message} "
+            "这项表达可能存在歧义，请您确认；不确定时可以在完整问卷中修改。"
+        ),
+        proposed_candidate=candidate,
+        options=[
+            ClarificationOption(
+                option_id="yes_semantic",
+                label="是，这项记录正确",
+                accepts_candidate=True,
+            ),
+            ClarificationOption(option_id="no", label="不是"),
+            ClarificationOption(option_id="unsure", label="我不确定"),
+        ],
     )
 
 

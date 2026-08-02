@@ -27,6 +27,7 @@ def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
 def initialize_database(db_path: Path | str | None = None) -> None:
     with connect(db_path) as connection:
         connection.executescript(SCHEMA_SQL)
+        _migrate_schema(connection)
         connection.execute(
             """
             INSERT INTO demo_metadata (key, value, updated_at)
@@ -36,6 +37,40 @@ def initialize_database(db_path: Path | str | None = None) -> None:
             (utc_now_iso(),),
         )
         _seed_demo_patient(connection)
+
+
+def _migrate_schema(connection: sqlite3.Connection) -> None:
+    """Apply additive local-demo migrations without deleting existing data."""
+
+    columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(observation_evidence)")
+    }
+    if "source_kind" not in columns:
+        connection.execute(
+            "ALTER TABLE observation_evidence ADD COLUMN "
+            "source_kind TEXT NOT NULL DEFAULT 'pathway_monitored'"
+        )
+    if "terminology_match_json" not in columns:
+        connection.execute(
+            "ALTER TABLE observation_evidence ADD COLUMN terminology_match_json TEXT"
+        )
+    answer_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(confirmed_answer_contexts)")
+    }
+    if "terminology_match_json" not in answer_columns:
+        connection.execute(
+            "ALTER TABLE confirmed_answer_contexts ADD COLUMN terminology_match_json TEXT"
+        )
+    symptom_report_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(confirmed_symptom_reports)")
+    }
+    if "source_kind" not in symptom_report_columns:
+        connection.execute(
+            "ALTER TABLE confirmed_symptom_reports ADD COLUMN "
+            "source_kind TEXT NOT NULL DEFAULT 'patient_reported_new'"
+        )
 
 
 def reset_demo(db_path: Path | str | None = None) -> None:
@@ -159,6 +194,59 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     error_code TEXT
 );
 
+CREATE TABLE IF NOT EXISTS conversation_action_resolutions (
+    action_id TEXT PRIMARY KEY,
+    source_run_id TEXT NOT NULL REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES care_sessions(session_id) ON DELETE CASCADE,
+    response_run_id TEXT,
+    decision TEXT NOT NULL CHECK (decision IN ('accepted', 'rejected', 'unsure')),
+    option_id TEXT,
+    response_text TEXT,
+    resolved_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS confirmed_answer_contexts (
+    answer_context_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES care_sessions(session_id) ON DELETE CASCADE,
+    link_id TEXT NOT NULL,
+    answer_json TEXT NOT NULL,
+    source_run_id TEXT NOT NULL REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+    followup_occurrence_id TEXT NOT NULL,
+    patient_timezone TEXT NOT NULL,
+    reported_at TEXT NOT NULL,
+    effective_start TEXT,
+    effective_end TEXT,
+    temporal_kind TEXT,
+    resolution_basis TEXT,
+    raw_text TEXT NOT NULL,
+    terminology_match_json TEXT,
+    status TEXT NOT NULL CHECK (status IN ('active', 'superseded')),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS confirmed_symptom_reports (
+    report_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES care_sessions(session_id) ON DELETE CASCADE,
+    concept_id TEXT NOT NULL,
+    preferred_zh TEXT NOT NULL,
+    coding_json TEXT NOT NULL,
+    terminology_match_json TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_run_id TEXT NOT NULL REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+    evidence_text TEXT NOT NULL,
+    evidence_start INTEGER NOT NULL,
+    evidence_end INTEGER NOT NULL,
+    followup_occurrence_id TEXT NOT NULL,
+    patient_timezone TEXT NOT NULL,
+    reported_at TEXT NOT NULL,
+    effective_start TEXT,
+    effective_end TEXT,
+    temporal_kind TEXT,
+    status TEXT NOT NULL CHECK (status IN ('active', 'superseded')),
+    created_at TEXT NOT NULL,
+    UNIQUE(session_id, concept_id)
+);
+
 CREATE TABLE IF NOT EXISTS fhir_observations (
     observation_id TEXT PRIMARY KEY,
     patient_id TEXT NOT NULL REFERENCES patients(patient_id) ON DELETE CASCADE,
@@ -181,7 +269,9 @@ CREATE TABLE IF NOT EXISTS observation_evidence (
     evidence_text TEXT NOT NULL,
     evidence_start INTEGER NOT NULL,
     evidence_end INTEGER NOT NULL,
-    recorded_at TEXT NOT NULL
+    recorded_at TEXT NOT NULL,
+    source_kind TEXT NOT NULL DEFAULT 'pathway_monitored',
+    terminology_match_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -245,6 +335,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_care_session
 ON care_sessions(patient_id, pathway_code) WHERE status = 'in_progress';
 CREATE INDEX IF NOT EXISTS idx_agent_runs_session_time
 ON agent_runs(session_id, completed_at);
+CREATE INDEX IF NOT EXISTS idx_conversation_resolutions_session
+ON conversation_action_resolutions(session_id, resolved_at);
+CREATE INDEX IF NOT EXISTS idx_answer_contexts_session_link
+ON confirmed_answer_contexts(session_id, link_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_answer_context
+ON confirmed_answer_contexts(session_id, link_id) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_symptom_reports_session_status
+ON confirmed_symptom_reports(session_id, status, created_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_patient_status
 ON alerts(patient_id, status);
 CREATE INDEX IF NOT EXISTS idx_audit_patient_time

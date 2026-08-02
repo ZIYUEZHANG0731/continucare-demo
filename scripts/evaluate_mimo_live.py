@@ -56,6 +56,11 @@ def main() -> None:
         raise SystemExit(
             "MiMo is not configured. Put a rotated MIMO_API_KEY in the ignored .env file."
         )
+    if not config.safety_llm_enabled or not config.language_llm_enabled:
+        raise SystemExit(
+            "Enable CONTINUCARE_USE_SAFETY_LLM and "
+            "CONTINUCARE_USE_LANGUAGE_LLM for the full Layer-3 evaluation."
+        )
 
     cases = json.loads(args.cases.read_text(encoding="utf-8"))
     details: list[dict[str, Any]] = []
@@ -82,8 +87,26 @@ def main() -> None:
                 for issue in result.candidate_issues
                 if issue.action == CandidateIssueAction.REJECTED
             ]
+            stages = {trace.stage: trace for trace in result.stage_traces}
+            safety_trace = stages.get("safety_critic")
+            language_trace = stages.get("language_rewrite")
+            language_applicable = bool(
+                result.candidates or result.clarifications
+            )
             checks = {
                 "live_provider_mode": result.mode == "model_api:xiaomi_mimo",
+                "safety_critic_live": bool(
+                    safety_trace
+                    and safety_trace.mode == "model_api:xiaomi_mimo"
+                ),
+                "language_rewriter_live_or_not_applicable": bool(
+                    language_trace
+                    and (
+                        language_trace.mode == "model_api:xiaomi_mimo"
+                        if language_applicable
+                        else language_trace.mode == "not_applicable"
+                    )
+                ),
                 "status_exact": result.status.value == case["expected_status"],
                 "candidate_links_exact": sorted(actual_answers)
                 == sorted(case["expected_candidates"]),
@@ -92,6 +115,15 @@ def main() -> None:
                 "clarification_links_exact": actual_clarifications
                 == sorted(case["expected_clarification_links"]),
             }
+            business_result_exact = all(
+                checks[key]
+                for key in (
+                    "status_exact",
+                    "candidate_links_exact",
+                    "candidate_answers_exact",
+                    "clarification_links_exact",
+                )
+            )
             usage = result.model_usage or {}
             case_tokens = usage.get("total_tokens", 0)
             total_tokens += case_tokens
@@ -100,6 +132,7 @@ def main() -> None:
                 {
                     "case_id": case["case_id"],
                     "passed": all(checks.values()),
+                    "business_result_exact": business_result_exact,
                     "clean_model_output": not rejected_issues
                     and not result.safety_violations,
                     "latency_ms": latency_ms,
@@ -116,7 +149,14 @@ def main() -> None:
                         "mode": result.mode,
                         "status": result.status.value,
                         "candidates": actual_answers,
+                        "patient_messages": {
+                            candidate.link_id: candidate.patient_message
+                            for candidate in result.candidates
+                        },
                         "clarification_links": actual_clarifications,
+                        "clarification_prompts": [
+                            item.prompt for item in result.clarifications
+                        ],
                         "candidate_issues": [
                             {
                                 "link_id": issue.link_id,
@@ -126,11 +166,16 @@ def main() -> None:
                             for issue in result.candidate_issues
                         ],
                         "safety_violations": result.safety_violations,
+                        "stage_traces": [
+                            trace.model_dump(mode="json")
+                            for trace in result.stage_traces
+                        ],
                     },
                 }
             )
 
     passed = sum(item["passed"] for item in details)
+    business_passed = sum(item["business_result_exact"] for item in details)
     clean = sum(item["clean_model_output"] for item in details)
     output = {
         "evaluation_scope": (
@@ -138,16 +183,23 @@ def main() -> None:
         ),
         "provider": config.provider,
         "model": config.model_name,
+        "prompt_versions": {
+            "extraction": config.prompt_version,
+            "safety": config.safety_prompt_version,
+            "language": config.language_prompt_version,
+        },
         "case_set": args.cases.name,
         "totals": {
             "cases": len(details),
-            "end_to_end_exact": passed,
+            "business_result_exact": business_passed,
+            "full_pipeline_exact": passed,
             "clean_model_output": clean,
             "total_tokens": total_tokens,
             "total_latency_ms": total_latency_ms,
             "average_latency_ms": round(total_latency_ms / len(details)),
         },
-        "all_end_to_end_exact": passed == len(details),
+        "all_business_results_exact": business_passed == len(details),
+        "all_full_pipeline_exact": passed == len(details),
         "details": details,
     }
     args.output.write_text(
@@ -156,7 +208,7 @@ def main() -> None:
     )
     print(json.dumps(output, ensure_ascii=False, indent=2))
     print(f"report: {args.output}")
-    if args.fail_on_mismatch and not output["all_end_to_end_exact"]:
+    if args.fail_on_mismatch and not output["all_full_pipeline_exact"]:
         raise SystemExit(1)
 
 

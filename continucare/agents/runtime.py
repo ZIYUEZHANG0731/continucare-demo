@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
-from continucare.agents.contracts import AgentRuntimeOutcome, SemanticTask
+from typing import Any
+
+from continucare.agents.contracts import AgentRuntimeOutcome
 from continucare.agents.errors import AgentTimeoutError, AgentToolDeniedError
 from continucare.agents.registry import AgentRegistry
 from continucare.db import utc_now_iso
@@ -19,7 +21,7 @@ class AgentRuntime:
     def run(
         self,
         agent_name: str,
-        task: SemanticTask,
+        task: Any,
         *,
         requested_tools: tuple[str, ...] = (),
     ) -> AgentRuntimeOutcome:

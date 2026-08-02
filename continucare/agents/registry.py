@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
-from continucare.agents.contracts import SemanticResult, SemanticTask
+from continucare.agents.contracts import SemanticResult
 from continucare.agents.errors import AgentNotRegisteredError
 
 
 class SemanticAgent(Protocol):
-    def analyze(self, task: SemanticTask) -> SemanticResult: ...
+    def analyze(self, task: Any) -> SemanticResult: ...
 
 
 @dataclass(frozen=True)

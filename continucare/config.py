@@ -12,6 +12,7 @@ class Settings:
     db_path: Path
     mode: str
     feishu_enabled: bool
+    patient_timezone: str
 
 
 def load_local_environment(path: Path | str = ".env") -> None:
@@ -39,4 +40,5 @@ def get_settings() -> Settings:
         db_path=Path(os.getenv("CONTINUCARE_DB_PATH", "data/continucare.db")),
         mode=os.getenv("CONTINUCARE_MODE", "local_stable_demo"),
         feishu_enabled=os.getenv("FEISHU_ENABLED", "false").lower() == "true",
+        patient_timezone=os.getenv("CONTINUCARE_PATIENT_TIMEZONE", "Asia/Shanghai"),
     )
