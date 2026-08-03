@@ -16,6 +16,11 @@ from continucare.fhir.references import (
     validate_questionnaire_response_against_questionnaire,
 )
 from continucare.models import FollowUpMessage
+from continucare.layer4.fhir import (
+    build_communication,
+    build_provenance,
+    build_workflow_task,
+)
 from continucare.pathways import load_glp1_plan_definition, load_glp1_questionnaire
 
 
@@ -34,11 +39,48 @@ def example_resources():
         processing_status="received",
     )
     observations = [item.resource for item in MockExtractor().extract(message).observations]
+    communication = build_communication(
+        patient_id="P-DEMO-001",
+        content_text="合成随访确认。",
+        sender_reference="Patient/P-DEMO-001",
+        recipient_references=["PractitionerRole/nurse"],
+        sent_at=response["authored"],
+        communication_id="communication-validation-example",
+    )
+    task = build_workflow_task(
+        patient_id="P-DEMO-001",
+        rule_id="synthetic-validation-rule",
+        rule_version="1.0.0",
+        task_code_system="urn:continucare:task-code",
+        task_code="human-review",
+        task_code_display="人工复核",
+        description="仅用于 FHIR 合成资源校验。",
+        requester_reference="Organization/continucare",
+        owner_reference="PractitionerRole/nurse",
+        authored_on=response["authored"],
+        trigger_reference=f"Observation/{observations[0]['id']}",
+        due_at="2026-07-17T14:00:00+00:00",
+        task_id="task-validation-example",
+        evidence_references=[f"Observation/{observations[0]['id']}/_history/1"],
+    )
+    provenance = build_provenance(
+        target_references=["Task/task-validation-example"],
+        recorded_at=response["authored"],
+        agent_reference="Device/continucare-rule-engine",
+        agent_role_code="author",
+        agent_role_display="Author",
+        provenance_id="provenance-validation-example",
+        activity_code="CREATE",
+        activity_display="create",
+    )
     return [
         load_glp1_questionnaire(),
         load_glp1_plan_definition(),
         response,
         *observations,
+        communication,
+        task,
+        provenance,
     ]
 
 

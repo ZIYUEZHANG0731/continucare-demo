@@ -18,6 +18,13 @@
 | [16_layer_2_acceptance.md](16_layer_2_acceptance.md) | 第二层 Care Engine、动态患者端、确定性映射、验收结果和生产缺口 |
 | [17_layer_3_acceptance.md](17_layer_3_acceptance.md) | 第三层 Agent 契约、语义确认、Safety Agent、模型接口与验收结果 |
 | [releases/layer3_v1.0.0.md](releases/layer3_v1.0.0.md) | 第三层冻结版本、官方 FHIR/MiMo 评测、第四层输入边界与回滚点 |
+| [18_layer_4_contract_and_storage.md](18_layer_4_contract_and_storage.md) | 第四层第 1 步：Memory/规则/Summary 合同、FHIR 工作流资源和版本化存储 |
+| [19_layer_4_clinical_memory.md](19_layer_4_clinical_memory.md) | 第四层第 2 步：最终资源摄取、证据化 Clinical Memory、Timeline、冲突/缺失和修订链 |
+| [20_layer_4_approved_rules_and_tasks.md](20_layer_4_approved_rules_and_tasks.md) | 第四层第 3 步：双审批规则门、逐条件解释、FHIR Task 去重和责任状态机 |
+| [21_layer_4_evidence_summary_and_doctor_review.md](21_layer_4_evidence_summary_and_doctor_review.md) | 第四层第 4 步：当前 Timeline 的证据化 Summary、版本链和医生审阅 |
+| [22_layer_4_state_snapshot_and_numeric_trends.md](22_layer_4_state_snapshot_and_numeric_trends.md) | 第四层第 5 步：current/stale/unknown/conflict 状态快照与单位一致的原始数值趋势 |
+| [23_layer_4_doctor_workbench_read_model.md](23_layer_4_doctor_workbench_read_model.md) | 第四层第 6 步：Doctor Workbench 只读组合查询、历史回放、权限隔离、证据图和故障降级 |
+| [24_layer_4_controlled_llm_summary.md](24_layer_4_controlled_llm_summary.md) | 第四层增强项：动态 Fact Ledger、受控 LLM 编排、事实/证据锁与确定性回退 |
 | [03_data_model_fhir.md](03_data_model_fhir.md) | FHIR风格数据模型和核心实体关系 |
 | [13_fhir_conformance_policy.md](13_fhir_conformance_policy.md) | FHIR R4 合规策略、验证层级和上线门槛 |
 | [clinical/glp1_14d_observation_evidence.md](clinical/glp1_14d_observation_evidence.md) | GLP-1 指标、术语映射与权威临床信源 |

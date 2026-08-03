@@ -199,7 +199,15 @@ Clinical Memory 不是聊天记录的摘要，而是带来源图谱的长期数�
 - 修订关系：`preliminary → final → amended/corrected/entered-in-error`；
 - 数据缺失和冲突：不能被摘要自动抹平。
 
-### 6.3 规则与任务
+### 6.3 状态快照与原始趋势
+
+- 按版本化指标定义形成 `current / stale / unknown / conflict`；
+- stale 保留 last known，但不伪装成当前值；
+- 只对单位和数值类型一致、版本有效、时间窗明确的序列计算端点差值；
+- `increasing / decreasing / unchanged` 只描述原始数值方向，不表示好转、恶化或临床显著性；
+- 每个状态、趋势和快照版本保留 Observation EvidenceReference、算法版本和 Provenance。
+
+### 6.4 规则与任务
 
 目标医院版本应优先使用 FHIR 资源表达可交换工作流：
 
@@ -214,7 +222,7 @@ Clinical Memory 不是聊天记录的摘要，而是带来源图谱的长期数�
 
 内部队列可以保留检索投影，但不得用自定义数据库表替代对外 FHIR 资源契约。
 
-### 6.4 Fail-closed
+### 6.5 Fail-closed
 
 如果规则没有适用人群、证据章节、版本、审批人、测试集和回退方案，系统可以保存 QuestionnaireResponse 和 Observation，但必须返回 `not_assessed`，不得创建风险等级、临床报警或处置建议。
 
@@ -378,6 +386,7 @@ sequenceDiagram
 ### Milestone 4：Clinical Memory 与医护工作流
 
 - Timeline、Provenance、修订和去重；
+- 状态快照、last known、缺失/冲突门禁和原始数值趋势；
 - 经审批规则、Task 和责任闭环；
 - 证据化 Summary 和医生审阅。
 
@@ -389,6 +398,6 @@ sequenceDiagram
 
 ## 13. 当前整体判断
 
-当前仓库已经完成 Milestone 1 的“FHIR R4 基础资源工程基线”，并完成 Milestone 2 的比赛工程基线：版本锁定的 Care Session、通用 QuestionnaireResponse Builder、`answerOption/required/enableWhen` 校验、Questionnaire 动态患者端和结构化答案确定性 Observation 映射已经可运行、可持久化、可测试。第二层的正式修订/撤回、语音、排期、多设备并发和真实身份仍未封板；目标医院 Profile、生产 Agent、经批准临床规则和真实医院集成也尚未完成。因此当前应表述为：
+当前仓库已完成 Milestone 1、Milestone 2 和 Milestone 3 的比赛工程基线，并完成 Milestone 4 的六步实现及受控 Summary 增强项：第四层现有合同/版本化存储、确定性 Clinical Memory、Timeline、Provenance、冲突/缺失与修订链、current/stale/unknown/conflict 状态快照、单位一致的原始数值方向、双审批规则门、Task 责任状态机、证据 Summary/医生审阅，以及 Doctor Workbench 只读组合查询、历史回放、权限隔离、证据图和组件级降级。Summary Agent 已具备动态 Fact Ledger、LLM 仅编排 fact ID、事实/证据锁和确定性回退，并通过 5/5 固定合成用例、64/64 事实的真实 MiMo 工程验收，包括完整服务、存储和 Provenance；提交配置仍默认关闭，旧页面尚未接入。第二层的正式修订/撤回、语音、排期、多设备并发和真实身份仍未封板；仓库尚无真实 active 临床规则，Risk 产品路径仍为 `not_assessed`；趋势不解释临床意义，正式病历写回、新 Workbench 页面迁移、目标医院 Profile、临床规则审批包和真实医院集成也尚未完成。因此当前应表述为：
 
-> 已建立可验证的第一层数据治理底座与第二层 Questionnaire 驱动患者端；下一步从受控自由文本语义理解开始，继续补齐 Clinical Memory、医护工作流和医院集成。
+> 已建立可验证的数据治理、动态患者随访、受控语义理解、证据化 Clinical Memory、状态快照、原始数值趋势、受治理 Task、医生可审阅 Summary 和只读 Workbench 回放基线；下一步完成第四层封板审计和发布清单，再进入第五层角色应用接入，并在真实审批材料到位后启用具体临床规则和医院集成。

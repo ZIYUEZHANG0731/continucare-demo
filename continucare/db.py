@@ -71,6 +71,77 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
             "ALTER TABLE confirmed_symptom_reports ADD COLUMN "
             "source_kind TEXT NOT NULL DEFAULT 'patient_reported_new'"
         )
+    _migrate_layer4_contract_record_types(connection)
+
+
+def _migrate_layer4_contract_record_types(connection: sqlite3.Connection) -> None:
+    """Add new contract discriminators without losing existing immutable rows."""
+
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'layer4_contract_records'"
+    ).fetchone()
+    if row is None or "state_snapshot" in (row["sql"] or ""):
+        return
+    for index_name in (
+        "idx_layer4_contract_current",
+        "idx_layer4_contract_patient_type_time",
+        "idx_layer4_contract_pathway_status",
+    ):
+        connection.execute(f"DROP INDEX IF EXISTS {index_name}")
+    connection.execute(
+        "ALTER TABLE layer4_contract_records "
+        "RENAME TO layer4_contract_records_legacy"
+    )
+    connection.execute(
+        """
+        CREATE TABLE layer4_contract_records (
+            record_type TEXT NOT NULL CHECK (
+                record_type IN (
+                    'clinical_rule', 'memory_event', 'timeline_event',
+                    'revision_link', 'summary_draft', 'doctor_review',
+                    'state_snapshot'
+                )
+            ),
+            record_id TEXT NOT NULL,
+            record_version TEXT NOT NULL,
+            patient_id TEXT REFERENCES patients(patient_id) ON DELETE CASCADE,
+            pathway_code TEXT,
+            status TEXT NOT NULL,
+            effective_time TEXT NOT NULL,
+            record_json TEXT NOT NULL,
+            is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (record_type, record_id, record_version)
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO layer4_contract_records (
+            record_type, record_id, record_version, patient_id, pathway_code,
+            status, effective_time, record_json, is_current, created_at, updated_at
+        )
+        SELECT
+            record_type, record_id, record_version, patient_id, pathway_code,
+            status, effective_time, record_json, is_current, created_at, updated_at
+        FROM layer4_contract_records_legacy
+        """
+    )
+    connection.execute("DROP TABLE layer4_contract_records_legacy")
+    connection.execute(
+        "CREATE UNIQUE INDEX idx_layer4_contract_current "
+        "ON layer4_contract_records(record_type, record_id) WHERE is_current = 1"
+    )
+    connection.execute(
+        "CREATE INDEX idx_layer4_contract_patient_type_time "
+        "ON layer4_contract_records(patient_id, record_type, effective_time)"
+    )
+    connection.execute(
+        "CREATE INDEX idx_layer4_contract_pathway_status "
+        "ON layer4_contract_records(pathway_code, record_type, status)"
+    )
 
 
 def reset_demo(db_path: Path | str | None = None) -> None:
@@ -323,6 +394,43 @@ CREATE TABLE IF NOT EXISTS audit_events (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS layer4_fhir_resources (
+    resource_type TEXT NOT NULL CHECK (
+        resource_type IN ('Communication', 'Provenance', 'Task')
+    ),
+    resource_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    patient_id TEXT REFERENCES patients(patient_id) ON DELETE CASCADE,
+    status TEXT,
+    clinical_time TEXT NOT NULL,
+    resource_json TEXT NOT NULL,
+    is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (resource_type, resource_id, version_id)
+);
+
+CREATE TABLE IF NOT EXISTS layer4_contract_records (
+    record_type TEXT NOT NULL CHECK (
+        record_type IN (
+            'clinical_rule', 'memory_event', 'timeline_event',
+            'revision_link', 'summary_draft', 'doctor_review',
+            'state_snapshot'
+        )
+    ),
+    record_id TEXT NOT NULL,
+    record_version TEXT NOT NULL,
+    patient_id TEXT REFERENCES patients(patient_id) ON DELETE CASCADE,
+    pathway_code TEXT,
+    status TEXT NOT NULL,
+    effective_time TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (record_type, record_id, record_version)
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_patient_time
 ON followup_messages(patient_id, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_observations_patient_time
@@ -347,4 +455,16 @@ CREATE INDEX IF NOT EXISTS idx_alerts_patient_status
 ON alerts(patient_id, status);
 CREATE INDEX IF NOT EXISTS idx_audit_patient_time
 ON audit_events(patient_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_layer4_fhir_current
+ON layer4_fhir_resources(resource_type, resource_id) WHERE is_current = 1;
+CREATE INDEX IF NOT EXISTS idx_layer4_fhir_patient_type_time
+ON layer4_fhir_resources(patient_id, resource_type, clinical_time);
+CREATE INDEX IF NOT EXISTS idx_layer4_fhir_patient_status
+ON layer4_fhir_resources(patient_id, resource_type, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_layer4_contract_current
+ON layer4_contract_records(record_type, record_id) WHERE is_current = 1;
+CREATE INDEX IF NOT EXISTS idx_layer4_contract_patient_type_time
+ON layer4_contract_records(patient_id, record_type, effective_time);
+CREATE INDEX IF NOT EXISTS idx_layer4_contract_pathway_status
+ON layer4_contract_records(pathway_code, record_type, status);
 """

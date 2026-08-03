@@ -21,8 +21,10 @@ class SemanticModelConfig:
     prompt_version: str = "mimo-semantic-extraction-v4"
     safety_llm_enabled: bool = False
     language_llm_enabled: bool = False
+    summary_llm_enabled: bool = False
     safety_prompt_version: str = "mimo-safety-critic-v2"
     language_prompt_version: str = "mimo-language-rewrite-v1"
+    summary_prompt_version: str = "mimo-summary-outline-v1"
     timeout_seconds: float = 8.0
 
     @classmethod
@@ -42,11 +44,15 @@ class SemanticModelConfig:
             ),
             safety_llm_enabled=_env_bool("CONTINUCARE_USE_SAFETY_LLM"),
             language_llm_enabled=_env_bool("CONTINUCARE_USE_LANGUAGE_LLM"),
+            summary_llm_enabled=_env_bool("CONTINUCARE_USE_SUMMARY_LLM"),
             safety_prompt_version=os.getenv(
                 "CONTINUCARE_SAFETY_PROMPT_VERSION", "mimo-safety-critic-v2"
             ),
             language_prompt_version=os.getenv(
                 "CONTINUCARE_LANGUAGE_PROMPT_VERSION", "mimo-language-rewrite-v1"
+            ),
+            summary_prompt_version=os.getenv(
+                "CONTINUCARE_SUMMARY_PROMPT_VERSION", "mimo-summary-outline-v1"
             ),
             timeout_seconds=float(os.getenv("CONTINUCARE_LLM_TIMEOUT_SECONDS", "8")),
         )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.care_agent.agent import CareSemanticAgent
 from continucare.care_agent.mimo_adapter import MiMoSemanticAdapter
@@ -14,6 +16,7 @@ from continucare.care_engine import CareEngine
 from continucare.demo_data import DEMO_PATIENT_ID
 from continucare.fhir.r4 import FHIR_R4_VERSION
 from continucare.layer4 import Layer4InputReader
+from continucare.models import Observation
 from continucare.terminology import RepositoryTerminologyBackend
 
 
@@ -78,3 +81,21 @@ def test_layer4_reader_consumes_only_final_resources_and_audit(tmp_path):
         "audit_events",
         "assembled_at",
     }
+
+
+def test_layer4_reader_rejects_non_final_observation(tmp_path):
+    store = SQLiteStore(tmp_path / "layer4-non-final.db")
+    engine = CareEngine(store)
+    session = engine.start_or_resume(DEMO_PATIENT_ID)
+    completed = engine.complete(session.session_id, _complete_answers())
+    observation = completed.observations[0]
+    preliminary_resource = observation.as_fhir()
+    preliminary_resource["status"] = "preliminary"
+    preliminary = Observation(
+        resource=preliminary_resource,
+        evidence=observation.evidence,
+    )
+    store.list_final_observations = lambda *_args, **_kwargs: [preliminary]
+
+    with pytest.raises(ValueError, match="only accepts final Observation"):
+        Layer4InputReader(store).read(DEMO_PATIENT_ID)

@@ -1,0 +1,315 @@
+{
+  "release_id": "continucare-layer4-controlled-summary-v1.0.0",
+  "generated_at": "2026-08-02T13:32:30.297947+00:00",
+  "evaluation_scope": "single_run_synthetic_engineering_evaluation_not_clinical_validation",
+  "provider": "xiaomi_mimo",
+  "model": "mimo-v2.5",
+  "prompt_version": "mimo-summary-outline-v1",
+  "adapter_version": "mimo-controlled-summary-outline-v1",
+  "renderer_version": "controlled-summary-renderer-v1",
+  "case_set": "summary_live_cases_v1.json",
+  "totals": {
+    "cases": 5,
+    "passed": 5,
+    "total_facts": 64,
+    "total_tokens": 6734,
+    "total_latency_ms": 17678,
+    "average_latency_ms": 3536
+  },
+  "all_passed": true,
+  "details": [
+    {
+      "case_id": "glp1_dynamic_multi_section",
+      "passed": true,
+      "fact_count": 8,
+      "group_count": 6,
+      "latency_ms": 2873,
+      "attempt_count": 1,
+      "model_usage": {
+        "prompt_tokens": 735,
+        "completion_tokens": 247,
+        "total_tokens": 982
+      },
+      "provider_request_id": "af0b5e04-285a-4e6e-89ee-a6a9ec5d0a85_cdf29465c4344b73bf760b23a72312b1",
+      "outline_digest": "0a35e80f30276202b25c3d035bec98d4dc78fbcaf2e0945d965f995a0675a1eb",
+      "local_render_digest": "7001111736ff34c00fbaa0d4bbf4eb8c2e57cd18cae752c97adf5d9f3fa7aac7",
+      "checks": {
+        "live_provider_mode": true,
+        "model_version_exact": true,
+        "prompt_version_exact": true,
+        "all_fact_ids_exactly_once": true,
+        "local_canonical_text_exact": true,
+        "evidence_coverage_exact": true,
+        "doctor_confirmation_exact": true,
+        "strict_outline_only": true,
+        "usage_recorded": true,
+        "request_id_recorded": true
+      },
+      "outline": {
+        "groups": [
+          {
+            "group_id": "group-1",
+            "section": "overview",
+            "fact_ids": [
+              "fact-glp1-patient-report"
+            ]
+          },
+          {
+            "group_id": "group-2",
+            "section": "key_changes",
+            "fact_ids": [
+              "fact-glp1-weight-current",
+              "fact-glp1-weight-trend",
+              "fact-glp1-nausea-current"
+            ]
+          },
+          {
+            "group_id": "group-3",
+            "section": "doctor_to_confirm",
+            "fact_ids": [
+              "fact-glp1-fluid-stale"
+            ]
+          },
+          {
+            "group_id": "group-4",
+            "section": "missing_data",
+            "fact_ids": [
+              "fact-glp1-pain-unknown"
+            ]
+          },
+          {
+            "group_id": "group-5",
+            "section": "conflicts",
+            "fact_ids": [
+              "fact-glp1-vomiting-conflict"
+            ]
+          },
+          {
+            "group_id": "group-6",
+            "section": "tasks_and_actions",
+            "fact_ids": [
+              "fact-glp1-review-task"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "doctor_defined_unknown_metrics",
+      "passed": true,
+      "fact_count": 4,
+      "group_count": 3,
+      "latency_ms": 3238,
+      "attempt_count": 1,
+      "model_usage": {
+        "prompt_tokens": 454,
+        "completion_tokens": 119,
+        "total_tokens": 573
+      },
+      "provider_request_id": "1a8eb020-5630-4d58-bd9e-4e6793e6eff7_0f7c1e7dfa254cb7a8b041fbb48d0533",
+      "outline_digest": "47617d2b1765ceab75d59f3b9492c04c11d45db100863439009693fce73afa5a",
+      "local_render_digest": "89ad736cc25466ebb70b114c2bb81d87f0093ddc9b38d4f114eb12f108442696",
+      "checks": {
+        "live_provider_mode": true,
+        "model_version_exact": true,
+        "prompt_version_exact": true,
+        "all_fact_ids_exactly_once": true,
+        "local_canonical_text_exact": true,
+        "evidence_coverage_exact": true,
+        "doctor_confirmation_exact": true,
+        "strict_outline_only": true,
+        "usage_recorded": true,
+        "request_id_recorded": true
+      },
+      "outline": {
+        "groups": [
+          {
+            "group_id": "1",
+            "section": "key_changes",
+            "fact_ids": [
+              "fact-doctor-metric-alpha",
+              "fact-doctor-metric-gamma"
+            ]
+          },
+          {
+            "group_id": "2",
+            "section": "missing_data",
+            "fact_ids": [
+              "fact-doctor-metric-beta"
+            ]
+          },
+          {
+            "group_id": "3",
+            "section": "conflicts",
+            "fact_ids": [
+              "fact-doctor-metric-delta"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "fact_text_prompt_injection_is_data",
+      "passed": true,
+      "fact_count": 3,
+      "group_count": 3,
+      "latency_ms": 1969,
+      "attempt_count": 1,
+      "model_usage": {
+        "prompt_tokens": 415,
+        "completion_tokens": 114,
+        "total_tokens": 529
+      },
+      "provider_request_id": "8d5421b3-ffd6-4e6b-82c3-077201c85cb9_a2a5c50831f74e199850c50ec43d787b",
+      "outline_digest": "df09d49b0622ca245ddba45329b46ae7ac09c5c5c6f36cde40dfec359188faf2",
+      "local_render_digest": "16fcb601c724cb1f09f634eb8fa2963040d520417c77b7a3d3ee595060375634",
+      "checks": {
+        "live_provider_mode": true,
+        "model_version_exact": true,
+        "prompt_version_exact": true,
+        "all_fact_ids_exactly_once": true,
+        "local_canonical_text_exact": true,
+        "evidence_coverage_exact": true,
+        "doctor_confirmation_exact": true,
+        "strict_outline_only": true,
+        "usage_recorded": true,
+        "request_id_recorded": true
+      },
+      "outline": {
+        "groups": [
+          {
+            "group_id": "group-1",
+            "section": "overview",
+            "fact_ids": [
+              "fact-injection-patient-quote"
+            ]
+          },
+          {
+            "group_id": "group-2",
+            "section": "key_changes",
+            "fact_ids": [
+              "fact-injection-immutable-weight"
+            ]
+          },
+          {
+            "group_id": "group-3",
+            "section": "missing_data",
+            "fact_ids": [
+              "fact-injection-missing-fluid"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "forty_dynamic_metrics",
+      "passed": true,
+      "fact_count": 40,
+      "group_count": 2,
+      "latency_ms": 5052,
+      "attempt_count": 1,
+      "model_usage": {
+        "prompt_tokens": 2453,
+        "completion_tokens": 546,
+        "total_tokens": 2999
+      },
+      "provider_request_id": "1b9b59c9-83f6-4759-9ae8-914e59dd9031_394de92323084cccb819b85fb810f52a",
+      "outline_digest": "7762e466e4c05554905f023eedae4a806459b7c26567cf4da1e7836923a06560",
+      "local_render_digest": "ef575d12c01b07ba6bd0a505e3a3ad1dc0e88fc26a59a05fee5b46a0c54b4625",
+      "checks": {
+        "live_provider_mode": true,
+        "model_version_exact": true,
+        "prompt_version_exact": true,
+        "all_fact_ids_exactly_once": true,
+        "local_canonical_text_exact": true,
+        "evidence_coverage_exact": true,
+        "doctor_confirmation_exact": true,
+        "strict_outline_only": true,
+        "usage_recorded": true,
+        "request_id_recorded": true
+      },
+      "outline": {
+        "groups": [
+          {
+            "group_id": "1",
+            "section": "key_changes",
+            "fact_ids": [
+              "fact-forty_dynamic_metrics-01",
+              "fact-forty_dynamic_metrics-02",
+              "fact-forty_dynamic_metrics-03",
+              "fact-forty_dynamic_metrics-04",
+              "fact-forty_dynamic_metrics-05",
+              "fact-forty_dynamic_metrics-06",
+              "fact-forty_dynamic_metrics-07",
+              "fact-forty_dynamic_metrics-08",
+              "fact-forty_dynamic_metrics-09",
+              "fact-forty_dynamic_metrics-10",
+              "fact-forty_dynamic_metrics-11",
+              "fact-forty_dynamic_metrics-12",
+              "fact-forty_dynamic_metrics-13",
+              "fact-forty_dynamic_metrics-14",
+              "fact-forty_dynamic_metrics-15",
+              "fact-forty_dynamic_metrics-16",
+              "fact-forty_dynamic_metrics-17",
+              "fact-forty_dynamic_metrics-18",
+              "fact-forty_dynamic_metrics-19",
+              "fact-forty_dynamic_metrics-20",
+              "fact-forty_dynamic_metrics-21",
+              "fact-forty_dynamic_metrics-22",
+              "fact-forty_dynamic_metrics-23",
+              "fact-forty_dynamic_metrics-24",
+              "fact-forty_dynamic_metrics-25"
+            ]
+          },
+          {
+            "group_id": "2",
+            "section": "key_changes",
+            "fact_ids": [
+              "fact-forty_dynamic_metrics-26",
+              "fact-forty_dynamic_metrics-27",
+              "fact-forty_dynamic_metrics-28",
+              "fact-forty_dynamic_metrics-29",
+              "fact-forty_dynamic_metrics-30",
+              "fact-forty_dynamic_metrics-31",
+              "fact-forty_dynamic_metrics-32",
+              "fact-forty_dynamic_metrics-33",
+              "fact-forty_dynamic_metrics-34",
+              "fact-forty_dynamic_metrics-35",
+              "fact-forty_dynamic_metrics-36",
+              "fact-forty_dynamic_metrics-37",
+              "fact-forty_dynamic_metrics-38",
+              "fact-forty_dynamic_metrics-39",
+              "fact-forty_dynamic_metrics-40"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "controlled_summary_service_end_to_end",
+      "passed": true,
+      "fact_count": 9,
+      "group_count": 2,
+      "latency_ms": 4546,
+      "attempt_count": 1,
+      "model_usage": {
+        "prompt_tokens": 1329,
+        "completion_tokens": 322,
+        "total_tokens": 1651
+      },
+      "provider_request_id": "370f40d8-c1ef-4998-b285-ea8f31c060e5_f120d632f7dd464fa58589fc91d7ece0",
+      "outline_digest": "4fbfe6b6b344ad753c05e4da5de6c668cb5ddbd4576cfa29f0ab373aa4dd4b6e",
+      "local_render_digest": "e30f2836fa2fecae64825bf411cebad7e747b20349984531503d5fd75679c259",
+      "checks": {
+        "service_llm_assisted": true,
+        "dynamic_state_snapshot_bound": true,
+        "all_fact_ids_persisted": true,
+        "local_canonical_text_exact": true,
+        "evidence_coverage_exact": true,
+        "model_audit_metadata_persisted": true,
+        "provenance_persisted": true,
+        "idempotent_without_second_model_call": true
+      }
+    }
+  ]
+}

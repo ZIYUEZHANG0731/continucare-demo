@@ -56,12 +56,14 @@ class Layer4InputReader:
                 raise ValueError("Layer 4 only accepts completed QuestionnaireResponse")
             responses.append(resource)
 
-        observations = [
-            validate_r4_resource(
+        observations = []
+        for item in self.store.list_final_observations(patient_id):
+            resource = validate_r4_resource(
                 item.as_fhir(), expected_resource_type="Observation"
             )
-            for item in self.store.list_final_observations(patient_id)
-        ]
+            if resource.get("status") != "final":
+                raise ValueError("Layer 4 only accepts final Observation resources")
+            observations.append(resource)
         return Layer4InputSnapshot(
             patient_id=patient_id,
             questionnaire_responses=responses,

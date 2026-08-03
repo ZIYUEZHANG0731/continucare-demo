@@ -34,6 +34,8 @@ CONTINUCARE_USE_SAFETY_LLM=true
 CONTINUCARE_SAFETY_PROMPT_VERSION=mimo-safety-critic-v2
 CONTINUCARE_USE_LANGUAGE_LLM=true
 CONTINUCARE_LANGUAGE_PROMPT_VERSION=mimo-language-rewrite-v1
+CONTINUCARE_USE_SUMMARY_LLM=false
+CONTINUCARE_SUMMARY_PROMPT_VERSION=mimo-summary-outline-v1
 ```
 
 最小联通测试：
@@ -51,6 +53,10 @@ CONTINUCARE_LANGUAGE_PROMPT_VERSION=mimo-language-rewrite-v1
 评测报告默认写入 `/tmp/continucare-mimo-live-evaluation.json`。该结果属于工程验证，不能替代临床验证。
 
 同一 MiMo 配置用于 Care 抽取、Safety Critic 与患者语言改写，但三者使用独立 Prompt 和严格 JSON 合同。Safety LLM 只能降级候选，不能推翻确定性硬规则；它发现有逐字证据的遗漏时，只能触发已发布 linkId 的定向补抽取。第三层以每日随访 occurrence 保存本次全部对话，并把已完成 Observation 作为只读跨日上下文；历史记录不能成为今天候选的证据。“今天/昨天/过去24小时”按患者时区解析并贯通到 Observation `effective[x]`。语言改写会本地锁定数字、单位、症状、程度、肯否和时间，不满足事实完整性时自动回退固定模板。
+
+第四层另提供默认关闭的受控 Summary LLM：它面对任意数量的动态事实清单，只能返回已有 `fact_id` 的分组和顺序，不能生成正文、风险或建议。事实遗漏、伪造 ID、跨栏目移动、模型故障或超过容量门时，系统使用完整事实清单确定性回退。
+
+受控 Summary 已使用官方 MiMo API 完成固定合成数据验收：5/5 用例、64/64 条事实恰好覆盖一次，包括未知医生自定义指标、事实文本提示注入、40 指标容量场景和完整服务/存储/Provenance 链路。该结果是工程验收，不是临床验证；提交配置仍默认关闭真实 Summary 调用。
 
 MiMo 不生成医学代码。已知 Questionnaire 字段和患者自述新症状都必须经过 `continucare/terminology/data/glp1_symptom_catalog_v1.json` 检索与版本校验：唯一命中后显示确认卡，多候选（例如“头晕”）显示语义区分按钮，未命中则只保留原话并等待术语/医生复核。当前目录是基于官方 GLP-1 药品标签建立的原型覆盖集，不声称穷尽所有可能症状；医院部署时通过同一后端协议接入其 FHIR 术语服务器。
 
@@ -85,6 +91,13 @@ MiMo 不生成医学代码。已知 Questionnaire 字段和患者自述新症状
 - [第二层验收报告](docs/16_layer_2_acceptance.md)
 - [第三层验收报告](docs/17_layer_3_acceptance.md)
 - [第三层 v1.0.0 发布基线与回滚说明](docs/releases/layer3_v1.0.0.md)
+- [第四层第 1 步：合同与存储](docs/18_layer_4_contract_and_storage.md)
+- [第四层第 2 步：Clinical Memory 与 Timeline](docs/19_layer_4_clinical_memory.md)
+- [第四层第 3 步：双审批规则与 Task 责任闭环](docs/20_layer_4_approved_rules_and_tasks.md)
+- [第四层第 4 步：证据化 Summary 与医生审阅](docs/21_layer_4_evidence_summary_and_doctor_review.md)
+- [第四层第 5 步：状态快照与原始数值趋势](docs/22_layer_4_state_snapshot_and_numeric_trends.md)
+- [第四层第 6 步：Doctor Workbench 只读组合查询与整体回放](docs/23_layer_4_doctor_workbench_read_model.md)
+- [第四层增强项：指标数量无关的受控 LLM Summary](docs/24_layer_4_controlled_llm_summary.md)
 - [FHIR R4 合规策略与上线门槛](docs/13_fhir_conformance_policy.md)
 - [GLP-1 指标、术语映射与权威临床信源](docs/clinical/glp1_14d_observation_evidence.md)
 - [GLP-1 患者可报告症状术语目录与检索流程](docs/clinical/glp1_symptom_terminology_catalog.md)
@@ -97,6 +110,12 @@ MiMo 不生成医学代码。已知 Questionnaire 字段和患者自述新症状
 - 第一层工程基线：FHIR R4 契约、术语、证据、追溯和 fail-closed 治理
 - 第二层比赛工程基线：Care Session、动态 Questionnaire renderer、通用回答 Builder 和确定性 Observation 映射
 - 第三层比赛工程基线：Agent Runtime、MiMo/Care Agent 语义候选、Safety Agent v4 混合复核、受控连续对话、患者本地时间、事实锁定语言改写、患者确认与本地回退
+- 第四层第 1 步工程基线：最终 Observation 状态门禁、Memory/Timeline/Revision/规则/Summary 合同、FHIR Task/Communication/Provenance 和版本化完整 JSON 存储；规则执行仍保持关闭
+- 第四层第 2 步工程基线：最终资源确定性摄取、证据化 Clinical Memory、按临床有效时间组织的 Timeline、迟到数据重排、冲突/缺失表达和可追溯修订；规则执行仍保持关闭
+- 第四层第 3 步工程基线：双审批规则执行门、逐条件证据解释、Task 去重、版本化责任状态机及 Clinical Memory 历史；仓库无 active 临床规则，产品路径仍为 not_assessed
+- 第四层第 4 步工程基线：当前 Timeline 的确定性证据简报、生成时点门、Summary 版本链及医生接受/修改/拒绝；LLM 摘要仍未启用
+- 第四层第 5 步工程基线：版本化指标定义、current/stale/unknown/conflict 状态、单位一致的端点数值方向、快照版本链及 Provenance；不输出好转/恶化或风险解释
+- 第四层第 6 步工程基线：Timeline/State/Summary/Task 只读组合查询、patient/pathway 权限隔离、历史 as-of 回放、版本化证据图及组件级故障降级；尚未替换旧医生页面或接入真实 IAM/EMR
 - 旧 M0–M5 自由文本链继续作为兼容测试夹具，不是患者端主流程
 - M6：真实飞书/Aily 接入，明确不在第一版范围内
 

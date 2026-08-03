@@ -2,7 +2,7 @@
 
 ## 0. 实施状态
 
-本节同时描述六 Agent 目标架构和当前第三层实现。六个顶层业务角色没有增加：当前真正进入运行时的是 Care Agent 与 Safety Agent；Language Rewriter、Conversation Context Resolver、Temporal Resolver 和 Terminology Resolver 是受控内部能力，不是新的顶层业务 Agent。现已实现小米 MiMo 抽取、Safety Agent v4（确定性硬规则 + MiMo Critic）、遗漏字段定向补抽取、事实锁定的 MiMo 语言改写、按每日随访会话保存的短期上下文、已完成 Observation 的基础只读长期上下文、仓库术语检索、多候选消歧、患者本地时间解析、本地回退和患者确认门。Guideline/完整 Clinical Memory/Risk/Summary Agent 仍属于后续层或后续阶段，当前临床规则为空并采取 fail-closed，不能据此宣称六 Agent 模型效果或临床准确率。
+本节同时描述六 Agent 目标架构和当前实现。六个顶层业务角色没有增加：Care Agent 与 Safety Agent 已进入第三层运行时；第四层已加入确定性 Clinical Memory、双审批 Risk/Task 执行基础设施、证据 Summary/医生审阅、状态快照、原始数值趋势，以及 Doctor Workbench 只读组合查询/证据回放。Summary Agent 现在具有提交配置默认关闭的受控 MiMo 编排能力：模型只能组织动态 Fact Ledger 中已有的事实编号，正文仍由本地代码渲染；该边界已完成 5/5 固定合成用例、64/64 事实的真实 MiMo 验收，包括完整服务、存储和 Provenance。Language Rewriter、Conversation Context Resolver、Temporal Resolver 和 Terminology Resolver 是受控内部能力，不是新的顶层业务 Agent。Guideline Agent 仍属于后续步骤；Risk Agent 没有真实 active 规则，趋势不解释临床意义，受控 Summary 尚未接入旧页面或获真实患者数据使用批准，新 Workbench 也尚未接入真实 IAM/EMR，不能据此宣称临床准确率。
 
 ## 1. Agent设计原则
 
@@ -156,6 +156,8 @@ flowchart TD
 
 ## 5. Clinical Memory Agent
 
+> 当前状态：第四层第 6 步已实现最终资源的确定性 Clinical Memory、current/stale/unknown/conflict 状态快照、单位一致的端点数值方向，以及 Timeline/State/Summary/Task 的 Doctor Workbench 只读组合查询、历史回放、权限隔离、证据图和组件级降级。当前趋势只描述 increasing/decreasing/unchanged，不判断好转、恶化或临床显著性；新读取边界尚未替换旧演示页面。
+
 ### 5.1 职责
 
 目标职责是维护患者长期健康记忆、Timeline和状态变化，并保留来源、时间与修订关系。
@@ -208,6 +210,8 @@ flowchart TD
 5. 为Summary Agent提供上下文。
 
 ## 6. Risk Agent
+
+> 当前状态：第四层第 3 步已实现双审批 active 规则装载门、final Observation 的确定性条件评估、EvidenceReference、Task 去重和受审计状态转换。仓库没有 active 临床规则，旧产品流程仍固定返回 `not_assessed`；风险等级、Alert 和急症工作流尚未启用。
 
 ### 6.1 职责
 
@@ -262,6 +266,8 @@ flowchart TD
 
 ## 7. Summary Agent
 
+> 当前状态：第四层第 4 步的确定性证据简报与医生审阅保持不变；后续增强项已加入动态 Fact Ledger 和默认关闭的受控 MiMo Outline。模型不能写正文，只能在本地门禁下组织已有 fact ID。趋势临床解释、页面接入和正式病历写回尚未启用。
+
 ### 7.1 职责
 
 目标职责是在复诊前为医生生成可审阅的患者连续健康轨迹摘要草稿。
@@ -310,11 +316,11 @@ flowchart TD
 ### 7.7 工作流程
 
 1. 复诊前24小时触发。
-2. 获取时间窗内所有关键事件。
-3. 生成结构化摘要。
-4. 附证据引用。
-5. Safety Agent检查。
-6. 发布医生待审版本。
+2. 获取时间窗内 Timeline 和最新的版本化状态快照。
+3. 把任意数量的事件、指标状态和原始趋势确定性转换为 Fact Ledger。
+4. 可选 LLM 只返回 fact ID 的分组/顺序；本地检查未知、遗漏、重复、跨栏目和长度违规。
+5. 本地使用 canonical text 和 EvidenceReference 渲染；失败时使用完整事实确定性回退。
+6. 保存模型/Prompt/Agent 或回退版本、Provenance，发布医生待审版本。
 
 ## 8. Safety Agent
 

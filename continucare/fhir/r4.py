@@ -14,11 +14,14 @@ from typing import Any
 
 from fhirclient.models.observation import Observation as R4Observation
 from fhirclient.models.plandefinition import PlanDefinition as R4PlanDefinition
+from fhirclient.models.communication import Communication as R4Communication
+from fhirclient.models.provenance import Provenance as R4Provenance
 from fhirclient.models.questionnaire import Questionnaire as R4Questionnaire
 from fhirclient.models.questionnaireresponse import (
     QuestionnaireResponse as R4QuestionnaireResponse,
 )
 from fhirclient.models.resource import Resource
+from fhirclient.models.task import Task as R4Task
 from fhirclient.models.fhirabstractbase import FHIRValidationError as ClientValidationError
 from jsonschema import Draft6Validator
 
@@ -30,10 +33,13 @@ class FHIRValidationError(ValueError):
 
 
 _RESOURCE_MODELS: dict[str, type[Resource]] = {
+    "Communication": R4Communication,
     "Observation": R4Observation,
     "Questionnaire": R4Questionnaire,
     "QuestionnaireResponse": R4QuestionnaireResponse,
     "PlanDefinition": R4PlanDefinition,
+    "Provenance": R4Provenance,
+    "Task": R4Task,
 }
 
 
