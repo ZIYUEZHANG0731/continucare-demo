@@ -209,7 +209,7 @@ class SQLiteStore:
         response_run_id: str | None = None,
         response_text: str | None = None,
     ) -> None:
-        """Close a candidate/clarification once, preserving the first decision."""
+        """Close an action once, allowing an unsure decision to be finalized."""
 
         with connect(self.db_path) as connection:
             connection.execute(
@@ -218,7 +218,14 @@ class SQLiteStore:
                     action_id, source_run_id, session_id, response_run_id,
                     decision, option_id, response_text, resolved_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(action_id) DO NOTHING
+                ON CONFLICT(action_id) DO UPDATE SET
+                    response_run_id = excluded.response_run_id,
+                    decision = excluded.decision,
+                    option_id = excluded.option_id,
+                    response_text = excluded.response_text,
+                    resolved_at = excluded.resolved_at
+                WHERE conversation_action_resolutions.decision = 'unsure'
+                  AND excluded.decision IN ('accepted', 'rejected')
                 """,
                 (
                     action_id,
@@ -231,6 +238,17 @@ class SQLiteStore:
                     resolved_at,
                 ),
             )
+
+    def conversation_action_decisions(self, session_id: str) -> dict[str, str]:
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT action_id, decision FROM conversation_action_resolutions
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchall()
+        return {row["action_id"]: row["decision"] for row in rows}
 
     def resolved_conversation_action_ids(self, session_id: str) -> set[str]:
         with connect(self.db_path) as connection:

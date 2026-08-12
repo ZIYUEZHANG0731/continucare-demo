@@ -1294,6 +1294,13 @@ class CareAgentService:
         if unknown:
             raise ValueError("确认内容不属于该次安全审核结果")
         candidates = [available[item_id] for item_id in candidate_ids]
+        self._preflight_action_decisions(
+            record,
+            {
+                candidate.candidate_id: ContextResolutionDecision.ACCEPTED
+                for candidate in candidates
+            },
+        )
         session = self._apply_confirmed(record, candidates)
         self._confirmation_audit(record, candidates, decision="accepted")
         for candidate in candidates:
@@ -1308,6 +1315,13 @@ class CareAgentService:
         record, result = self._stored_result(run_id)
         available = {item.candidate_id: item for item in result.candidates}
         candidates = [available[item_id] for item_id in candidate_ids if item_id in available]
+        self._preflight_action_decisions(
+            record,
+            {
+                candidate.candidate_id: ContextResolutionDecision.REJECTED
+                for candidate in candidates
+            },
+        )
         self._confirmation_audit(record, candidates, decision="rejected")
         for candidate in candidates:
             self._close_action(
@@ -1322,12 +1336,20 @@ class CareAgentService:
         record, result = self._stored_result(run_id)
         if result.status.value == "blocked":
             raise ValueError("指令型文本不能作为患者健康原话保存")
-        session = self._apply_confirmed(record, [])
-        self._confirmation_audit(record, [], decision="verbatim_only_accepted")
-        for action_id in [
+        action_ids = [
             *[item.candidate_id for item in result.candidates],
             *[item.clarification_id for item in result.clarifications],
-        ]:
+        ]
+        self._preflight_action_decisions(
+            record,
+            {
+                action_id: ContextResolutionDecision.REJECTED
+                for action_id in action_ids
+            },
+        )
+        session = self._apply_confirmed(record, [])
+        self._confirmation_audit(record, [], decision="verbatim_only_accepted")
+        for action_id in action_ids:
             self._close_action(
                 record,
                 action_id,
@@ -1355,6 +1377,26 @@ class CareAgentService:
         )
         if option is None:
             raise ValueError("澄清选项无效")
+        candidate = clarification.proposed_candidate
+        if clarification.kind == ClarificationKind.TERMINOLOGY_DISAMBIGUATION:
+            decision = (
+                ContextResolutionDecision.UNSURE
+                if option.terminology_match is None
+                or clarification.reported_symptom is None
+                else ContextResolutionDecision.ACCEPTED
+            )
+        elif not option.accepts_candidate or candidate is None:
+            decision = (
+                ContextResolutionDecision.UNSURE
+                if option_id == "unsure"
+                else ContextResolutionDecision.REJECTED
+            )
+        else:
+            decision = ContextResolutionDecision.ACCEPTED
+        self._preflight_action_decisions(
+            record,
+            {clarification.clarification_id: decision},
+        )
         if clarification.kind == ClarificationKind.TERMINOLOGY_DISAMBIGUATION:
             mention = clarification.reported_symptom
             if option.terminology_match is None or mention is None:
@@ -1364,7 +1406,7 @@ class CareAgentService:
                 self._close_action(
                     record,
                     clarification.clarification_id,
-                    decision=ContextResolutionDecision.UNSURE,
+                    decision=decision,
                     option_id=option_id,
                 )
                 return self._session(record.session_id)
@@ -1399,7 +1441,6 @@ class CareAgentService:
                 option_id=option_id,
             )
             return session
-        candidate = clarification.proposed_candidate
         if not option.accepts_candidate or candidate is None:
             self._confirmation_audit(
                 record,
@@ -1409,11 +1450,7 @@ class CareAgentService:
             self._close_action(
                 record,
                 clarification.clarification_id,
-                decision=(
-                    ContextResolutionDecision.UNSURE
-                    if option_id == "unsure"
-                    else ContextResolutionDecision.REJECTED
-                ),
+                decision=decision,
                 option_id=option_id,
             )
             return self._session(record.session_id)
@@ -1437,6 +1474,25 @@ class CareAgentService:
             option_id=option_id,
         )
         return session
+
+    def _preflight_action_decisions(
+        self,
+        record: AgentRunRecord,
+        decisions: dict[str, ContextResolutionDecision],
+    ) -> None:
+        existing = self.store.conversation_action_decisions(record.session_id)
+        for action_id, decision in decisions.items():
+            current = existing.get(action_id)
+            if current in {
+                ContextResolutionDecision.ACCEPTED.value,
+                ContextResolutionDecision.REJECTED.value,
+            }:
+                raise ValueError("该对话操作已经完成，不能重复提交")
+            if (
+                current == ContextResolutionDecision.UNSURE.value
+                and decision == ContextResolutionDecision.UNSURE
+            ):
+                raise ValueError("该对话操作已记录为不确定，请选择明确结果")
 
     def _apply_confirmed(
         self, record: AgentRunRecord, candidates: list[SemanticCandidate]

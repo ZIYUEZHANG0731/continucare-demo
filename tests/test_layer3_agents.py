@@ -21,6 +21,7 @@ from continucare.care_agent.model_api import (
 )
 from continucare.care_agent.safety import SafetyAgent
 from continucare.care_engine import CareEngine
+from continucare.db import connect
 from continucare.demo_data import DEMO_PATIENT_ID
 
 
@@ -232,3 +233,315 @@ def test_explicit_count_confirmation_copy_is_friendly_and_semantically_stable(tm
         "为了确保记录准确：过去24小时您一共呕吐了2次，对吗？"
     )
     assert candidate.requires_patient_confirmation is True
+
+
+def _resolution_row(store, action_id):
+    with connect(store.db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM conversation_action_resolutions
+            WHERE action_id = ?
+            """,
+            (action_id,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _resolution_rows(store, action_ids):
+    return {action_id: _resolution_row(store, action_id) for action_id in action_ids}
+
+
+def _business_state(store, session_id):
+    with connect(store.db_path) as connection:
+        session = connection.execute(
+            "SELECT * FROM care_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        contexts = connection.execute(
+            """
+            SELECT * FROM confirmed_answer_contexts
+            WHERE session_id = ? ORDER BY answer_context_id
+            """,
+            (session_id,),
+        ).fetchall()
+        reports = connection.execute(
+            """
+            SELECT * FROM confirmed_symptom_reports
+            WHERE session_id = ? ORDER BY report_id
+            """,
+            (session_id,),
+        ).fetchall()
+    return {
+        "session": dict(session) if session is not None else None,
+        "answer_contexts": [dict(row) for row in contexts],
+        "symptom_reports": [dict(row) for row in reports],
+    }
+
+
+def _audit_state(store):
+    return [
+        event.model_dump(mode="json")
+        for event in store.list_audit_events(DEMO_PATIENT_ID)
+    ]
+
+
+def test_rejected_candidate_cannot_later_be_confirmed(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    interaction = service.analyze(session.session_id, "我今天拉肚子。")
+    candidate = interaction.result.candidates[0]
+
+    service.reject_candidates(interaction.result.run_id, [candidate.candidate_id])
+    resolution_before = _resolution_row(store, candidate.candidate_id)
+    business_before = _business_state(store, session.session_id)
+    audit_before = _audit_state(store)
+
+    with pytest.raises(ValueError):
+        service.confirm_candidates(
+            interaction.result.run_id,
+            [candidate.candidate_id],
+        )
+
+    assert resolution_before["decision"] == "rejected"
+    assert _resolution_row(store, candidate.candidate_id) == resolution_before
+    assert _business_state(store, session.session_id) == business_before
+    assert _audit_state(store) == audit_before
+    assert store.get_care_session(session.session_id).answers == {}
+    assert store.list_active_answer_contexts(session.session_id) == []
+    assert store.list_active_symptom_reports(session.session_id) == []
+
+
+def test_duplicate_confirmation_has_no_business_or_audit_side_effects(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    interaction = service.analyze(
+        session.session_id,
+        "过去24小时我吐了2次，今天拉肚子。",
+    )
+    candidate_ids = [item.candidate_id for item in interaction.result.candidates]
+
+    service.confirm_candidates(interaction.result.run_id, candidate_ids)
+    resolutions_before = _resolution_rows(store, candidate_ids)
+    business_before = _business_state(store, session.session_id)
+    audit_before = _audit_state(store)
+
+    with pytest.raises(ValueError):
+        service.confirm_candidates(interaction.result.run_id, candidate_ids)
+
+    business_after = _business_state(store, session.session_id)
+    assert _resolution_rows(store, candidate_ids) == resolutions_before
+    assert business_after == business_before
+    assert business_after["session"]["updated_at"] == business_before["session"][
+        "updated_at"
+    ]
+    assert _audit_state(store) == audit_before
+    assert len(business_before["answer_contexts"]) == 1
+    assert len(business_before["symptom_reports"]) == 1
+
+
+def test_confirm_original_closes_all_actions_before_old_candidate_retry(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    interaction = service.analyze(
+        session.session_id,
+        "我吐了2次；现在有点恶心。",
+    )
+    candidate = interaction.result.candidates[0]
+    action_ids = [
+        *[item.candidate_id for item in interaction.result.candidates],
+        *[item.clarification_id for item in interaction.result.clarifications],
+    ]
+    assert interaction.result.candidates
+    assert interaction.result.clarifications
+
+    service.confirm_original_text(interaction.result.run_id)
+    resolutions_before = _resolution_rows(store, action_ids)
+    business_before = _business_state(store, session.session_id)
+    audit_before = _audit_state(store)
+
+    assert {row["decision"] for row in resolutions_before.values()} == {"rejected"}
+    with pytest.raises(ValueError):
+        service.confirm_original_text(interaction.result.run_id)
+    assert _resolution_rows(store, action_ids) == resolutions_before
+    assert _business_state(store, session.session_id) == business_before
+    assert _audit_state(store) == audit_before
+
+    with pytest.raises(ValueError):
+        service.confirm_candidates(
+            interaction.result.run_id,
+            [candidate.candidate_id],
+        )
+    assert _resolution_rows(store, action_ids) == resolutions_before
+    assert _business_state(store, session.session_id) == business_before
+    assert _audit_state(store) == audit_before
+
+
+def test_candidate_batch_preflight_is_all_or_nothing(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    interaction = service.analyze(
+        session.session_id,
+        "过去24小时我吐了2次，现在有点恶心。",
+    )
+    accepted = next(
+        item
+        for item in interaction.result.candidates
+        if item.link_id == "vomiting-count-24h"
+    )
+    pending = next(
+        item
+        for item in interaction.result.candidates
+        if item.link_id == "nausea-present"
+    )
+    action_ids = [accepted.candidate_id, pending.candidate_id]
+
+    service.confirm_candidates(interaction.result.run_id, [accepted.candidate_id])
+    resolutions_before = _resolution_rows(store, action_ids)
+    business_before = _business_state(store, session.session_id)
+    audit_before = _audit_state(store)
+
+    assert resolutions_before[accepted.candidate_id]["decision"] == "accepted"
+    assert resolutions_before[pending.candidate_id] is None
+    assert pending.link_id not in store.get_care_session(session.session_id).answers
+    assert all(
+        row["link_id"] != pending.link_id
+        for row in business_before["answer_contexts"]
+    )
+    with pytest.raises(ValueError):
+        service.confirm_candidates(interaction.result.run_id, action_ids)
+
+    assert _resolution_rows(store, action_ids) == resolutions_before
+    assert _business_state(store, session.session_id) == business_before
+    assert _audit_state(store) == audit_before
+    assert store.list_active_symptom_reports(session.session_id) == []
+
+
+def test_unsure_action_can_be_finalized_once_as_accepted(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    interaction = service.analyze(session.session_id, "我吐了2次。")
+    clarification = interaction.result.clarifications[0]
+
+    service.resolve_clarification(
+        interaction.result.run_id,
+        clarification.clarification_id,
+        "unsure",
+    )
+    unsure_row = _resolution_row(store, clarification.clarification_id)
+    assert unsure_row["decision"] == "unsure"
+    business_after_unsure = _business_state(store, session.session_id)
+    audit_after_unsure = _audit_state(store)
+    with pytest.raises(ValueError):
+        service.resolve_clarification(
+            interaction.result.run_id,
+            clarification.clarification_id,
+            "unsure",
+        )
+    assert _resolution_row(store, clarification.clarification_id) == unsure_row
+    assert _business_state(store, session.session_id) == business_after_unsure
+    assert _audit_state(store) == audit_after_unsure
+
+    with connect(store.db_path) as connection:
+        connection.execute(
+            """
+            UPDATE conversation_action_resolutions
+            SET option_id = 'stale-option',
+                response_run_id = 'stale-response-run',
+                response_text = 'stale response',
+                resolved_at = '2000-01-01T00:00:00+00:00'
+            WHERE action_id = ?
+            """,
+            (clarification.clarification_id,),
+        )
+
+    updated = service.resolve_clarification(
+        interaction.result.run_id,
+        clarification.clarification_id,
+        "yes_24h",
+    )
+
+    final_row = _resolution_row(store, clarification.clarification_id)
+    assert final_row["action_id"] == unsure_row["action_id"]
+    assert final_row["source_run_id"] == unsure_row["source_run_id"]
+    assert final_row["session_id"] == unsure_row["session_id"]
+    assert final_row["decision"] == "accepted"
+    assert final_row["option_id"] == "yes_24h"
+    assert final_row["response_run_id"] is None
+    assert final_row["response_text"] is None
+    assert final_row["resolved_at"] != "2000-01-01T00:00:00+00:00"
+    assert updated.answers["vomiting-count-24h"] == 2
+    contexts = store.list_active_answer_contexts(session.session_id)
+    assert [item.link_id for item in contexts] == ["vomiting-count-24h"]
+    audits = store.list_audit_events(DEMO_PATIENT_ID)
+    assert sum(item.event_type == "care_session_draft_saved" for item in audits) == 1
+    patient_decisions = [
+        item.details_json["decision"]
+        for item in audits
+        if item.event_type == "semantic_candidate_patient_decision"
+    ]
+    assert sorted(patient_decisions) == [
+        "clarification_accepted",
+        "clarification_unsure",
+    ]
+
+
+def test_finalized_unsure_action_rejects_later_retry_without_side_effects(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    interaction = service.analyze(session.session_id, "我吐了2次。")
+    clarification = interaction.result.clarifications[0]
+    service.resolve_clarification(
+        interaction.result.run_id,
+        clarification.clarification_id,
+        "unsure",
+    )
+    service.resolve_clarification(
+        interaction.result.run_id,
+        clarification.clarification_id,
+        "yes_24h",
+    )
+    resolution_before = _resolution_row(store, clarification.clarification_id)
+    business_before = _business_state(store, session.session_id)
+    audit_before = _audit_state(store)
+
+    with pytest.raises(ValueError):
+        service.resolve_clarification(
+            interaction.result.run_id,
+            clarification.clarification_id,
+            "yes_24h",
+        )
+
+    assert resolution_before["decision"] == "accepted"
+    assert _resolution_row(store, clarification.clarification_id) == resolution_before
+    assert _business_state(store, session.session_id) == business_before
+    assert _audit_state(store) == audit_before
+
+
+def test_unsure_action_can_be_finalized_once_as_rejected(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    interaction = service.analyze(session.session_id, "我吐了2次。")
+    clarification = interaction.result.clarifications[0]
+    service.resolve_clarification(
+        interaction.result.run_id,
+        clarification.clarification_id,
+        "unsure",
+    )
+
+    service.resolve_clarification(
+        interaction.result.run_id,
+        clarification.clarification_id,
+        "no",
+    )
+    resolution_before = _resolution_row(store, clarification.clarification_id)
+    business_before = _business_state(store, session.session_id)
+    audit_before = _audit_state(store)
+
+    assert resolution_before["decision"] == "rejected"
+    assert resolution_before["option_id"] == "no"
+    assert store.get_care_session(session.session_id).answers == {}
+    assert store.list_active_answer_contexts(session.session_id) == []
+    assert store.list_active_symptom_reports(session.session_id) == []
+    with pytest.raises(ValueError):
+        service.resolve_clarification(
+            interaction.result.run_id,
+            clarification.clarification_id,
+            "no",
+        )
+
+    assert _resolution_row(store, clarification.clarification_id) == resolution_before
+    assert _business_state(store, session.session_id) == business_before
+    assert _audit_state(store) == audit_before
