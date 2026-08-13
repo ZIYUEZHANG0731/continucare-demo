@@ -227,7 +227,7 @@ registry.
 | terminology concept `abdominal-pain` | exact-terminology gap | legacy sources do not justify the exact SNOMED choice |
 | whole PlanDefinition `urn:uuid:8f384dce…` @ `1.0.0` | design-governance gap | no action ID, owner, or formal decision |
 
-For that dated snapshot, the dynamic view derives **20 unique exact artifacts**,
+For the original foundation snapshot, the dynamic view derived **20 unique exact artifacts**,
 **11 registered relationships**, **9 explicit versioned gaps**, **0 verified
 citation relationships**, and **0 claim-review-approved relationships**. The
 last count concerns the knowledge claims only; it does not assert artifact or
@@ -236,6 +236,12 @@ relationships reuse **7 unique claims** (four collection-rationale and three
 terminology-support claims). These are absolute facts about the current fixture,
 not loader constraints, assigned sequence numbers, percentages, or a future
 Pathway size.
+
+M5-K later adds a reference-only symptom view, one unbound diarrhea claim and
+five explicit gaps without changing the 11 bindings. The current dynamic
+Pathway view therefore derives **21 unique exact artifacts**, **11 registered
+relationships**, and **14 explicit versioned gaps**. These remain fixture
+snapshot counts, never a denominator, target or coverage percentage.
 
 The six Questionnaire items, five mapping entries, five questionnaire
 terminology bindings, three selected catalog concepts, and one PlanDefinition
@@ -250,11 +256,16 @@ executable timing rule.
 
 ## 6. Built-in data posture
 
-The bundle registers 13 independent source records and 13 exact legacy aliases.
+The bundle registers 15 independent source records and 13 exact legacy aliases.
 FDA AccessData and DailyMed remain separate sources; title similarity is not
 evidence that two URLs are the same document/version. All built-in source access
-is `link_only`, all seven claims are `draft`, all quotes are null, and the event
+is `link_only`, all eight claims are `draft`, all quotes are null, and the event
 registry is empty. Consequently all review axes derive `not_assessed`.
+
+The two M5-K additions are official HPO and NCI PRO-CTCAE link-only records.
+They are deliberately unbound: no HPO mapping changes the runtime SNOMED
+catalog, and no PRO-CTCAE item, translation, score, or GLP1 applicability claim
+is embedded or inferred.
 
 The 11 binding records map one claim to one exact artifact target. Reuse is
 explicit through repeated exact `ClaimRef`s; a binding does not contain a loose

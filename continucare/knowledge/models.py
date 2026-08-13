@@ -145,6 +145,26 @@ class CoverageGapRef(StrictModel):
         return f"gap:{self.gap_id}@{self.gap_version}"
 
 
+class SymptomIndexRef(StrictModel):
+    symptom_index_id: NonBlank
+    record_version: int = Field(ge=1)
+
+    def key(self) -> tuple[str, int]:
+        return self.symptom_index_id, self.record_version
+
+    def __str__(self) -> str:
+        return f"symptom-index:{self.symptom_index_id}@{self.record_version}"
+
+
+class CatalogTermRef(StrictModel):
+    catalog_id: NonBlank
+    catalog_version: NonBlank
+    concept_id: NonBlank
+
+    def key(self) -> tuple[str, str, str]:
+        return self.catalog_id, self.catalog_version, self.concept_id
+
+
 class FileRef(StrictModel):
     file_id: NonBlank
     file_version: int = Field(ge=1)
@@ -774,6 +794,7 @@ class BindingRecord(StrictModel):
 class CoverageGapKind(StrEnum):
     DESIGN_GOVERNANCE_METADATA = "design_governance_metadata"
     EXACT_TERMINOLOGY_BASIS = "exact_terminology_basis"
+    PATIENT_EXPRESSION_EVIDENCE = "patient_expression_evidence"
 
 
 class CoverageGapRecord(StrictModel):
@@ -798,6 +819,53 @@ class CoverageGapRecord(StrictModel):
     @property
     def ref(self) -> CoverageGapRef:
         return CoverageGapRef(gap_id=self.gap_id, gap_version=self.gap_version)
+
+
+class SymptomIndexLifecycle(StrEnum):
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    RETIRED = "retired"
+
+
+class SymptomIndexRecord(StrictModel):
+    """Reference-only symptom view key with no clinical or terminology payload."""
+
+    symptom_index_id: NonBlank
+    record_version: int = Field(ge=1)
+    catalog_term: CatalogTermRef
+    claim_refs: tuple[ClaimRef, ...] = Field(default_factory=tuple)
+    binding_refs: tuple[BindingRef, ...] = Field(default_factory=tuple)
+    coverage_gap_refs: tuple[CoverageGapRef, ...] = Field(default_factory=tuple)
+    lifecycle: SymptomIndexLifecycle = SymptomIndexLifecycle.ACTIVE
+    supersedes: SymptomIndexRef | None = None
+    registered_at: datetime
+
+    @model_validator(mode="after")
+    def validate_record(self) -> "SymptomIndexRecord":
+        if self.registered_at.tzinfo is None:
+            raise ValueError("registered_at must include a timezone")
+        if self.supersedes and self.supersedes.symptom_index_id != self.symptom_index_id:
+            raise ValueError(
+                "a symptom index can only supersede the same logical symptom_index_id"
+            )
+        if self.record_version == 1 and self.supersedes is not None:
+            raise ValueError("symptom index version 1 cannot supersede another version")
+        for refs, label in (
+            (self.claim_refs, "claim"),
+            (self.binding_refs, "binding"),
+            (self.coverage_gap_refs, "coverage gap"),
+        ):
+            keys = [item.key() for item in refs]
+            if len(keys) != len(set(keys)):
+                raise ValueError(f"symptom index contains duplicate {label} refs")
+        return self
+
+    @property
+    def ref(self) -> SymptomIndexRef:
+        return SymptomIndexRef(
+            symptom_index_id=self.symptom_index_id,
+            record_version=self.record_version,
+        )
 
 
 class ReviewDecision(StrEnum):
@@ -968,8 +1036,17 @@ class GovernanceRegistryFile(EnvelopeBase):
     coverage_gaps: tuple[CoverageGapRecord, ...] = Field(default_factory=tuple)
 
 
+class SymptomIndexFile(EnvelopeBase):
+    file_kind: Literal["symptom_index"] = "symptom_index"
+    records: tuple[SymptomIndexRecord, ...]
+
+
 PayloadEnvelope = Annotated[
-    SourceRegistryFile | ClaimRegistryFile | BindingManifestFile | GovernanceRegistryFile,
+    SourceRegistryFile
+    | ClaimRegistryFile
+    | BindingManifestFile
+    | GovernanceRegistryFile
+    | SymptomIndexFile,
     Field(discriminator="file_kind"),
 ]
 
@@ -984,6 +1061,9 @@ class KnowledgeBundleIndex(StrictModel):
     current_claim_refs: tuple[ClaimRef, ...]
     current_binding_refs: tuple[BindingRef, ...]
     current_gap_refs: tuple[CoverageGapRef, ...]
+    current_symptom_index_refs: tuple[SymptomIndexRef, ...] = Field(
+        default_factory=tuple
+    )
 
 
 class ReviewAggregate(StrEnum):

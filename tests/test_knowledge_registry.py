@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
+from streamlit.testing.v1 import AppTest
 
 from continucare.knowledge import (
     KNOWLEDGE_DISCLAIMER,
@@ -24,6 +25,7 @@ from continucare.knowledge import (
     load_builtin_bundle,
     load_bundle,
     render_pathway_knowledge,
+    render_symptom_knowledge,
 )
 from continucare.knowledge.__main__ import main
 from continucare.knowledge.models import (
@@ -33,6 +35,7 @@ from continucare.knowledge.models import (
     ReviewEvent,
     SectionLocator,
     SourceRecord,
+    SymptomIndexRecord,
     TableOrFigureLocator,
     TerminologyConceptLocator,
     UrlFragmentLocator,
@@ -40,14 +43,17 @@ from continucare.knowledge.models import (
 )
 from continucare.knowledge.resolvers import (
     ArtifactResolution,
+    CatalogTermResolution,
     FilesystemBundleSource,
     FilesystemSourceArtifactResolver,
     MappingAuthorityResolver,
+    RepositoryArtifactResolver,
     ResolvedAuthority,
     TraversableBundleSource,
     safe_relative_parts,
 )
 from continucare.pathways import load_builtin_pathways
+from continucare.terminology.catalog import load_glp1_symptom_catalog
 
 
 MANIFEST_NAMES = (
@@ -55,6 +61,7 @@ MANIFEST_NAMES = (
     "claims_v1.json",
     "bindings_glp1_14d_v1.json",
     "governance_v1.json",
+    "symptom_index_v1.json",
 )
 BUILTIN_MANIFESTS = Path(str(files("continucare.knowledge.manifests")))
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +74,10 @@ class _ArtifactResolver:
     def resolve(self, pathway, artifact) -> ArtifactResolution:
         del pathway, artifact
         return ArtifactResolution(self.resolved, "synthetic test resolver")
+
+    def resolve_catalog_term(self, term) -> CatalogTermResolution:
+        del term
+        return CatalogTermResolution(self.resolved, "synthetic test catalog resolver")
 
 
 class _CountingSourceArtifactResolver:
@@ -166,11 +177,12 @@ def test_builtin_bundle_has_exact_frozen_inventory_and_review_posture():
     view = registry.for_pathway("GLP1-14D", "1.0.0")
 
     assert registry.mode == LoadMode.CURRENT
-    assert (len(registry.sources), len(registry.claims)) == (13, 7)
-    assert (len(view.bindings), len(view.gaps)) == (11, 9)
-    assert view.unique_artifact_count == 20
+    assert (len(registry.sources), len(registry.claims)) == (15, 8)
+    assert (len(view.bindings), len(view.gaps)) == (11, 14)
+    assert len(registry.symptom_indexes) == 4
+    assert view.unique_artifact_count == 21
     assert view.registered_relationship_count == 11
-    assert view.explicit_gap_count == 9
+    assert view.explicit_gap_count == 14
     assert view.verified_citation_relationship_count == 0
     assert view.claim_review_approved_relationship_count == 0
     assert Counter(
@@ -179,12 +191,13 @@ def test_builtin_bundle_has_exact_frozen_inventory_and_review_posture():
         "questionnaire_item": 6,
         "observation_mapping_item": 5,
         "questionnaire_terminology_binding": 5,
-        "terminology_concept": 3,
+        "terminology_concept": 8,
         "plan_definition": 1,
     }
     assert Counter(item.gap_kind for item in view.gaps) == {
         "design_governance_metadata": 4,
-        "exact_terminology_basis": 5,
+        "exact_terminology_basis": 6,
+        "patient_expression_evidence": 4,
     }
     assert len(registry.governance.legacy_source_aliases) == 13
     assert registry.governance.review_events == ()
@@ -259,8 +272,8 @@ def test_renderer_is_read_only_explicit_and_uses_derived_coverage():
     assert "mode=CURRENT" in rendered
     coverage = next(line for line in rendered.splitlines() if line.startswith("Coverage:"))
     assert coverage == (
-        "Coverage: unique_artifacts=20; registered_relationships=11; "
-        "explicit_gaps=9; verified_citation_relationships=0; "
+        "Coverage: unique_artifacts=21; registered_relationships=11; "
+        "explicit_gaps=14; verified_citation_relationships=0; "
         "claim_review_approved_relationships=0"
     )
     assert "/" not in coverage
@@ -368,6 +381,223 @@ def test_glp1_pathway_still_has_no_clinical_rules():
 
     assert before == after
     assert after["clinical_rules"] == []
+
+
+def test_symptom_index_resolves_four_exact_catalog_terms_without_copying_truth():
+    registry = load_builtin_bundle()
+    views = {item.record.symptom_index_id: item for item in registry.symptom_views()}
+
+    assert set(views) == {"diarrhea", "nausea", "vomiting", "abdominal-pain"}
+    assert {
+        key: (
+            value.catalog_resolution.concept.preferred_zh,
+            value.catalog_resolution.concept.coding.code,
+        )
+        for key, value in views.items()
+    } == {
+        "diarrhea": ("腹泻", "62315008"),
+        "nausea": ("恶心", "422587007"),
+        "vomiting": ("呕吐", "249497008"),
+        "abdominal-pain": ("腹痛", "21522001"),
+    }
+    allowed_fields = {
+        "symptom_index_id",
+        "record_version",
+        "catalog_term",
+        "claim_refs",
+        "binding_refs",
+        "coverage_gap_refs",
+        "lifecycle",
+        "supersedes",
+        "registered_at",
+    }
+    forbidden = {
+        "preferred_zh",
+        "aliases",
+        "aliases_zh",
+        "coding",
+        "severity",
+        "grading",
+        "red_flags",
+        "review_status",
+        "approval_status",
+        "clinical_action",
+        "risk_level",
+    }
+    for record in registry.symptom_indexes:
+        assert set(record.model_dump()) == allowed_fields
+        assert forbidden.isdisjoint(record.model_dump())
+
+
+def test_symptom_index_unknown_catalog_term_fails_current_and_is_historical_unresolved(
+    tmp_path,
+):
+    root = _copy_builtin_bundle(tmp_path)
+    _mutate(
+        root,
+        "symptom_index_v1.json",
+        lambda value: value["records"][0]["catalog_term"].update(
+            concept_id="not-a-real-concept"
+        ),
+    )
+    resolver = RepositoryArtifactResolver()
+
+    with pytest.raises(KnowledgeArtifactUnresolved, match="exact catalog term"):
+        _load_test_bundle(root, artifact_resolver=resolver)
+
+    historical = _load_test_bundle(
+        root,
+        mode=LoadMode.HISTORICAL,
+        artifact_resolver=resolver,
+    )
+    view = historical.for_symptom("diarrhea", 1)
+    assert not view.catalog_resolution.resolved
+    assert "unresolved" in render_symptom_knowledge(view)
+
+
+def test_symptom_index_exact_refs_preserve_claim_scope_and_derived_review():
+    registry = load_builtin_bundle()
+    for view in registry.symptom_views():
+        assert all(
+            registry.review_summaries[claim.ref.key()].aggregate == "not_assessed"
+            for claim in view.claims
+        )
+        for binding in view.bindings:
+            assert binding.claim in view.record.claim_refs
+            claim = next(item for item in view.claims if item.ref == binding.claim)
+            if claim.applicable_scope.mode == "pathway_whitelist":
+                assert binding.pathway in claim.applicable_scope.pathways
+        rendered = render_symptom_knowledge(view)
+        assert "supports=" in rendered
+        assert "does_not_support=" in rendered
+        assert "applicable_scope=" in rendered
+        assert "runtime_authority=none" in rendered
+
+
+def test_m5k_external_sources_are_link_only_unbound_and_do_not_change_snomed_runtime():
+    before = load_glp1_symptom_catalog().model_dump(mode="json")
+    registry = load_builtin_bundle()
+    after = load_glp1_symptom_catalog().model_dump(mode="json")
+    sources = {
+        item.source_id: item
+        for item in registry.sources
+        if item.registered_by == "Organization/continucare-m5k-link-only-registration"
+    }
+
+    assert before == after
+    assert set(sources) == {"hpo-v2026-06-23", "nci-pro-ctcae-official-site"}
+    assert all(item.access.mode == "link_only" for item in sources.values())
+    assert all(
+        registry.source_content_status[item.ref.key()] == "not_content_fixed"
+        for item in sources.values()
+    )
+    cited = {
+        citation.source.key()
+        for claim in registry.claims
+        if hasattr(claim, "citations")
+        for citation in claim.citations
+    }
+    assert all(item.ref.key() not in cited for item in sources.values())
+    assert not any(
+        item.source_id == "nci-pro-ctcae-official-site"
+        for view in registry.symptom_views()
+        for item in view.sources
+    )
+
+
+def test_no_instrument_body_synthetic_expression_or_fixed_coverage_contract():
+    package_root = REPOSITORY_ROOT / "continucare" / "knowledge"
+    text = "\n".join(
+        path.read_text("utf-8")
+        for path in package_root.rglob("*")
+        if path.is_file() and path.suffix in {".py", ".json"}
+    )
+
+    assert "In the last 7 days" not in text
+    assert "target_number" not in text
+    assert "PRO-CTCAE→" not in text
+    assert not list(package_root.rglob("*.pdf"))
+    registry = load_builtin_bundle()
+    expression_gaps = [
+        gap
+        for gap in registry.gaps
+        if gap.gap_kind == "patient_expression_evidence"
+    ]
+    assert len(expression_gaps) == 4
+    assert all("不复制别名" in item.reason for item in expression_gaps)
+
+
+def test_symptom_cli_requires_exact_version_and_supports_both_modes(capsys):
+    assert main(["--symptom-index-id", "nausea"]) == 2
+    error = capsys.readouterr()
+    assert "--record-version" in error.err
+
+    assert main(
+        ["--symptom-index-id", "nausea", "--record-version", "1"]
+    ) == 0
+    current = capsys.readouterr()
+    assert "mode=CURRENT" in current.out
+    assert "catalog_resolution=resolved" in current.out
+
+    assert main(
+        [
+            "--symptom-index-id",
+            "nausea",
+            "--record-version",
+            "1",
+            "--historical",
+        ]
+    ) == 0
+    historical = capsys.readouterr()
+    assert "mode=HISTORICAL" in historical.out
+
+
+def test_knowledge_page_has_no_patient_store_or_runtime_side_effect_imports():
+    page = REPOSITORY_ROOT / "pages" / "5_knowledge_evidence.py"
+    tree = ast.parse(page.read_text("utf-8"), filename=str(page))
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.extend(item.name for item in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.append(node.module)
+    forbidden = (
+        "continucare.db",
+        "continucare.adapters",
+        "continucare.services",
+        "continucare.layer4",
+        "continucare.care_agent",
+        "continucare.care_engine",
+    )
+    assert not any(
+        name == prefix or name.startswith(prefix + ".")
+        for name in imports
+        for prefix in forbidden
+    )
+    assert "patient_id" not in page.read_text("utf-8")
+
+
+def test_knowledge_page_renders_all_four_fixture_details_offline():
+    app = AppTest.from_file(
+        str(REPOSITORY_ROOT / "pages" / "5_knowledge_evidence.py"),
+        default_timeout=10,
+    ).run()
+
+    assert not app.exception
+    assert app.title[0].value == "症状中心 Knowledge Evidence"
+    expected_claims = {
+        "diarrhea": "glp1-diarrhea-collection-rationale@1",
+        "nausea": "glp1-nausea-collection-rationale@1",
+        "vomiting": "glp1-vomiting-collection-rationale@1",
+        "abdominal-pain": "glp1-abdominal-pain-collection-rationale@1",
+    }
+    for symptom_id, claim_label in expected_claims.items():
+        app.selectbox[0].set_value(symptom_id).run()
+        assert not app.exception
+        assert claim_label in "\n".join(item.value for item in app.markdown)
+    app.radio[0].set_value("HISTORICAL").run()
+    assert not app.exception
+    assert any("HISTORICAL" in item.value for item in app.markdown)
 
 
 def test_payload_hash_is_checked_before_json_parsing(tmp_path):
@@ -577,6 +807,7 @@ def test_append_only_successors_leave_old_records_readable(tmp_path):
     index = _read_json(root, "bundle_index_v1.json")
     index["current_claim_refs"][0]["claim_version"] = 2
     index["current_binding_refs"][0]["binding_version"] = 2
+    index["current_symptom_index_refs"] = []
     _write_json(root, "bundle_index_v1.json", index)
     _repin(root)
 
@@ -620,7 +851,7 @@ def test_current_unresolved_artifact_fails_but_historical_stays_readable(tmp_pat
     )
     view = historical.for_pathway("GLP1-14D", "1.0.0")
     assert historical.mode == LoadMode.HISTORICAL
-    assert len(view.artifact_resolutions) == 20
+    assert len(view.artifact_resolutions) == 25
     assert not any(item.resolved for item in view.artifact_resolutions.values())
 
 
@@ -1143,6 +1374,10 @@ def test_protocol_exceptions_are_wrapped_or_annotated_by_mode(tmp_path):
     class ExplodingArtifactResolver:
         def resolve(self, pathway, artifact):
             del pathway, artifact
+            raise RuntimeError("artifact resolver exploded")
+
+        def resolve_catalog_term(self, term):
+            del term
             raise RuntimeError("artifact resolver exploded")
 
     class ExplodingAuthorityResolver:

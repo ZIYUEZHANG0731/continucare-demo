@@ -3,6 +3,7 @@
 from continucare.knowledge.models import (
     ArtifactRef,
     BindingRecord,
+    CatalogTermRef,
     ClaimRef,
     CoverageGapRecord,
     KnowledgeArtifactUnresolved,
@@ -17,11 +18,14 @@ from continucare.knowledge.models import (
     PathwayRef,
     SourceRecord,
     SourceRef,
+    SymptomIndexRecord,
+    SymptomIndexRef,
 )
 from continucare.knowledge.registry import (
     KnowledgeRegistry,
     LoadMode,
     PathwayKnowledgeView,
+    SymptomKnowledgeView,
     inspect_bundle,
     load_builtin_bundle,
     load_bundle,
@@ -29,11 +33,13 @@ from continucare.knowledge.registry import (
 from continucare.knowledge.render import (
     KNOWLEDGE_DISCLAIMER,
     render_pathway_knowledge,
+    render_symptom_knowledge,
 )
 
 __all__ = [
     "ArtifactRef",
     "BindingRecord",
+    "CatalogTermRef",
     "ClaimRef",
     "CoverageGapRecord",
     "KnowledgeArtifactUnresolved",
@@ -50,10 +56,14 @@ __all__ = [
     "LoadMode",
     "PathwayRef",
     "PathwayKnowledgeView",
+    "SymptomKnowledgeView",
     "SourceRecord",
     "SourceRef",
+    "SymptomIndexRecord",
+    "SymptomIndexRef",
     "inspect_bundle",
     "load_builtin_bundle",
     "load_bundle",
     "render_pathway_knowledge",
+    "render_symptom_knowledge",
 ]

@@ -12,6 +12,7 @@ from typing import Protocol
 from continucare.fhir.questionnaires import flatten_questionnaire_items
 from continucare.knowledge.models import (
     ArtifactRef,
+    CatalogTermRef,
     ObservationMappingItemRef,
     PathwayRef,
     PlanDefinitionRef,
@@ -24,6 +25,7 @@ from continucare.pathways.fhir_artifacts import load_fhir_artifact
 from continucare.pathways.mappings import load_observation_mapping
 from continucare.pathways.registry import PathwayRegistry, load_builtin_pathways
 from continucare.terminology.catalog import (
+    CatalogConcept,
     TerminologyCatalog,
     load_glp1_symptom_catalog,
 )
@@ -118,8 +120,18 @@ class ArtifactResolution:
     detail: str
 
 
+@dataclass(frozen=True)
+class CatalogTermResolution:
+    resolved: bool
+    detail: str
+    catalog: TerminologyCatalog | None = None
+    concept: CatalogConcept | None = None
+
+
 class ArtifactResolver(Protocol):
     def resolve(self, pathway: PathwayRef, artifact: ArtifactRef) -> ArtifactResolution: ...
+
+    def resolve_catalog_term(self, term: CatalogTermRef) -> CatalogTermResolution: ...
 
 
 class RepositoryArtifactResolver:
@@ -154,6 +166,23 @@ class RepositoryArtifactResolver:
             return ArtifactResolution(False, f"no resolver for {artifact.artifact_kind}")
         except (LookupError, ValueError, KeyError) as exc:
             return ArtifactResolution(False, str(exc))
+
+    def resolve_catalog_term(self, term: CatalogTermRef) -> CatalogTermResolution:
+        catalog = self._catalog(term.catalog_id, term.catalog_version)
+        if catalog is None:
+            return CatalogTermResolution(
+                False, "terminology catalog id/version is unavailable"
+            )
+        try:
+            concept = catalog.concept(term.concept_id)
+        except LookupError as exc:
+            return CatalogTermResolution(False, str(exc), catalog=catalog)
+        return CatalogTermResolution(
+            True,
+            "exact terminology catalog term resolved",
+            catalog=catalog,
+            concept=concept,
+        )
 
     def _pathway(self, ref: PathwayRef):
         return self.pathways.get(ref.pathway_code, ref.pathway_version)

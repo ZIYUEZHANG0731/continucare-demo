@@ -10,7 +10,11 @@ from continucare.knowledge.models import (
     WorkflowDesignDecision,
     artifact_key,
 )
-from continucare.knowledge.registry import LoadMode, PathwayKnowledgeView
+from continucare.knowledge.registry import (
+    LoadMode,
+    PathwayKnowledgeView,
+    SymptomKnowledgeView,
+)
 
 
 KNOWLEDGE_DISCLAIMER = (
@@ -138,6 +142,77 @@ def render_pathway_knowledge(view: PathwayKnowledgeView) -> str:
                 f"  reason={gap.reason}",
                 f"  source_integrity={source_integrity}",
             ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def render_symptom_knowledge(view: SymptomKnowledgeView) -> str:
+    """Render one reference-only symptom index without minting display facts."""
+
+    record = view.record
+    resolution = view.catalog_resolution
+    lines = [
+        f"Symptom Knowledge — {record.symptom_index_id}@{record.record_version}",
+        f"mode={view.mode.value.upper()}",
+        "reference_only=true; runtime_authority=none",
+        f"catalog_ref={record.catalog_term.catalog_id}|"
+        f"{record.catalog_term.catalog_version}|{record.catalog_term.concept_id}",
+        f"catalog_resolution={'resolved' if resolution.resolved else 'unresolved'}",
+    ]
+    if resolution.resolved:
+        assert resolution.concept is not None
+        concept = resolution.concept
+        lines.extend(
+            [
+                f"preferred_zh={concept.preferred_zh}",
+                "coding="
+                f"{concept.coding.system}|{concept.coding.version or 'not_available'}|"
+                f"{concept.coding.code}|{concept.coding.display or 'not_available'}",
+            ]
+        )
+    else:
+        lines.append(f"unresolved_detail={resolution.detail}")
+    lines.extend(["", "Exact claims"])
+    for claim in view.claims:
+        summary = view.review_summaries[claim.ref.key()]
+        lines.extend(
+            [
+                f"- {claim.ref}",
+                f"  statement={claim.statement}",
+                f"  supports={'；'.join(claim.supports)}",
+                f"  does_not_support={'；'.join(claim.does_not_support)}",
+                "  applicable_scope="
+                + json.dumps(
+                    claim.applicable_scope.model_dump(mode="json"),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                f"  review={summary.aggregate}",
+            ]
+        )
+        if isinstance(claim, SourcedClinicalClaim):
+            sources = {item.ref.key(): item for item in view.sources}
+            for citation in claim.citations:
+                source = sources[citation.source.key()]
+                lines.append(
+                    f"  source={source.ref}; authority="
+                    f"{source.issuing_authority or 'not_available'}; "
+                    f"document_version={source.document_version or 'not_available'}; "
+                    f"locator={json.dumps(citation.locator.model_dump(mode='json'), ensure_ascii=False, sort_keys=True)}; "
+                    f"access={source.access.mode}; "
+                    f"integrity={view.source_content_status[source.ref.key()]}"
+                )
+    lines.extend(["", "Exact bindings"])
+    for binding in view.bindings:
+        lines.append(
+            f"- {binding.ref}; pathway={binding.pathway.pathway_code}|"
+            f"{binding.pathway.pathway_version}; artifact={_artifact_label(binding.artifact)}"
+        )
+    lines.extend(["", "Exact coverage gaps"])
+    for gap in view.gaps:
+        lines.append(
+            f"- {gap.ref}; pathway={gap.pathway.pathway_code}|"
+            f"{gap.pathway.pathway_version}; gap_kind={gap.gap_kind}; reason={gap.reason}"
         )
     return "\n".join(lines) + "\n"
 

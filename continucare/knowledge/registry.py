@@ -50,6 +50,10 @@ from continucare.knowledge.models import (
     SourceRegistryFile,
     SourceRegistryStatus,
     SourcedClinicalClaim,
+    SymptomIndexFile,
+    SymptomIndexLifecycle,
+    SymptomIndexRecord,
+    SymptomIndexRef,
     UniversalNonclinicalStandardScope,
     WorkflowDesignDecision,
     artifact_key,
@@ -59,6 +63,7 @@ from continucare.knowledge.resolvers import (
     ArtifactResolver,
     AuthorityResolver,
     BundleSource,
+    CatalogTermResolution,
     NullAuthorityResolver,
     RepositoryArtifactResolver,
     ResolvedAuthority,
@@ -144,22 +149,47 @@ class PathwayKnowledgeView:
 
 
 @dataclass(frozen=True)
+class SymptomKnowledgeView:
+    record: SymptomIndexRecord
+    mode: LoadMode
+    catalog_resolution: CatalogTermResolution
+    claims: tuple[KnowledgeClaim, ...]
+    bindings: tuple[BindingRecord, ...]
+    gaps: tuple[CoverageGapRecord, ...]
+    sources: tuple[SourceRecord, ...]
+    review_summaries: Mapping[tuple[str, int], ReviewSummary]
+    source_review_status: Mapping[tuple[str, int], str]
+    source_content_status: Mapping[tuple[str, int], str]
+
+    def __post_init__(self) -> None:
+        for name in (
+            "review_summaries",
+            "source_review_status",
+            "source_content_status",
+        ):
+            object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
+
+
+@dataclass(frozen=True)
 class KnowledgeRegistry:
     mode: LoadMode
     sources: tuple[SourceRecord, ...]
     claims: tuple[KnowledgeClaim, ...]
     bindings: tuple[BindingRecord, ...]
     gaps: tuple[CoverageGapRecord, ...]
+    symptom_indexes: tuple[SymptomIndexRecord, ...]
     governance: GovernanceRegistryFile
     current_source_refs: tuple[SourceRef, ...]
     current_claim_refs: tuple[ClaimRef, ...]
     current_binding_refs: tuple[BindingRef, ...]
     current_gap_refs: tuple[CoverageGapRef, ...]
+    current_symptom_index_refs: tuple[SymptomIndexRef, ...]
     artifact_resolutions: Mapping[tuple[str, str, int], ArtifactResolution]
     source_content_status: Mapping[tuple[str, int], str]
     review_summaries: Mapping[tuple[str, int], ReviewSummary]
     source_review_status: Mapping[tuple[str, int], str]
     event_verification: Mapping[str, str]
+    catalog_term_resolutions: Mapping[tuple[str, int], CatalogTermResolution]
 
     def __post_init__(self) -> None:
         for name in (
@@ -168,6 +198,7 @@ class KnowledgeRegistry:
             "review_summaries",
             "source_review_status",
             "event_verification",
+            "catalog_term_resolutions",
         ):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
 
@@ -210,6 +241,60 @@ class KnowledgeRegistry:
             current_claim_keys=frozenset(item.key() for item in self.current_claim_refs),
             current_binding_keys=frozenset(item.key() for item in self.current_binding_refs),
             current_gap_keys=frozenset(item.key() for item in self.current_gap_refs),
+        )
+
+    def symptom_views(self) -> tuple[SymptomKnowledgeView, ...]:
+        selected = {item.key() for item in self.current_symptom_index_refs}
+        records = (
+            tuple(item for item in self.symptom_indexes if item.ref.key() in selected)
+            if self.mode == LoadMode.CURRENT
+            else self.symptom_indexes
+        )
+        return tuple(self._symptom_view(item) for item in records)
+
+    def for_symptom(self, symptom_index_id: str, record_version: int) -> SymptomKnowledgeView:
+        record = next(
+            (
+                item
+                for item in self.symptom_indexes
+                if item.ref.key() == (symptom_index_id, record_version)
+            ),
+            None,
+        )
+        if record is None:
+            raise KnowledgeReferenceError(
+                f"symptom index {symptom_index_id} version {record_version} was not found"
+            )
+        if self.mode == LoadMode.CURRENT and record.ref.key() not in {
+            item.key() for item in self.current_symptom_index_refs
+        }:
+            raise KnowledgeCurrentSelectionError(
+                f"symptom index {record.ref} is not selected as CURRENT"
+            )
+        return self._symptom_view(record)
+
+    def _symptom_view(self, record: SymptomIndexRecord) -> SymptomKnowledgeView:
+        claim_map = {item.ref.key(): item for item in self.claims}
+        binding_map = {item.ref.key(): item for item in self.bindings}
+        gap_map = {item.ref.key(): item for item in self.gaps}
+        claims = tuple(claim_map[item.key()] for item in record.claim_refs)
+        sources_by_key: dict[tuple[str, int], SourceRecord] = {}
+        source_map = {item.ref.key(): item for item in self.sources}
+        for claim in claims:
+            if isinstance(claim, SourcedClinicalClaim):
+                for citation in claim.citations:
+                    sources_by_key[citation.source.key()] = source_map[citation.source.key()]
+        return SymptomKnowledgeView(
+            record=record,
+            mode=self.mode,
+            catalog_resolution=self.catalog_term_resolutions[record.ref.key()],
+            claims=claims,
+            bindings=tuple(binding_map[item.key()] for item in record.binding_refs),
+            gaps=tuple(gap_map[item.key()] for item in record.coverage_gap_refs),
+            sources=tuple(sources_by_key.values()),
+            review_summaries=self.review_summaries,
+            source_review_status=self.source_review_status,
+            source_content_status=self.source_content_status,
         )
 
 
@@ -319,18 +404,26 @@ def load_bundle(
     governance_files = [
         item for item in envelopes if isinstance(item, GovernanceRegistryFile)
     ]
+    symptom_index_files = [
+        item for item in envelopes if isinstance(item, SymptomIndexFile)
+    ]
     if len(source_files) != 1 or len(claim_files) != 1 or len(governance_files) != 1:
         raise KnowledgeSchemaError(
             "bundle must pin exactly one source, claim and governance registry"
         )
     if not binding_files:
         raise KnowledgeSchemaError("bundle must pin at least one binding manifest")
+    if len(symptom_index_files) > 1:
+        raise KnowledgeSchemaError("bundle may pin at most one symptom index")
 
     sources = tuple(source_files[0].records)
     claims = tuple(claim_files[0].records)
     bindings = tuple(item for file in binding_files for item in file.records)
     governance = governance_files[0]
     gaps = tuple(governance.coverage_gaps)
+    symptom_indexes = (
+        tuple(symptom_index_files[0].records) if symptom_index_files else ()
+    )
 
     try:
         _validate_bundle_structure(
@@ -340,6 +433,7 @@ def load_bundle(
             binding_files=binding_files,
             governance=governance,
             gaps=gaps,
+            symptom_indexes=symptom_indexes,
         )
     except KnowledgeReferenceError:
         raise
@@ -350,11 +444,13 @@ def load_bundle(
     claim_map = {item.ref.key(): item for item in claims}
     binding_map = {item.ref.key(): item for item in bindings}
     gap_map = {item.ref.key(): item for item in gaps}
+    symptom_index_map = {item.ref.key(): item for item in symptom_indexes}
 
     current_source_refs = tuple(index.current_source_refs)
     current_claim_refs = tuple(index.current_claim_refs)
     current_binding_refs = tuple(index.current_binding_refs)
     current_gap_refs = tuple(index.current_gap_refs)
+    current_symptom_index_refs = tuple(index.current_symptom_index_refs)
     _validate_selection_refs(
         current_source_refs,
         current_claim_refs,
@@ -364,6 +460,8 @@ def load_bundle(
         claim_map,
         binding_map,
         gap_map,
+        current_symptom_index_refs,
+        symptom_index_map,
     )
     if selected_mode == LoadMode.CURRENT:
         _validate_current_eligibility(
@@ -375,7 +473,37 @@ def load_bundle(
             claim_map,
             binding_map,
             gap_map,
+            current_symptom_index_refs,
+            symptom_index_map,
         )
+
+    catalog_term_resolutions: dict[tuple[str, int], CatalogTermResolution] = {}
+    selected_symptom_keys = {item.key() for item in current_symptom_index_refs}
+    for record in symptom_indexes:
+        if selected_mode == LoadMode.CURRENT and record.ref.key() not in selected_symptom_keys:
+            continue
+        try:
+            resolution = artifact_resolver.resolve_catalog_term(record.catalog_term)
+            if not isinstance(resolution, CatalogTermResolution):
+                raise TypeError(
+                    "ArtifactResolver.resolve_catalog_term() must return CatalogTermResolution"
+                )
+        except KnowledgeBundleError:
+            raise
+        except Exception as exc:
+            if selected_mode == LoadMode.CURRENT:
+                raise KnowledgeArtifactUnresolved(
+                    f"{record.ref} catalog resolver failed: {exc}"
+                ) from exc
+            resolution = CatalogTermResolution(
+                False, f"catalog resolver failed during historical inspection: {exc}"
+            )
+        catalog_term_resolutions[record.ref.key()] = resolution
+        if selected_mode == LoadMode.CURRENT and not resolution.resolved:
+            raise KnowledgeArtifactUnresolved(
+                f"{record.ref} exact catalog term {record.catalog_term.key()} is unresolved: "
+                f"{resolution.detail}"
+            )
 
     ownership = {
         (item.catalog_id, item.catalog_version): item.owner
@@ -477,16 +605,19 @@ def load_bundle(
         claims=claims,
         bindings=bindings,
         gaps=gaps,
+        symptom_indexes=symptom_indexes,
         governance=governance,
         current_source_refs=current_source_refs,
         current_claim_refs=current_claim_refs,
         current_binding_refs=current_binding_refs,
         current_gap_refs=current_gap_refs,
+        current_symptom_index_refs=current_symptom_index_refs,
         artifact_resolutions=resolution_map,
         source_content_status=content_status,
         review_summaries=review_summaries,
         source_review_status=source_review_status,
         event_verification=event_verification,
+        catalog_term_resolutions=catalog_term_resolutions,
     )
 
 
@@ -547,11 +678,15 @@ def _validate_bundle_structure(
     binding_files: list[BindingManifestFile],
     governance: GovernanceRegistryFile,
     gaps: tuple[CoverageGapRecord, ...],
+    symptom_indexes: tuple[SymptomIndexRecord, ...],
 ) -> None:
     source_map = _unique_map(sources, lambda item: item.ref.key(), "source ref")
     claim_map = _unique_map(claims, lambda item: item.ref.key(), "claim ref")
     _unique_map(bindings, lambda item: item.ref.key(), "binding ref")
-    _unique_map(gaps, lambda item: item.ref.key(), "coverage gap ref")
+    gap_map = _unique_map(gaps, lambda item: item.ref.key(), "coverage gap ref")
+    _unique_map(
+        symptom_indexes, lambda item: item.ref.key(), "symptom index ref"
+    )
     _validate_linear_versions(
         sources,
         logical_id=lambda item: item.source_id,
@@ -579,6 +714,13 @@ def _validate_bundle_structure(
         version=lambda item: item.gap_version,
         predecessor=lambda item: item.supersedes.key() if item.supersedes else None,
         label="coverage gap",
+    )
+    _validate_linear_versions(
+        symptom_indexes,
+        logical_id=lambda item: item.symptom_index_id,
+        version=lambda item: item.record_version,
+        predecessor=lambda item: item.supersedes.key() if item.supersedes else None,
+        label="symptom index",
     )
     for claim in claims:
         if isinstance(claim, SourcedClinicalClaim):
@@ -624,6 +766,32 @@ def _validate_bundle_structure(
                 raise KnowledgeReferenceError(
                     f"binding {binding.ref} pathway is outside claim {claim.ref} scope"
                 )
+    binding_map = {item.ref.key(): item for item in bindings}
+    for symptom_index in symptom_indexes:
+        missing_claims = {item.key() for item in symptom_index.claim_refs} - set(
+            claim_map
+        )
+        missing_bindings = {
+            item.key() for item in symptom_index.binding_refs
+        } - set(binding_map)
+        missing_gaps = {
+            item.key() for item in symptom_index.coverage_gap_refs
+        } - set(gap_map)
+        if missing_claims or missing_bindings or missing_gaps:
+            raise KnowledgeReferenceError(
+                f"symptom index {symptom_index.ref} has unknown exact refs: "
+                f"claims={sorted(missing_claims)}, bindings={sorted(missing_bindings)}, "
+                f"gaps={sorted(missing_gaps)}"
+            )
+        declared_claims = {item.key() for item in symptom_index.claim_refs}
+        binding_claims = {
+            binding_map[item.key()].claim.key()
+            for item in symptom_index.binding_refs
+        }
+        if not binding_claims.issubset(declared_claims):
+            raise KnowledgeReferenceError(
+                f"symptom index {symptom_index.ref} binding claims must be explicitly listed"
+            )
     alias_keys = [
         (item.namespace, item.legacy_id) for item in governance.legacy_source_aliases
     ]
@@ -666,12 +834,15 @@ def _validate_selection_refs(
     claim_map: dict[tuple[str, int], KnowledgeClaim],
     binding_map: dict[tuple[str, int], BindingRecord],
     gap_map: dict[tuple[str, int], CoverageGapRecord],
+    symptom_index_refs: tuple[SymptomIndexRef, ...],
+    symptom_index_map: dict[tuple[str, int], SymptomIndexRecord],
 ) -> None:
     selections = (
         (source_refs, source_map, "source"),
         (claim_refs, claim_map, "claim"),
         (binding_refs, binding_map, "binding"),
         (gap_refs, gap_map, "coverage gap"),
+        (symptom_index_refs, symptom_index_map, "symptom index"),
     )
     for refs, records, label in selections:
         keys = [item.key() for item in refs]
@@ -698,6 +869,8 @@ def _validate_current_eligibility(
     claim_map: dict[tuple[str, int], KnowledgeClaim],
     binding_map: dict[tuple[str, int], BindingRecord],
     gap_map: dict[tuple[str, int], CoverageGapRecord],
+    symptom_index_refs: tuple[SymptomIndexRef, ...],
+    symptom_index_map: dict[tuple[str, int], SymptomIndexRecord],
 ) -> None:
     for ref in source_refs:
         if source_map[ref.key()].registry_status != SourceRegistryStatus.ACTIVE:
@@ -728,6 +901,27 @@ def _validate_current_eligibility(
     for ref in gap_refs:
         if gap_map[ref.key()].lifecycle != "open":
             raise KnowledgeCurrentSelectionError(f"current coverage gap {ref} is not open")
+    selected_claims = {item.key() for item in claim_refs}
+    selected_bindings = {item.key() for item in binding_refs}
+    selected_gaps = {item.key() for item in gap_refs}
+    for ref in symptom_index_refs:
+        record = symptom_index_map[ref.key()]
+        if record.lifecycle != SymptomIndexLifecycle.ACTIVE:
+            raise KnowledgeCurrentSelectionError(
+                f"current symptom index {ref} is not active"
+            )
+        if not {item.key() for item in record.claim_refs}.issubset(selected_claims):
+            raise KnowledgeCurrentSelectionError(
+                f"current symptom index {ref} references non-current claims"
+            )
+        if not {item.key() for item in record.binding_refs}.issubset(selected_bindings):
+            raise KnowledgeCurrentSelectionError(
+                f"current symptom index {ref} references non-current bindings"
+            )
+        if not {item.key() for item in record.coverage_gap_refs}.issubset(selected_gaps):
+            raise KnowledgeCurrentSelectionError(
+                f"current symptom index {ref} references non-current gaps"
+            )
 
 
 def _validate_catalog_ownership(

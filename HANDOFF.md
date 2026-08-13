@@ -1,6 +1,6 @@
 # HANDOFF
 
-> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。本文记录的是 2026-08-13 M5-C 已完成实现、尚未提交时的真实状态；不要把它当成长期路线图。
+> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。本文记录的是 2026-08-13 M5-K 已完成实现、尚未暂存或提交时的真实状态；不要把它当成长期路线图。
 
 ## 1. Git 基线与已完成提交
 
@@ -19,10 +19,10 @@ codex/docs-collaboration-init
 upstream 为：
 
 ```text
-20d2521bf7bacaebe7d980c4013819d37de7fffb
+3e171262ac94f699c5bd28ad11781c403354d9e3
 ```
 
-`43012df` 之后的四个 M5 基础提交都已位于 upstream：
+`43012df` 之后的五个 M5 基础提交都已位于 upstream：
 
 1. `8151161d527f717ad47a78cf145a6722e4268ece`
    `docs: define collaboration workflow and handoff`
@@ -33,6 +33,8 @@ upstream 为：
    `feat: add confirmed manual review task flow`
 4. `20d2521bf7bacaebe7d980c4013819d37de7fffb`
    `feat: add controlled nurse review workflow`
+5. `3e171262ac94f699c5bd28ad11781c403354d9e3`
+   `feat: add deterministic manual review doctor briefs`
 
 Knowledge Evidence Foundation 已经正式提交，不再是未跟踪成果。它仍保持 Pathway-agnostic；GLP1-14D 只是 fixture。没有 `target_number`、固定分母或人工目标序号；20/11/9/0/0 只是当前 GLP 数据快照。Knowledge 只解释采集/展示依据，不能授权 Task、ClinicalRule 或其他运行时行为。
 
@@ -54,11 +56,11 @@ feat: add controlled nurse review workflow
 当前 HEAD 为：
 
 ```text
-20d2521bf7bacaebe7d980c4013819d37de7fffb
-feat: add controlled nurse review workflow
+3e171262ac94f699c5bd28ad11781c403354d9e3
+feat: add deterministic manual review doctor briefs
 ```
 
-HEAD 与 `origin/codex/docs-collaboration-init` 相同。M5-C 已完成但未暂存、未提交；本轮不得 commit 或 push。
+HEAD 与 `origin/codex/docs-collaboration-init` 相同，ahead/behind 为 `0/0`。M5-C 已提交并推送。M5-K 已完成但未暂存、未提交；本轮不得 commit 或 push。
 
 ## 2. M5-A 目标与完成结论
 
@@ -279,7 +281,7 @@ M5-B 已解除 M5-A “护士队列只读、Task 固定 requested”的历史限
 - 当前完全没有发送能力；
 - 仍无真实患者、真实外部系统、临床规则、风险等级、Alert、诊断或治疗建议。
 
-## 7. M5-B（已完成，准备提交）
+## 7. M5-B（已提交并推送）
 
 M5-B 已完成以下受控闭环：
 
@@ -363,28 +365,28 @@ git rev-parse @{upstream}
 git status --short --untracked-files=all
 ```
 
-当前 M5-C 交接状态：
+当前 M5-K 交接状态：
 
-- 工作区包含 M5-C 未提交改动；
+- 工作区只包含 M5-K 未提交改动；
 - 暂存区为空；
 - 分支仍为 `codex/docs-collaboration-init`；
 - HEAD 与 upstream 相同；
-- 未 push。
+- M5-C 已 push；M5-K 未 commit、未 push。
 
-M5-C 没有数据库迁移或外部系统操作。若用户决定放弃本切片，只能在用户明确授权后回退未提交代码并重置本地 Demo 数据；未经授权不得 reset、clean、checkout、revert、commit 或 push。
+M5-K 没有数据库迁移、运行时资源写入或外部系统操作。若用户决定放弃本切片，只能在用户明确授权后回退未提交代码；未经授权不得 reset、clean、checkout、revert、commit 或 push。
 
 ## 9. 一句话接管结论
 
-M5-B 已提交并位于 upstream。M5-C 已完成“逐字原话 + 最终 Observation + 受控护士结果 + Communication readiness → 确定性、版本化、可追溯医生简报”的可点击闭环，仍保持 synthetic-only、clinical_rules=[]、not_assessed、无外发；M5-C 当前未暂存、未提交，且不得开始 M5-K/D/E。
+M5-C 已提交并位于 upstream。M5-K 已完成四个比赛 fixture 的症状中心精确证据索引、CURRENT/HISTORICAL 查询、只读页面、CLI、官方 link-only 候选来源与显式 CoverageGap；仍保持 synthetic-only、clinical_rules=[]、not_assessed、无外发，并且当前未暂存、未提交。
 
 ## 10. 后续顺序
 
-1. M5-C：本轮已完成，尚未提交；
-2. M5-K：比赛最小版 Knowledge Expansion，尚未开始；
-3. M5-D：把 M5-A/B/C/K 串成稳定的一键比赛 Demo，尚未开始；
+1. M5-C：已提交并推送；
+2. M5-K：本轮已完成，尚未暂存、提交或推送；
+3. M5-D：把 M5-A/B/C/K 串成稳定的一键比赛 Demo，下一步，尚未开始；
 4. M5-E：接入 M6 飞书/Aily，并保留无 Token 的 Mock fallback，尚未开始。
 
-## 11. M5-C（已完成，未提交）
+## 11. M5-C（已提交并推送）
 
 M5-C 新增 `ManualReviewBriefService`，只从 completed manual-review Task、completed QuestionnaireResponse、final Observation、Communication preparation、精确 Provenance 与必要 AuditEvent 形成固定模板 Summary。患者原话逐字显示；护士自由 note 不进入正文；pending 与 ready 两态分别明确为“尚不可发送；未发送”和“已人工批准；尚未发送”。
 
@@ -428,4 +430,39 @@ NON-BLOCKING: 无
 NEED_CONTEXT: 无
 ```
 
-当前仍未执行 commit、push、M5-K、M5-D 或 M5-E。
+M5-C 已以 `3e17126 feat: add deterministic manual review doctor briefs` 提交并推送；本轮没有修改 M5-C 运行时闭环。
+
+## 12. M5-K（已完成，未暂存/未提交）
+
+M5-K 新增严格版本化、reference-only 的 `SymptomIndexRecord` 与 `SymptomIndexFile`，只用精确 ref 把四个比赛 fixture（diarrhea、nausea、vomiting、abdominal-pain）连接到既有 catalog term、Claim、Binding 与 CoverageGap。索引自身不复制名称、coding、alias、患者表达、风险或运行时逻辑，不替代 Pathway，也不拥有临床真相。
+
+核心行为：
+
+- CURRENT 加载会对 catalog term、Claim、Binding、CoverageGap 及 current selection 全部 fail-closed；HISTORICAL 允许显示 unresolved catalog resolution，但绝不伪装为已解析；
+- 腹泻新增一个严格 scope 的 draft collection-rationale Claim；四个症状都新增 patient-expression-evidence gap，明确没有复制 runtime aliases、独立表达来源、临床审核或真实患者验证；
+- HPO v2026-06-23 与 NCI PRO-CTCAE 只登记为官方 `link_only`、`not_content_fixed`、未绑定候选来源；没有下载或打包 ontology/instrument/PDF/题目/选项/翻译/衍生内容，也没有声称 license clearance；
+- PRO-CTCAE 未绑定 GLP1；CTCAE Grade 转换、分诊协议、红旗升级、FAERS、VigiAccess/VigiBase、MedDRA、UMLS 映射与新 SNOMED 内容全部延期；
+- 新页面 `pages/5_knowledge_evidence.py` 只读取离线 Knowledge bundle，不导入数据库、患者、Service、模型或网络客户端；四个症状可切换，Claim scope、supports/does_not_support、source locator、review、Binding Pathway 和 gap 都可见；
+- review aggregate 保持 `not_assessed`，`clinical_rules=[]` 不变；Knowledge 不授权 Observation、Task、Summary 或 ClinicalRule；
+- CLI 支持精确 `--symptom-index-id` / `--record-version` 与 `--historical` 查询；wheel 包含六个 Knowledge JSON manifest；
+- 只在首页增加独立只读入口，没有把 Knowledge 页面织入 M5-D 比赛故事；未开始 M5-D 或 M5-E。
+
+最终验证：
+
+```text
+.venv/bin/python -m pytest -q tests/test_knowledge_registry.py
+79 passed
+
+.venv/bin/python -m pytest -q
+307 passed, 3 skipped
+
+.venv/bin/python -m compileall -q continucare app.py pages
+通过
+
+git diff --check
+通过
+```
+
+3 个 skip 仍只因没有设置官方 `FHIR_R4_SCHEMA_ZIP`。wheel 已在临时目录构建并隔离安装，四个症状可从安装包解析，且包内没有 PDF/docx/PRO-CTCAE body/MedDRA/Vigi/NHS 内容。应用内浏览器桌面与 390×844 验收通过；正确路由冷加载 console 无 error/warn。浏览前后 `data/continucare.db` 的 SHA-256、大小、mtime 和资源计数完全一致，Alert 与 approved ClinicalRule 都为 0。
+
+冻结方案后的 Sonnet final review 结论为 `CLEAN PASS`，没有 blocker 或 NEED_CONTEXT；唯一未使用 import 的非阻断提示已机械移除。详细设计见 `docs/27_m5_k_symptom_knowledge_expansion.md`。

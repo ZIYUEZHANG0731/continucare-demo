@@ -95,6 +95,16 @@ with doctor:
     st.write("30 秒读完重点、处理结果和待确认项，再按需展开证据。")
     st.page_link("pages/3_doctor_summary.py", label="进入医生复诊简报 →", icon="📋")
 
+with st.container(border=True):
+    st.markdown("### Knowledge Evidence · 症状中心")
+    st.write("离线查看四个比赛 fixture 的精确术语、Claim scope、Binding 与 Gap。")
+    st.caption("只读、不读取患者资源、不授权任何 runtime 行为。")
+    st.page_link(
+        "pages/5_knowledge_evidence.py",
+        label="打开症状知识证据 →",
+        icon="📚",
+    )
+
 st.markdown("## 一键载入演示故事")
 st.caption("每次会先清空本地运行数据，再载入一条合成患者故事。")
 scenario_columns = st.columns(3)

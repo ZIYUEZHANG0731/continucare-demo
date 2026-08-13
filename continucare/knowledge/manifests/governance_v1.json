@@ -121,6 +121,61 @@
       "lifecycle": "open",
       "supersedes": null,
       "recorded_at": "2026-08-13T00:00:00+00:00"
+    },
+    {
+      "gap_id": "glp1-gap-diarrhea-concept-basis",
+      "gap_version": 1,
+      "pathway": {"pathway_code": "GLP1-14D", "pathway_version": "1.0.0"},
+      "artifact": {"artifact_kind": "terminology_concept", "catalog_id": "continucare-glp1-patient-reported-symptoms", "catalog_version": "1.0.0", "concept_id": "diarrhea"},
+      "gap_kind": "exact_terminology_basis",
+      "reason": "DailyMed source_ids 支持症状相关性但不支持具体 SNOMED code 选择；当前没有精确外部 locator，也没有 Pathway Questionnaire 或 Observation binding。",
+      "lifecycle": "open",
+      "supersedes": null,
+      "recorded_at": "2026-08-13T00:00:00+00:00"
+    },
+    {
+      "gap_id": "m5k-gap-diarrhea-patient-expression-evidence",
+      "gap_version": 1,
+      "pathway": {"pathway_code": "GLP1-14D", "pathway_version": "1.0.0"},
+      "artifact": {"artifact_kind": "terminology_concept", "catalog_id": "continucare-glp1-patient-reported-symptoms", "catalog_version": "1.0.0", "concept_id": "diarrhea"},
+      "gap_kind": "patient_expression_evidence",
+      "reason": "现有 runtime aliases 不作为已验证患者表达证据；M5-K 不复制别名，也没有独立来源、临床审核或真实患者验证。",
+      "lifecycle": "open",
+      "supersedes": null,
+      "recorded_at": "2026-08-13T00:00:00+00:00"
+    },
+    {
+      "gap_id": "m5k-gap-nausea-patient-expression-evidence",
+      "gap_version": 1,
+      "pathway": {"pathway_code": "GLP1-14D", "pathway_version": "1.0.0"},
+      "artifact": {"artifact_kind": "terminology_concept", "catalog_id": "continucare-glp1-patient-reported-symptoms", "catalog_version": "1.0.0", "concept_id": "nausea"},
+      "gap_kind": "patient_expression_evidence",
+      "reason": "现有 runtime aliases 不作为已验证患者表达证据；M5-K 不复制别名，也没有独立来源、临床审核或真实患者验证。",
+      "lifecycle": "open",
+      "supersedes": null,
+      "recorded_at": "2026-08-13T00:00:00+00:00"
+    },
+    {
+      "gap_id": "m5k-gap-vomiting-patient-expression-evidence",
+      "gap_version": 1,
+      "pathway": {"pathway_code": "GLP1-14D", "pathway_version": "1.0.0"},
+      "artifact": {"artifact_kind": "terminology_concept", "catalog_id": "continucare-glp1-patient-reported-symptoms", "catalog_version": "1.0.0", "concept_id": "vomiting"},
+      "gap_kind": "patient_expression_evidence",
+      "reason": "现有 runtime aliases 不作为已验证患者表达证据；M5-K 不复制别名，也没有独立来源、临床审核或真实患者验证。",
+      "lifecycle": "open",
+      "supersedes": null,
+      "recorded_at": "2026-08-13T00:00:00+00:00"
+    },
+    {
+      "gap_id": "m5k-gap-abdominal-pain-patient-expression-evidence",
+      "gap_version": 1,
+      "pathway": {"pathway_code": "GLP1-14D", "pathway_version": "1.0.0"},
+      "artifact": {"artifact_kind": "terminology_concept", "catalog_id": "continucare-glp1-patient-reported-symptoms", "catalog_version": "1.0.0", "concept_id": "abdominal-pain"},
+      "gap_kind": "patient_expression_evidence",
+      "reason": "现有 runtime aliases 不作为已验证患者表达证据；M5-K 不复制别名，也没有独立来源、临床审核或真实患者验证。",
+      "lifecycle": "open",
+      "supersedes": null,
+      "recorded_at": "2026-08-13T00:00:00+00:00"
     }
   ]
 }
