@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import streamlit as st
+from streamlit.errors import StreamlitPageNotFoundError
 
 from continucare.knowledge import LoadMode, load_builtin_bundle
 from continucare.knowledge.models import SourcedClinicalClaim, artifact_key
@@ -19,6 +20,15 @@ def _source_url(source) -> str:
     return str(source.canonical_url or source.access_urls[0].url)
 
 
+def _home_link(label: str) -> None:
+    """Use native multipage navigation, with an AppTest-only fallback."""
+
+    try:
+        st.page_link("app.py", label=label)
+    except (StreamlitPageNotFoundError, KeyError):
+        st.markdown(f"[{label}](/)")
+
+
 st.set_page_config(
     page_title="症状知识证据 · ContinuCare",
     page_icon="📚",
@@ -29,6 +39,7 @@ inject_global_styles(st)
 
 st.title("症状中心 Knowledge Evidence")
 st.error("只读离线视图 · 不读取患者数据 · 不授权任何临床运行时行为")
+_home_link("← 返回完整比赛 Demo 导览")
 st.caption(
     "四个条目只是当前比赛 fixture snapshot，不是常见症状排名、固定分母、"
     "target_number、覆盖率目标或完整症状库。"
@@ -200,3 +211,4 @@ st.caption(
     "synthetic expressions：未新增。现有 runtime aliases 不被复制为 Knowledge 证据；"
     "患者表达来源与验证缺口已作为 CoverageGap 显示。"
 )
+_home_link("返回首页确认故事进度 →")

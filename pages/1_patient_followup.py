@@ -34,8 +34,17 @@ from continucare.fhir.r4 import FHIRValidationError
 from continucare.fhir.terminology import UCUM
 from continucare.presentation import observation_text
 from continucare.models import CareSessionStatus
-from continucare.ui import inject_global_styles, render_mode_badges
+from continucare.ui import (
+    inject_global_styles,
+    render_competition_progress,
+    render_mode_badges,
+)
 from continucare.services.confirmed_review import ConfirmedReviewService
+from continucare.services.competition_demo import (
+    CompetitionDemoConflict,
+    demo_write_guard,
+    read_competition_demo,
+)
 
 
 PRESETS = {
@@ -262,6 +271,10 @@ def _render_conversation_assist() -> None:
 
     run_key = _semantic_state_key("latest_run")
     run_id = st.session_state.get(run_key)
+    if progress.session_id == session.session_id and progress.run_id:
+        # Browser state is only a navigation hint. Persisted facts always win.
+        run_id = progress.run_id
+        st.session_state[run_key] = progress.run_id
     recent_records = list(reversed(store.list_agent_runs(session.session_id)[:5]))
     for prior in recent_records:
         if prior.run_id == run_id:
@@ -286,6 +299,10 @@ def _render_conversation_assist() -> None:
             result = SemanticResult.model_validate(record.output_json)
             _render_semantic_result(record, result)
 
+    if progress.session_id == session.session_id and progress.run_id:
+        st.info("比赛主线已锁定固定合成原话；请处理上方候选，不会在此创建第二条语义故事。")
+        return
+
     text_key = _semantic_state_key("input")
     patient_text = st.text_area(
         "输入身体状态",
@@ -305,7 +322,11 @@ def _render_conversation_assist() -> None:
             st.warning("请先输入一段合成的身体状态描述。")
         else:
             try:
-                interaction = agent_service.analyze(session.session_id, patient_text)
+                with demo_write_guard(
+                    settings.db_path,
+                    expected_generation=progress.generation,
+                ):
+                    interaction = agent_service.analyze(session.session_id, patient_text)
                 st.session_state[run_key] = interaction.result.run_id
                 st.rerun()
             except ValueError as exc:
@@ -402,15 +423,23 @@ def _render_semantic_result(record, result: SemanticResult) -> None:
                                 item.candidate_id for item in available
                             }:
                                 raise ValueError("请确认本轮全部候选，或选择拒绝/不确定")
-                            review_service.accept_all(result.run_id, selected)
+                            with demo_write_guard(
+                                settings.db_path,
+                                expected_generation=progress.generation,
+                            ):
+                                review_service.accept_all(result.run_id, selected)
                             st.session_state["care_submission_notice"] = (
                                 "患者确认成功：证据资源与常规护士人工复核任务已原子创建；"
                                 "临床评估仍为 not_assessed。"
                             )
                         else:
-                            updated = agent_service.confirm_candidates(
-                                result.run_id, selected
-                            )
+                            with demo_write_guard(
+                                settings.db_path,
+                                expected_generation=progress.generation,
+                            ):
+                                updated = agent_service.confirm_candidates(
+                                    result.run_id, selected
+                                )
                             st.session_state[confirmed_key] = [*confirmed, *selected]
                             _set_widget_answers(session.session_id, updated.answers)
                         st.rerun()
@@ -424,21 +453,35 @@ def _render_semantic_result(record, result: SemanticResult) -> None:
                         key=_semantic_state_key("reject", result.run_id),
                         width="stretch",
                     ):
-                        agent_service.reject_candidates(
-                            result.run_id,
-                            [item.candidate_id for item in available],
-                        )
-                        st.rerun()
+                        try:
+                            with demo_write_guard(
+                                settings.db_path,
+                                expected_generation=progress.generation,
+                            ):
+                                agent_service.reject_candidates(
+                                    result.run_id,
+                                    [item.candidate_id for item in available],
+                                )
+                            st.rerun()
+                        except (CompetitionDemoConflict, ValueError) as exc:
+                            st.warning(str(exc))
                     if unsure.button(
                         "暂不确定",
                         key=_semantic_state_key("unsure", result.run_id),
                         width="stretch",
                     ):
-                        agent_service.mark_candidates_unsure(
-                            result.run_id,
-                            [item.candidate_id for item in available],
-                        )
-                        st.rerun()
+                        try:
+                            with demo_write_guard(
+                                settings.db_path,
+                                expected_generation=progress.generation,
+                            ):
+                                agent_service.mark_candidates_unsure(
+                                    result.run_id,
+                                    [item.candidate_id for item in available],
+                                )
+                            st.rerun()
+                        except (CompetitionDemoConflict, ValueError) as exc:
+                            st.warning(str(exc))
                     st.caption("拒绝或不确定只留决策审计，不创建临床资源或任务。")
                 else:
                     st.caption("如有不准确，请取消勾选，或在下方完整问卷中修改。")
@@ -474,11 +517,15 @@ def _render_semantic_result(record, result: SemanticResult) -> None:
                         ),
                     ):
                         try:
-                            updated = agent_service.resolve_clarification(
-                                result.run_id,
-                                clarification.clarification_id,
-                                option.option_id,
-                            )
+                            with demo_write_guard(
+                                settings.db_path,
+                                expected_generation=progress.generation,
+                            ):
+                                updated = agent_service.resolve_clarification(
+                                    result.run_id,
+                                    clarification.clarification_id,
+                                    option.option_id,
+                                )
                             st.session_state[resolved_key] = [
                                 *resolved,
                                 clarification.clarification_id,
@@ -501,7 +548,11 @@ def _render_semantic_result(record, result: SemanticResult) -> None:
                 key=_semantic_state_key("save_original", result.run_id),
             ):
                 try:
-                    updated = agent_service.confirm_original_text(result.run_id)
+                    with demo_write_guard(
+                        settings.db_path,
+                        expected_generation=progress.generation,
+                    ):
+                        updated = agent_service.confirm_original_text(result.run_id)
                     st.session_state[verbatim_key] = True
                     _set_widget_answers(session.session_id, updated.answers)
                     st.rerun()
@@ -640,18 +691,29 @@ st.title("患者随访（合成数据）")
 st.error("仅用于合成数据演示 · 不提供诊断、治疗或用药建议 · 不是急救通道")
 
 settings = get_settings()
-store = SQLiteStore(settings.db_path)
+progress = read_competition_demo(settings.db_path)
+render_competition_progress(st, progress)
+if not settings.db_path.is_file():
+    st.info("尚未开始完整比赛 Demo。请返回首页明确开始。")
+    st.page_link("app.py", label="返回首页开始 Demo →", icon="🏠")
+    st.stop()
+
+store = SQLiteStore(settings.db_path, initialize=False)
 patient = store.get_patient(DEMO_PATIENT_ID)
 if patient is None:
     st.error("合成患者初始化失败，请返回首页重置 Demo。")
     st.stop()
 
 engine = CareEngine(store)
-session = engine.start_or_resume(
-    DEMO_PATIENT_ID,
-    allow_repeat_same_day=False,
-    patient_timezone=settings.patient_timezone,
+session = (
+    store.get_care_session(progress.session_id)
+    if progress.session_id is not None
+    else next(iter(store.list_care_sessions(DEMO_PATIENT_ID)), None)
 )
+if session is None:
+    st.info("尚未准备随访故事。请返回首页明确开始完整比赛 Demo。")
+    st.page_link("app.py", label="返回首页 →", icon="🏠")
+    st.stop()
 questionnaire = engine.questionnaire_for_session(session)
 agent_service = CareAgentService(
     store,
@@ -677,6 +739,12 @@ if session.status == CareSessionStatus.COMPLETED:
         "患者当地日期的今日随访已经完成。短期对话已关闭，确认后的 Observation "
         "已进入长期记录；下一当地日期会自动开启新的每日会话。"
     )
+    if progress.task_id:
+        st.page_link(
+            "pages/2_nurse_risk_center.py",
+            label="下一步：前往护士端确认收到任务 →",
+            icon="🧭",
+        )
     st.stop()
 
 st.markdown("## 完成本次随访")
@@ -701,6 +769,13 @@ with form_area:
         _render_conversation_assist()
         _render_pending_new_symptoms()
 
+    if progress.session_id == session.session_id and progress.run_id:
+        st.caption(
+            "完整比赛主线必须通过上方候选卡片的患者明确决定；"
+            "不会用完整问卷提交按钮绕过 manual-review Task 门禁。"
+        )
+        st.stop()
+
     st.markdown("### 或直接填写完整问卷")
     st.caption("对话整理的确认结果会同步到这里；完整问卷始终是可检查、可修改的兜底入口。")
     st.markdown(f"### {questionnaire.get('title', '患者报告采集')}")
@@ -709,7 +784,11 @@ with form_area:
     for column, (label, preset) in zip(preset_columns, PRESETS.items()):
         with column:
             if st.button(f"载入：{label}", width="stretch", key=f"preset::{label}"):
-                engine.save_draft(session.session_id, preset)
+                with demo_write_guard(
+                    settings.db_path,
+                    expected_generation=progress.generation,
+                ):
+                    engine.save_draft(session.session_id, preset)
                 _set_widget_answers(session.session_id, preset)
                 st.rerun()
 
@@ -755,20 +834,32 @@ with form_area:
 
     try:
         if save_clicked:
-            engine.save_draft(session.session_id, answers)
+            with demo_write_guard(
+                settings.db_path,
+                expected_generation=progress.generation,
+            ):
+                engine.save_draft(session.session_id, answers)
             st.success("草稿已保存。问题版本和当前答案均已锁定。")
         if submit_clicked:
-            result = engine.complete(session.session_id, answers)
+            with demo_write_guard(
+                settings.db_path,
+                expected_generation=progress.generation,
+            ):
+                result = engine.complete(session.session_id, answers)
             st.session_state["care_submission_notice"] = (
                 "提交成功：完整 QuestionnaireResponse 已保存，形成 "
                 f"{len(result.observations)} 条患者确认的 Observation；临床风险未评估。"
             )
             st.rerun()
         if stop_clicked:
-            engine.stop(session.session_id)
+            with demo_write_guard(
+                settings.db_path,
+                expected_generation=progress.generation,
+            ):
+                engine.stop(session.session_id)
             st.session_state["care_submission_notice"] = "本次草稿已停止，未形成临床事实。"
             st.rerun()
-    except (ValueError, FHIRValidationError) as exc:
+    except (CompetitionDemoConflict, ValueError, FHIRValidationError) as exc:
         st.warning(str(exc))
 
 with st.expander("第二层与第三层执行边界"):

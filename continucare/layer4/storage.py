@@ -151,9 +151,10 @@ def _contract_identity(
 class Layer4SQLiteStore:
     """Persist exact JSON while keeping only query projections in columns."""
 
-    def __init__(self, db_path: Path | str):
+    def __init__(self, db_path: Path | str, *, initialize: bool = True):
         self.db_path = Path(db_path)
-        initialize_database(self.db_path)
+        if initialize:
+            initialize_database(self.db_path)
 
     def save_fhir_resource(
         self, resource: dict[str, Any], *, patient_id: str | None

@@ -9,7 +9,12 @@ import streamlit as st
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.config import get_settings
 from continucare.presentation import actor_text, event_text
-from continucare.ui import inject_global_styles, render_mode_badges
+from continucare.services.competition_demo import read_competition_demo
+from continucare.ui import (
+    inject_global_styles,
+    render_competition_progress,
+    render_mode_badges,
+)
 
 
 STAGES = (
@@ -113,7 +118,15 @@ inject_global_styles(st)
 st.title("工作流证据链")
 st.error("仅使用合成数据 · 每一步业务结果都有对应的审计事件")
 
-store = SQLiteStore(get_settings().db_path)
+settings = get_settings()
+progress = read_competition_demo(settings.db_path)
+render_competition_progress(st, progress)
+if not settings.db_path.is_file():
+    st.info("尚未开始完整比赛 Demo。")
+    st.page_link("app.py", label="返回首页开始 Demo →", icon="🏠")
+    st.stop()
+
+store = SQLiteStore(settings.db_path, initialize=False)
 events = store.list_audit_events()
 event_types = {event.event_type for event in events}
 completed = sum(event_type in event_types for event_type, _ in STAGES)
@@ -143,8 +156,23 @@ st.caption(
     "沟通草稿只有在护士明确批准后才进入可发送状态；本切片始终不实际发送。"
 )
 
-st.markdown("## 这条随访故事走到哪一步")
-st.progress(completed / len(STAGES), text=f"已完成 {completed}/{len(STAGES)} 个关键阶段")
+with st.container(border=True):
+    clinical, process = st.columns(2)
+    with clinical:
+        st.markdown("### 临床事实证据")
+        st.write("completed QuestionnaireResponse、final Observation、derivedFrom 与患者逐字原话。")
+        st.caption("这些资源可以成为确定性简报的逐项 evidence reference。")
+    with process:
+        st.markdown("### 流程审计")
+        st.write("AuditEvent 证明患者、护士或医生动作何时发生。")
+        st.caption("AuditEvent 不证明患者临床状态，也不进入 Summary 临床事实正文。")
+
+st.markdown("## 跨场景通用审计事件（技术兼容视图）")
+st.caption(
+    "这里沿用旧 Demo 的跨场景事件清单，只用于兼容性排查；"
+    "它不是上方 M5-D 9/9 持久化事实门禁，也不影响比赛故事完成判定。"
+)
+st.progress(completed / len(STAGES), text=f"已观察到 {completed}/{len(STAGES)} 类通用事件")
 stage_columns = st.columns(3)
 for index, (event_type, label) in enumerate(STAGES):
     with stage_columns[index % 3]:

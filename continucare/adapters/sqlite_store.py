@@ -41,9 +41,10 @@ from continucare.pathways.fhir_artifacts import load_glp1_questionnaire
 
 
 class SQLiteStore:
-    def __init__(self, db_path: Path | str):
+    def __init__(self, db_path: Path | str, *, initialize: bool = True):
         self.db_path = Path(db_path)
-        initialize_database(self.db_path)
+        if initialize:
+            initialize_database(self.db_path)
 
     def get_patient(self, patient_id: str) -> Patient | None:
         with connect(self.db_path) as connection:

@@ -5,21 +5,20 @@ from __future__ import annotations
 import streamlit as st
 
 from continucare.config import get_settings
-from continucare.db import initialize_database, reset_demo
 from continucare.demo_data import SCENARIOS
-from continucare.services.demo_scenarios import (
-    load_layer2_scenario,
-    load_manual_review_scenario,
+from continucare.knowledge import load_builtin_bundle
+from continucare.services.competition_demo import (
+    CompetitionDemoStartError,
+    CompetitionDemoStage,
+    load_technical_demo_atomically,
+    read_competition_demo,
+    start_competition_demo,
 )
-from continucare.ui import inject_global_styles, render_mode_badges, semantic_model_label
-
-
-def _scenario_outcome(result) -> str:
-    count = len(result.observations)
-    return (
-        f"原始 QuestionnaireResponse 已保存，形成 {count} 条 FHIR Observation；"
-        "未启用未经批准的临床分级或报警规则。"
-    )
+from continucare.ui import (
+    clear_demo_session_state,
+    inject_global_styles,
+    render_competition_progress,
+)
 
 
 st.set_page_config(
@@ -30,128 +29,149 @@ st.set_page_config(
 )
 
 settings = get_settings()
-initialize_database(settings.db_path)
 inject_global_styles(st)
+progress = read_competition_demo(settings.db_path)
+try:
+    load_builtin_bundle()
+    knowledge_available = True
+except Exception:
+    knowledge_available = False
 
-st.title("ContinuCare 连续照护 Demo")
-st.subheader("最终交付不是一段 AI 回复，而是一份医生复诊前可直接审阅的证据简报")
-st.error("仅使用合成数据 · 非诊断系统 · 不是医疗急救通道")
+st.title("ContinuCare 连续照护比赛 Demo")
+st.subheader("患者原话不丢失，人工门禁不绕过，复诊证据可逐项回放")
+st.error("固定合成患者 · 非诊断 · 无临床分级 · 无实际发送 · 不是急救通道")
 
-st.markdown("## 最终要得到什么")
-st.caption("下面展示患者回答形成标准资源后，医生会看到的证据化结果。")
+notice = st.session_state.pop("competition::notice", None)
+if notice:
+    st.success(notice)
+
 with st.container(border=True):
-    st.markdown('<div class="cc-kicker">复诊前 30 秒简报 · 合成示例</div>', unsafe_allow_html=True)
-    title_col, status_col = st.columns([3, 1])
-    with title_col:
-        st.markdown("### 陈女士（合成） · GLP1-14D")
-        st.caption("14 天窗口 · 所有结论都可以展开回看患者原文和处理记录")
-    with status_col:
-        st.info("未启用临床分级")
+    st.markdown('<div class="cc-kicker">M5-D · 主比赛故事</div>', unsafe_allow_html=True)
+    heading, status = st.columns([3, 1])
+    with heading:
+        st.markdown("## 一键重置并开始完整合成故事")
+        st.write("固定患者：**陈女士（合成）** · 固定原话：**“我今天拉肚子。”**")
+        st.caption(
+            "这一键只准备 Layer 3 未确认候选和导览；不会替患者确认、替护士处理/批准，"
+            "也不会替医生生成、接受或修改简报。"
+        )
+    with status:
+        if progress.stage == CompetitionDemoStage.STORY_COMPLETE:
+            st.success("故事已完成")
+        elif progress.generation:
+            st.info("故事进行中")
+        else:
+            st.info("尚未开始")
 
-    focus, handled, confirm = st.columns(3)
-    with focus:
-        st.markdown("#### 本期重点")
-        st.write("患者原文报告呕吐 1 次，并量化过去 24 小时液体摄入。")
-        st.caption("来源：QuestionnaireResponse · 可追溯到原文")
-    with handled:
-        st.markdown("#### 标准化记录")
-        st.write("生成的 Observation 使用 LOINC 编码与 UCUM 单位。")
-        st.caption("FHIR R4 资源、来源引用和抽取证据分别保存")
-    with confirm:
-        st.markdown("#### 复诊待确认")
-        st.write("14 天窗口内有 13 天没有随访记录。")
-        st.caption("系统不生成诊断或调整建议")
+    consent = st.checkbox(
+        "我了解：开始或重新开始会替换本地合成 Demo 运行数据；不影响代码、Git 或 Knowledge manifests。",
+        key="competition::reset_consent",
+    )
+    start_label = (
+        "明确重新开始完整比赛 Demo"
+        if progress.generation
+        else "开始完整比赛 Demo"
+    )
+    if st.button(
+        start_label,
+        type="primary",
+        width="stretch",
+        disabled=not consent,
+        key="competition::start",
+    ):
+        try:
+            start_competition_demo(settings.db_path)
+        except CompetitionDemoStartError as exc:
+            st.error(str(exc))
+        else:
+            clear_demo_session_state(st)
+            st.session_state["competition::notice"] = (
+                "完整比赛 Demo 已准备：仅生成未确认候选；"
+                "QuestionnaireResponse、Observation、Task、Communication、Summary 和 Alert 均为 0。"
+            )
+            st.rerun()
 
-st.markdown("## 这份结果怎么形成")
-step_one, step_two, step_three = st.columns(3)
-with step_one:
-    with st.container(border=True):
-        st.markdown('<div class="cc-kicker">01 · 患者</div>', unsafe_allow_html=True)
-        st.markdown("#### 提交院外状态")
-        st.write("Questionnaire 动态生成问题，按钮和数量回答被忠实保存。")
-with step_two:
-    with st.container(border=True):
-        st.markdown('<div class="cc-kicker">02 · 护士</div>', unsafe_allow_html=True)
-        st.markdown("#### 完成医护任务")
-        st.write("仅处理已经临床批准的规则；当前草案不自动分级或报警。")
-with step_three:
-    with st.container(border=True):
-        st.markdown('<div class="cc-kicker">03 · 医生</div>', unsafe_allow_html=True)
-        st.markdown("#### 审阅复诊简报")
-        st.write("重点变化、处理结果、缺失数据和待确认项集中在一个首屏。")
+    st.caption(
+        "主线固定使用 UnconfiguredModelAdapter + 本地确定性语义 Mock；"
+        "不会读取环境中的真实模型配置，也不会访问外部 API。"
+    )
 
-st.markdown("## 按角色查看")
-patient, nurse, doctor = st.columns(3)
+render_competition_progress(st, progress)
+
+if progress.generation:
+    st.markdown("## 当前故事的安全计数")
+    counts = st.columns(5)
+    counts[0].metric("QR", progress.questionnaire_response_count)
+    counts[1].metric("Observation", progress.observation_count)
+    counts[2].metric("manual Task", progress.manual_task_count)
+    counts[3].metric("Alert", progress.alert_count)
+    counts[4].metric("获批 ClinicalRule", progress.approved_clinical_rule_count)
+    st.caption(
+        f"当前阶段：`{progress.stage.value}` · 临床评估：`not_assessed` · "
+        "Communication 始终停在 preparation，ready-to-send 也不等于 sent。"
+    )
+
+st.markdown("## 按角色查看同一故事")
+patient, nurse, doctor, audit = st.columns(4)
 with patient:
-    st.markdown("### 患者端")
-    st.write("看清楚本次提交记录了什么、是否创建任务、下一步由谁处理。")
-    st.page_link("pages/1_patient_followup.py", label="进入患者随访 →", icon="💬")
+    st.markdown("### 患者")
+    st.write("主动确认候选，再查看 completed QR、final Observation 与 derivedFrom。")
+    st.page_link("pages/1_patient_followup.py", label="患者随访 →", icon="💬")
 with nurse:
-    st.markdown("### 护士端")
-    st.write("看清楚今天要处理什么、为什么进入队列、处理完成后留下什么结果。")
-    st.page_link("pages/2_nurse_risk_center.py", label="进入护士风险中心 →", icon="🧭")
+    st.markdown("### 护士")
+    st.write("显式接收、开始、记录受控结果，并人工批准中性草稿。")
+    st.page_link("pages/2_nurse_risk_center.py", label="护士任务 →", icon="🧭")
 with doctor:
-    st.markdown("### 医生端")
-    st.write("30 秒读完重点、处理结果和待确认项，再按需展开证据。")
-    st.page_link("pages/3_doctor_summary.py", label="进入医生复诊简报 →", icon="📋")
+    st.markdown("### 医生")
+    st.write("只在明确动作后生成或刷新确定性证据简报。")
+    st.page_link("pages/3_doctor_summary.py", label="医生简报 →", icon="📋")
+with audit:
+    st.markdown("### 审计")
+    st.write("区分临床事实证据与只证明流程发生的 AuditEvent。")
+    st.page_link("pages/4_audit_log.py", label="证据链 →", icon="🧾")
 
 with st.container(border=True):
-    st.markdown("### Knowledge Evidence · 症状中心")
-    st.write("离线查看四个比赛 fixture 的精确术语、Claim scope、Binding 与 Gap。")
-    st.caption("只读、不读取患者资源、不授权任何 runtime 行为。")
+    st.markdown("### 独立查看腹泻 Knowledge Evidence")
+    st.write("查看精确术语、Claim scope、supports / does_not_support、review 与 CoverageGap。")
+    st.caption(
+        "Knowledge 离线只读，不读取患者数据库，不授权 Observation、Task、Summary 或 ClinicalRule，"
+        "也不参与故事完成判定。"
+    )
+    if knowledge_available:
+        st.success("Knowledge CURRENT registry 可用 · review=not_assessed")
+    else:
+        st.warning("Knowledge CURRENT registry 暂不可用；不改变临床故事事实。")
     st.page_link(
         "pages/5_knowledge_evidence.py",
-        label="打开症状知识证据 →",
+        label="查看腹泻采集依据 →",
         icon="📚",
     )
 
-st.markdown("## 一键载入演示故事")
-st.caption("每次会先清空本地运行数据，再载入一条合成患者故事。")
-scenario_columns = st.columns(3)
-for column, (title, message_text) in zip(scenario_columns, SCENARIOS.items()):
-    with column:
-        st.markdown(f"**{title}**")
-        st.code(message_text, language=None)
-        if st.button(f"重置并载入 {title}", key=f"load_{title}", width="stretch"):
-            result = load_layer2_scenario(settings.db_path, title)
-            st.success(f"{title}已载入：{_scenario_outcome(result)}")
+with st.expander("其他技术演示（会替换当前本地合成故事）"):
+    st.warning("以下旧 fixture 与主比赛故事共用本地合成数据库，必须先勾选上方重置确认。")
+    columns = st.columns(3)
+    for column, (title, message_text) in zip(columns, SCENARIOS.items()):
+        with column:
+            st.markdown(f"**{title}**")
+            st.code(message_text, language=None)
+            if st.button(
+                f"明确重置并载入 {title}",
+                key=f"technical::{title}",
+                width="stretch",
+                disabled=not consent,
+            ):
+                try:
+                    load_technical_demo_atomically(settings.db_path, title)
+                except CompetitionDemoStartError as exc:
+                    st.error(str(exc))
+                else:
+                    clear_demo_session_state(st)
+                    st.session_state["competition::notice"] = (
+                        f"已载入旧技术 fixture：{title}。它不是 M5-D 完整比赛主线。"
+                    )
+                    st.rerun()
 
-with st.container(border=True):
-    st.markdown("### 新切片：患者确认后创建护士人工复核任务")
-    st.write("合成原话：我今天拉肚子。")
-    st.caption(
-        "一键只生成 Layer 3 受控候选，不生成诊断、风险等级、Alert 或任务；"
-        "患者下一步明确确认后，才会原子创建常规护士人工复核 Task。"
-    )
-    if st.button(
-        "一键生成待患者确认的合成候选",
-        type="primary",
-        width="stretch",
-        key="load_manual_review_candidate",
-    ):
-        interaction = load_manual_review_scenario(settings.db_path)
-        st.session_state[
-            f"semantic::latest_run::{interaction.record.session_id}"
-        ] = interaction.result.run_id
-        st.success(
-            f"已生成 {len(interaction.result.candidates)} 个未确认候选；"
-            "尚无 QuestionnaireResponse、Observation 或护士任务。"
-        )
-        st.page_link(
-            "pages/1_patient_followup.py",
-            label="前往患者端确认 →",
-            icon="💬",
-        )
-
-st.divider()
-if st.button("重置 Demo", type="secondary"):
-    reset_demo(settings.db_path)
-    st.success("本地合成 Demo 数据已重置。")
-
-st.page_link("pages/4_audit_log.py", label="查看完整审计日志", icon="🧾")
-
-with st.expander("演示模式与当前集成状态"):
-    render_mode_badges(st)
-    st.write(f"语义模型：{semantic_model_label()} · 飞书集成：关闭")
-    st.write("即使模型不可用，本地 Mock 仍可完成合成数据演示。")
-    st.caption("飞书/Aily 当前未联调；第一版所有通知均为清楚标注的 Mock。")
+with st.expander("能力边界与比赛诚实说明"):
+    st.write("当前真实实现：本地 SQLite 持久化、FHIR R4 基础资源、人工门禁、版本化 Provenance 与审计。")
+    st.write("当前 Mock / 合成：患者与医护身份、Layer 3 本地语义整理、所有演示数据。")
+    st.write("尚未实现：医院集成、飞书/Aily、真实模型、真实患者、临床审批、自动风险分级和实际消息发送。")

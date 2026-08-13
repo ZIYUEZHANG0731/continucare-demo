@@ -25,7 +25,15 @@ from continucare.layer4 import (
 from continucare.layer4.contracts import DoctorReviewDecision, SummaryDraftStatus
 from continucare.layer4.manual_reviews import SEND_ENABLED
 from continucare.pathways import load_builtin_pathways
-from continucare.ui import inject_global_styles, render_mode_badges
+from continucare.services.competition_demo import (
+    demo_write_guard,
+    read_competition_demo,
+)
+from continucare.ui import (
+    inject_global_styles,
+    render_competition_progress,
+    render_mode_badges,
+)
 
 
 DOCTOR_REFERENCE = "Practitioner/synthetic-doctor-review"
@@ -71,6 +79,14 @@ def _section_label(section: str) -> str:
     }.get(section, section)
 
 
+def _guarded_write(action, /, *args, **kwargs):
+    with demo_write_guard(
+        settings.db_path,
+        expected_generation=progress.generation,
+    ):
+        return action(*args, **kwargs)
+
+
 st.set_page_config(
     page_title="医生复诊前简报 · ContinuCare",
     page_icon="📋",
@@ -82,8 +98,15 @@ st.title("医生复诊前简报")
 st.error("仅使用合成数据 · 不生成诊断、风险、阈值、治疗或用药建议 · 不写入 EMR")
 
 settings = get_settings()
-store = SQLiteStore(settings.db_path)
-repository = Layer4SQLiteStore(settings.db_path)
+progress = read_competition_demo(settings.db_path)
+render_competition_progress(st, progress)
+if not settings.db_path.is_file():
+    st.info("尚未开始完整比赛 Demo。")
+    st.page_link("app.py", label="返回首页开始 Demo →", icon="🏠")
+    st.stop()
+
+store = SQLiteStore(settings.db_path, initialize=False)
+repository = Layer4SQLiteStore(settings.db_path, initialize=False)
 patient = store.get_patient(DEMO_PATIENT_ID)
 pathway = load_builtin_pathways().get(patient.pathway_code if patient else "GLP1-14D")
 briefs = ManualReviewBriefService(
@@ -141,7 +164,8 @@ if summary is None:
             )
             if st.button("明确生成 M5-C 证据简报", type="primary", width="stretch"):
                 try:
-                    briefs.generate(
+                    _guarded_write(
+                        briefs.generate,
                         patient_id=DEMO_PATIENT_ID,
                         task_id=selected_task_id,
                         generated_at=utc_now_iso(),
@@ -176,7 +200,8 @@ st.caption(
 )
 if task_id and st.button("明确生成 / 刷新为当前来源版本", width="stretch"):
     try:
-        briefs.generate(
+        _guarded_write(
+            briefs.generate,
             patient_id=DEMO_PATIENT_ID,
             task_id=task_id,
             generated_at=utc_now_iso(),
@@ -185,6 +210,27 @@ if task_id and st.button("明确生成 / 刷新为当前来源版本", width="st
         st.error(str(exc))
     else:
         st.rerun()
+
+if progress.communication_readiness == "pending-approval":
+    st.page_link(
+        "pages/2_nurse_risk_center.py",
+        label="下一步：返回护士端人工批准草稿 →",
+        icon="🧭",
+    )
+elif progress.communication_readiness == "ready-to-send" and not stale:
+    next_audit, next_knowledge = st.columns(2)
+    with next_audit:
+        st.page_link(
+            "pages/4_audit_log.py",
+            label="查看完整审计链 →",
+            icon="🧾",
+        )
+    with next_knowledge:
+        st.page_link(
+            "pages/5_knowledge_evidence.py",
+            label="独立查看腹泻采集依据 →",
+            icon="📚",
+        )
 
 st.markdown("## 确定性证据简报")
 st.caption(
@@ -301,7 +347,8 @@ if summary.status == SummaryDraftStatus.SAFETY_REVIEWED:
                     )
                     for item in summary.items
                 ]
-            DoctorReviewService(repository).review(
+            _guarded_write(
+                DoctorReviewService(repository).review,
                 summary_id=summary.summary_id,
                 summary_version=summary.version,
                 reviewer_reference=DOCTOR_REFERENCE,

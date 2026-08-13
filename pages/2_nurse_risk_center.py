@@ -28,7 +28,15 @@ from continucare.layer4.manual_reviews import (
     communication_readiness,
 )
 from continucare.layer4.storage import Layer4SQLiteStore
-from continucare.ui import inject_global_styles, render_mode_badges
+from continucare.services.competition_demo import (
+    demo_write_guard,
+    read_competition_demo,
+)
+from continucare.ui import (
+    inject_global_styles,
+    render_competition_progress,
+    render_mode_badges,
+)
 
 
 def _sla_text(due_at: str | None) -> str:
@@ -106,6 +114,14 @@ OUTCOME_LABELS = {
 }
 
 
+def _guarded_write(action, /, *args, **kwargs):
+    with demo_write_guard(
+        settings.db_path,
+        expected_generation=progress.generation,
+    ):
+        return action(*args, **kwargs)
+
+
 st.set_page_config(
     page_title="护士任务中心 · ContinuCare",
     page_icon="🧭",
@@ -116,9 +132,17 @@ inject_global_styles(st)
 st.title("护士任务中心")
 st.error("仅使用合成数据 · 这里展示的是医护工作任务，不是诊断结论")
 
-store = SQLiteStore(get_settings().db_path)
+settings = get_settings()
+progress = read_competition_demo(settings.db_path)
+render_competition_progress(st, progress)
+if not settings.db_path.is_file():
+    st.info("尚未开始完整比赛 Demo。")
+    st.page_link("app.py", label="返回首页开始 Demo →", icon="🏠")
+    st.stop()
+
+store = SQLiteStore(settings.db_path, initialize=False)
 alert_service = AlertService(store, MockNotifier())
-manual_repository = Layer4SQLiteStore(get_settings().db_path)
+manual_repository = Layer4SQLiteStore(settings.db_path, initialize=False)
 manual_service = ManualReviewWorkflowService(store, layer4_store=manual_repository)
 manual_tasks = ManualReviewQueue(manual_repository).list_for_patient(DEMO_PATIENT_ID)
 all_alerts = store.list_alerts()
@@ -189,6 +213,11 @@ for task in manual_tasks:
             note = st.text_area(
                 "护士处理记录（当前动作必填）",
                 key=f"manual_note_{task['id']}_{status}",
+                value={
+                    "requested": "已收到合成人工复核任务。",
+                    "received": "接受并开始核对合成证据。",
+                    "in-progress": "已逐字核对患者原话、确认结果与最终证据链。",
+                }[status],
                 placeholder="仅记录合成人工处理事实；不要填写诊断、风险等级、治疗或改药建议。",
             )
         try:
@@ -197,7 +226,8 @@ for task in manual_tasks:
                 if acknowledge.button(
                     "确认收到任务", key=f"manual_ack_{task['id']}", width="stretch"
                 ):
-                    manual_service.acknowledge(
+                    _guarded_write(
+                        manual_service.acknowledge,
                         patient_id=DEMO_PATIENT_ID,
                         task_id=task["id"],
                         note=note,
@@ -207,7 +237,8 @@ for task in manual_tasks:
                 if cancel.button(
                     "取消任务", key=f"manual_cancel_requested_{task['id']}", width="stretch"
                 ):
-                    manual_service.cancel(
+                    _guarded_write(
+                        manual_service.cancel,
                         patient_id=DEMO_PATIENT_ID,
                         task_id=task["id"],
                         note=note,
@@ -219,7 +250,8 @@ for task in manual_tasks:
                 if start.button(
                     "接受并开始复核", key=f"manual_start_{task['id']}", width="stretch"
                 ):
-                    manual_service.start(
+                    _guarded_write(
+                        manual_service.start,
                         patient_id=DEMO_PATIENT_ID,
                         task_id=task["id"],
                         note=note,
@@ -229,7 +261,8 @@ for task in manual_tasks:
                 if reject.button(
                     "拒绝任务", key=f"manual_reject_{task['id']}", width="stretch"
                 ):
-                    manual_service.reject(
+                    _guarded_write(
+                        manual_service.reject,
                         patient_id=DEMO_PATIENT_ID,
                         task_id=task["id"],
                         note=note,
@@ -239,7 +272,8 @@ for task in manual_tasks:
                 if cancel.button(
                     "取消任务", key=f"manual_cancel_received_{task['id']}", width="stretch"
                 ):
-                    manual_service.cancel(
+                    _guarded_write(
+                        manual_service.cancel,
                         patient_id=DEMO_PATIENT_ID,
                         task_id=task["id"],
                         note=note,
@@ -259,7 +293,8 @@ for task in manual_tasks:
                     key=f"manual_complete_{task['id']}",
                     width="stretch",
                 ):
-                    manual_service.record_outcome(
+                    _guarded_write(
+                        manual_service.record_outcome,
                         patient_id=DEMO_PATIENT_ID,
                         task_id=task["id"],
                         outcome=outcome,
@@ -270,7 +305,8 @@ for task in manual_tasks:
                 if cancel.button(
                     "取消任务", key=f"manual_cancel_progress_{task['id']}", width="stretch"
                 ):
-                    manual_service.cancel(
+                    _guarded_write(
+                        manual_service.cancel,
                         patient_id=DEMO_PATIENT_ID,
                         task_id=task["id"],
                         note=note,
@@ -297,6 +333,7 @@ for task in manual_tasks:
                         approval_note = st.text_area(
                             "人工批准记录（必填）",
                             key=f"manual_approval_note_{communication['id']}",
+                            value="已逐字核对合成草稿，明确批准进入 ready-to-send；仍未发送。",
                             placeholder="例如：已逐字核对合成草稿，明确批准进入可发送状态。",
                         )
                         if st.button(
@@ -305,7 +342,8 @@ for task in manual_tasks:
                             type="primary",
                             width="stretch",
                         ):
-                            manual_service.approve_draft(
+                            _guarded_write(
+                                manual_service.approve_draft,
                                 patient_id=DEMO_PATIENT_ID,
                                 task_id=task["id"],
                                 communication_id=communication["id"],
@@ -313,8 +351,18 @@ for task in manual_tasks:
                                 occurred_at=utc_now_iso(),
                             )
                             st.rerun()
+                        st.page_link(
+                            "pages/3_doctor_summary.py",
+                            label="先前往医生端生成 pending 简报 →",
+                            icon="📋",
+                        )
                     elif readiness == READY_TO_SEND:
-                        st.success("已人工批准：可发送（本切片未实际发送）")
+                        st.success("已人工批准：ready-to-send（尚未发送）")
+                        st.page_link(
+                            "pages/3_doctor_summary.py",
+                            label="下一步：前往医生端刷新 ready 简报 →",
+                            icon="📋",
+                        )
                     else:
                         st.error("草稿批准状态无效。")
             elif status in {"rejected", "cancelled"}:
@@ -371,17 +419,17 @@ with active_tab:
                 if acknowledge.button(
                     "确认收到任务", key=f"ack_{alert.alert_id}", width="stretch"
                 ):
-                    alert_service.acknowledge(alert.alert_id, note)
+                    _guarded_write(alert_service.acknowledge, alert.alert_id, note)
                     st.rerun()
                 if escalate.button(
                     "升级医生复核", key=f"escalate_{alert.alert_id}", width="stretch"
                 ):
-                    alert_service.escalate(alert.alert_id, note)
+                    _guarded_write(alert_service.escalate, alert.alert_id, note)
                     st.rerun()
                 if resolve.button(
                     "记录结果并完成", key=f"resolve_{alert.alert_id}", width="stretch"
                 ):
-                    alert_service.resolve(alert.alert_id, note)
+                    _guarded_write(alert_service.resolve, alert.alert_id, note)
                     st.rerun()
             except ValueError as exc:
                 st.error(str(exc))

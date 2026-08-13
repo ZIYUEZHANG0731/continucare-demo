@@ -5,6 +5,19 @@ from __future__ import annotations
 import html
 
 
+COMPETITION_STEP_LABELS = (
+    ("candidate_ready", "候选已准备"),
+    ("patient_confirmed", "患者已确认"),
+    ("task_requested", "任务已创建"),
+    ("nurse_received", "护士已接收"),
+    ("nurse_in_progress", "护士处理中"),
+    ("communication_pending", "草稿待批准"),
+    ("doctor_brief_pending", "pending 简报"),
+    ("communication_ready", "草稿已批准"),
+    ("doctor_brief_ready", "ready 简报"),
+)
+
+
 def inject_global_styles(st) -> None:
     st.markdown(
         """
@@ -76,6 +89,53 @@ def render_mode_badges(st) -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_competition_progress(st, progress, *, show_next: bool = True) -> None:
+    """Render persisted-fact milestones without caching a second UI state."""
+
+    st.markdown("## 完整比赛 Demo 进度")
+    completed = sum(
+        bool(progress.milestones.get(step)) for step, _ in COMPETITION_STEP_LABELS
+    )
+    st.progress(
+        completed / len(COMPETITION_STEP_LABELS),
+        text=f"持久化事实已完成 {completed}/{len(COMPETITION_STEP_LABELS)} 项",
+    )
+    for offset in range(0, len(COMPETITION_STEP_LABELS), 3):
+        row = COMPETITION_STEP_LABELS[offset : offset + 3]
+        columns = st.columns(len(row))
+        for column, (step, label) in zip(columns, row):
+            with column:
+                if progress.milestones.get(step):
+                    st.success(f"✓ {label}")
+                else:
+                    st.info(f"○ {label}")
+    if progress.integrity_issue:
+        st.error(progress.integrity_issue)
+    if progress.knowledge_available:
+        st.caption("Knowledge CURRENT registry：可用（独立只读，不参与临床进度判定）")
+    elif progress.knowledge_error:
+        st.warning(progress.knowledge_error)
+    if show_next and progress.generation:
+        with st.container(border=True):
+            st.markdown(f"**推荐下一步：{progress.next_label}**")
+            st.caption(progress.next_help)
+            st.page_link(
+                progress.next_page,
+                label=f"{progress.next_label} →",
+                icon="🧭",
+            )
+
+
+def clear_demo_session_state(st) -> None:
+    """Drop browser-only widget/navigation hints after an explicit reset."""
+
+    prefixes = ("care::", "semantic::", "manual_", "competition::")
+    exact = {"care_submission_notice"}
+    for key in list(st.session_state):
+        if key in exact or key.startswith(prefixes):
+            del st.session_state[key]
 
 
 def semantic_model_label() -> str:
