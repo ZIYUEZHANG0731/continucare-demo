@@ -367,7 +367,15 @@ class ControlledSummaryService:
             timeline=timeline,
             snapshot=snapshot,
         )
-        summary_id = _stable_id("summary", patient_id, period_start, period_end)
+        summary_id = _stable_id(
+            "summary-v2",
+            patient_id,
+            self.memory.pathway_code,
+            self.memory.pathway_version,
+            "timeline_evidence",
+            period_start,
+            period_end,
+        )
 
         reusable = self._reusable_llm_summary(summary_id, ledger, snapshot)
         if reusable is not None:

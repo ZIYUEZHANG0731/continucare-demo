@@ -117,7 +117,13 @@ class EvidenceSummaryService:
         items = [self._item_from_timeline(item) for item in timeline]
         source_ids = [item.timeline_event_id for item in timeline]
         summary_id = _stable_id(
-            "summary", patient_id, period_start, period_end
+            "summary-v2",
+            patient_id,
+            self.memory.pathway_code,
+            self.memory.pathway_version,
+            "timeline_evidence",
+            period_start,
+            period_end,
         )
         current = self.repository.get_contract("summary_draft", summary_id)
         if current is not None:
@@ -254,6 +260,11 @@ class DoctorReviewService:
         if source_record is None:
             raise ValueError("summary version does not exist")
         source = cast(Layer4SummaryDraft, source_record)
+        if (
+            source.summary_kind == "timeline_evidence"
+            and not source.summary_id.startswith("summary-v2-")
+        ):
+            raise ValueError("legacy timeline Summary is read-only and cannot be reviewed")
         current = self.repository.get_contract("summary_draft", summary_id)
         if current is None or cast(Layer4SummaryDraft, current).version != summary_version:
             raise ValueError("doctor review cannot act on a stale summary version")

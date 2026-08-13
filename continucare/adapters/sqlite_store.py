@@ -977,9 +977,13 @@ class SQLiteStore:
         )
 
     def list_completed_questionnaire_responses(
-        self, patient_id: str
+        self,
+        patient_id: str,
+        *,
+        pathway_code: str,
+        pathway_version: str,
     ) -> list[dict]:
-        """Return only responses finalized by a completed CareSession.
+        """Return completed responses proven to belong to one exact Pathway.
 
         This is the Layer-4 read boundary. Compatibility free-text responses
         and in-progress session state are intentionally excluded.
@@ -992,10 +996,13 @@ class SQLiteStore:
                 FROM fhir_questionnaire_responses q
                 JOIN care_sessions c
                   ON c.questionnaire_response_id = q.resource_id
-                WHERE q.patient_id = ? AND c.status = 'completed'
+                WHERE q.patient_id = ?
+                  AND c.status = 'completed'
+                  AND c.pathway_code = ?
+                  AND c.pathway_version = ?
                 ORDER BY q.created_at DESC
                 """,
-                (patient_id,),
+                (patient_id, pathway_code, pathway_version),
             ).fetchall()
         return [
             validate_questionnaire_response_against_questionnaire(
@@ -1083,8 +1090,20 @@ class SQLiteStore:
             ).fetchall()
         return [row_to_observation(row) for row in rows]
 
-    def list_final_observations(self, patient_id: str) -> list[Observation]:
-        """Return only Observations derived from completed CareSession responses."""
+    def list_final_observations(
+        self,
+        patient_id: str,
+        *,
+        pathway_code: str,
+        pathway_version: str,
+    ) -> list[Observation]:
+        """Return exact-Pathway candidates plus unowned rows for fail-closed review.
+
+        Observations uniquely owned by another completed Pathway are excluded.
+        Rows with no completed-session owner are deliberately returned so the
+        Layer-4 admission predicate rejects the whole snapshot instead of
+        silently shrinking its evidence set.
+        """
 
         with connect(self.db_path) as connection:
             rows = connection.execute(
@@ -1094,14 +1113,140 @@ class SQLiteStore:
                        e.source_kind, e.terminology_match_json
                 FROM fhir_observations o
                 JOIN observation_evidence e USING (observation_id)
-                JOIN care_sessions c
+                LEFT JOIN care_sessions c
                   ON c.questionnaire_response_id = o.questionnaire_response_id
-                WHERE o.patient_id = ? AND c.status = 'completed'
+                 AND c.status = 'completed'
+                WHERE o.patient_id = ?
+                  AND (
+                    c.session_id IS NULL
+                    OR (
+                      c.pathway_code = ?
+                      AND c.pathway_version = ?
+                    )
+                  )
                 ORDER BY o.effective_time DESC
+                """,
+                (patient_id, pathway_code, pathway_version),
+            ).fetchall()
+        return [row_to_observation(row) for row in rows]
+
+    def list_pathway_audit_events(
+        self,
+        patient_id: str,
+        *,
+        pathway_code: str,
+        pathway_version: str,
+    ) -> list[AuditEvent]:
+        """Return only audit rows whose durable entities prove exact Pathway scope."""
+
+        with connect(self.db_path) as connection:
+            session_rows = connection.execute(
+                """
+                SELECT session_id, questionnaire_response_id
+                FROM care_sessions
+                WHERE patient_id = ? AND pathway_code = ? AND pathway_version = ?
+                """,
+                (patient_id, pathway_code, pathway_version),
+            ).fetchall()
+            session_ids = {row["session_id"] for row in session_rows}
+            response_ids = {
+                row["questionnaire_response_id"]
+                for row in session_rows
+                if row["questionnaire_response_id"]
+            }
+            run_ids = {
+                row["run_id"]
+                for row in connection.execute(
+                    "SELECT run_id FROM agent_runs WHERE session_id IN "
+                    "(SELECT session_id FROM care_sessions WHERE patient_id = ? "
+                    "AND pathway_code = ? AND pathway_version = ?)",
+                    (patient_id, pathway_code, pathway_version),
+                ).fetchall()
+            }
+            observation_ids = {
+                row["observation_id"]
+                for row in connection.execute(
+                    """
+                    SELECT o.observation_id
+                    FROM fhir_observations o
+                    JOIN care_sessions c
+                      ON c.questionnaire_response_id = o.questionnaire_response_id
+                    WHERE o.patient_id = ? AND c.status = 'completed'
+                      AND c.pathway_code = ? AND c.pathway_version = ?
+                    """,
+                    (patient_id, pathway_code, pathway_version),
+                ).fetchall()
+            }
+            fhir_rows = connection.execute(
+                """
+                SELECT resource_type, resource_id, version_id, resource_json
+                FROM layer4_fhir_resources
+                WHERE patient_id = ? AND resource_type IN ('Task', 'Communication')
                 """,
                 (patient_id,),
             ).fetchall()
-        return [row_to_observation(row) for row in rows]
+            contract_rows = connection.execute(
+                """
+                SELECT record_type, record_id, record_json
+                FROM layer4_contract_records
+                WHERE patient_id = ? AND pathway_code = ?
+                """,
+                (patient_id, pathway_code),
+            ).fetchall()
+            audit_rows = connection.execute(
+                "SELECT * FROM audit_events WHERE patient_id = ? ORDER BY created_at DESC",
+                (patient_id,),
+            ).fetchall()
+
+        task_ids: set[str] = set()
+        task_references: set[str] = set()
+        communication_candidates: list[tuple[str, dict]] = []
+        for row in fhir_rows:
+            resource = json.loads(row["resource_json"])
+            if row["resource_type"] == "Task":
+                pathway_references = [
+                    item.get("reference")
+                    for item in resource.get("basedOn", [])
+                    if isinstance(item.get("reference"), str)
+                    and item["reference"].startswith("urn:continucare:pathway:")
+                ]
+                if pathway_references == [
+                    f"urn:continucare:pathway:{pathway_code}|{pathway_version}"
+                ]:
+                    task_ids.add(row["resource_id"])
+                    task_references.add(
+                        f"Task/{row['resource_id']}/_history/{row['version_id']}"
+                    )
+            else:
+                communication_candidates.append((row["resource_id"], resource))
+        communication_ids = {
+            resource_id
+            for resource_id, resource in communication_candidates
+            if any(
+                item.get("reference") in task_references
+                for item in resource.get("basedOn", [])
+            )
+        }
+        contract_ids = {
+            row["record_id"]
+            for row in contract_rows
+            if json.loads(row["record_json"]).get("pathway_version")
+            == pathway_version
+        }
+        entity_ids = {
+            "CareSession": session_ids,
+            "AgentRun": run_ids,
+            "QuestionnaireResponse": response_ids,
+            "Observation": observation_ids,
+            "Task": task_ids,
+            "Communication": communication_ids,
+            "Layer4SummaryDraft": contract_ids,
+        }
+        return [
+            row_to_audit_event(row)
+            for row in audit_rows
+            if row["entity_id"] in entity_ids.get(row["entity_type"], set())
+        ]
 
     def list_observations_for_message(self, message_id: str) -> list[Observation]:
         with connect(self.db_path) as connection:

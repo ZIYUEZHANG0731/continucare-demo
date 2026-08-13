@@ -24,6 +24,7 @@ from continucare.layer4.contracts import (
     RuleLifecycle,
 )
 from continucare.layer4.fhir import build_provenance, build_workflow_task
+from continucare.layer4.inputs import Layer4InputReader
 from continucare.layer4.repository import Layer4Repository
 
 
@@ -156,12 +157,14 @@ class ApprovedRuleEngine:
         self,
         repository: Layer4Repository,
         *,
+        input_reader: Layer4InputReader,
         requester_reference: str,
         owner_references: dict[str, str],
     ):
         if not requester_reference.strip():
             raise ValueError("rule engine requester_reference cannot be blank")
         self.repository = repository
+        self.input_reader = input_reader
         self.requester_reference = requester_reference
         self.owner_references = dict(owner_references)
 
@@ -178,7 +181,22 @@ class ApprovedRuleEngine:
         product_code: str | None = None,
     ) -> RuleEvaluationBatch:
         at = _instant(evaluated_at)
-        normalized = self._validate_observations(patient_id, observations)
+        snapshot = self.input_reader.read(
+            patient_id,
+            pathway_code=pathway_code,
+            pathway_version=pathway_version,
+            assembled_at=evaluated_at,
+        )
+        if (
+            snapshot.pathway_code != pathway_code
+            or snapshot.pathway_version != pathway_version
+        ):
+            raise ValueError("rule input snapshot Pathway does not match evaluation")
+        normalized = self._validate_observations(
+            patient_id,
+            observations,
+            admitted_observations=snapshot.observations,
+        )
         records = self.repository.list_contracts(
             "clinical_rule",
             pathway_code=pathway_code,
@@ -261,9 +279,20 @@ class ApprovedRuleEngine:
         )
 
     def _validate_observations(
-        self, patient_id: str, observations: Iterable[dict[str, Any]]
+        self,
+        patient_id: str,
+        observations: Iterable[dict[str, Any]],
+        *,
+        admitted_observations: Iterable[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        admitted = {
+            item["id"]: validate_r4_resource(
+                item, expected_resource_type="Observation"
+            )
+            for item in admitted_observations
+        }
         normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
         for resource in observations:
             item = validate_r4_resource(
                 resource, expected_resource_type="Observation"
@@ -272,6 +301,14 @@ class ApprovedRuleEngine:
                 raise ValueError("approved rule engine only accepts final Observation")
             if item.get("subject", {}).get("reference") != f"Patient/{patient_id}":
                 raise ValueError("rule evidence Observation patient does not match")
+            observation_id = item.get("id")
+            if not observation_id or admitted.get(observation_id) != item:
+                raise ValueError(
+                    "approved rule engine only accepts Pathway-admitted Observation"
+                )
+            if observation_id in seen:
+                raise ValueError("rule evidence contains a duplicate Observation")
+            seen.add(observation_id)
             _observation_period(item)
             normalized.append(item)
         return normalized

@@ -1849,6 +1849,39 @@ class CareAgentService:
                 f"{session.session_id}|{digest}|{context_identity}",
             ).hex
         )
+        admitted_responses = self.store.list_completed_questionnaire_responses(
+            session.patient_id,
+            pathway_code=session.pathway_code,
+            pathway_version=session.pathway_version,
+        )
+        admitted_response_refs = {
+            f"QuestionnaireResponse/{item['id']}" for item in admitted_responses
+        }
+        long_term_observations = self.store.list_final_observations(
+            session.patient_id,
+            pathway_code=session.pathway_code,
+            pathway_version=session.pathway_version,
+        )
+        for item in long_term_observations:
+            if item.as_fhir().get("status") != "final":
+                raise ValueError("Layer 3 history only accepts final Observation")
+            derived_responses = [
+                reference
+                for reference in (
+                    entry.get("reference")
+                    for entry in item.as_fhir().get("derivedFrom", [])
+                )
+                if isinstance(reference, str)
+                and reference.startswith("QuestionnaireResponse/")
+            ]
+            if (
+                len(derived_responses) != 1
+                or derived_responses[0] not in admitted_response_refs
+            ):
+                raise ValueError(
+                    "Layer 3 history contains an Observation outside the session Pathway"
+                )
+        long_term_observations = long_term_observations[:50]
         return SemanticTask(
             task_id=task_id,
             patient_id=session.patient_id,
@@ -1872,7 +1905,7 @@ class CareAgentService:
                     effective_time=item.effective_time,
                     source_kind=item.evidence.source_kind,
                 )
-                for item in self.store.list_observations(session.patient_id)[:50]
+                for item in long_term_observations
             ],
             temporal_context=temporal_context,
             allowed_items=[

@@ -222,19 +222,46 @@ class ClinicalMemoryService:
         *,
         missing_expectations: Iterable[MissingDataExpectation] = (),
     ) -> ClinicalMemoryBuildResult:
-        snapshot = self.input_reader.read(patient_id)
+        snapshot = self.input_reader.read(
+            patient_id,
+            pathway_code=self.pathway_code,
+            pathway_version=self.pathway_version,
+        )
+        if (
+            snapshot.pathway_code != self.pathway_code
+            or snapshot.pathway_version != self.pathway_version
+        ):
+            raise ValueError("Layer-4 input snapshot Pathway does not match memory service")
         memory_ids: list[str] = []
         timeline_ids: list[str] = []
         provenance_ids: list[str] = []
 
         resources = [*snapshot.questionnaire_responses, *snapshot.observations]
-        resources.extend(
-            item
-            for item in self.repository.list_fhir_resources(
-                patient_id=patient_id, current_only=True
-            )
-            if item["resourceType"] in {"Communication", "Task"}
+        pathway_reference = (
+            f"urn:continucare:pathway:{self.pathway_code}|{self.pathway_version}"
         )
+        workflow_history = self.repository.list_fhir_resources(
+            patient_id=patient_id, current_only=False
+        )
+        pathway_task_references = {
+            f"Task/{item['id']}/_history/{item['meta']['versionId']}"
+            for item in workflow_history
+            if item["resourceType"] == "Task"
+            and self._has_exact_pathway(item, pathway_reference)
+        }
+        for item in self.repository.list_fhir_resources(
+            patient_id=patient_id, current_only=True
+        ):
+            if item["resourceType"] == "Task" and self._has_exact_pathway(
+                item, pathway_reference
+            ):
+                resources.append(item)
+            elif item["resourceType"] == "Communication" and (
+                self._communication_has_exact_task(
+                    item, pathway_task_references
+                )
+            ):
+                resources.append(item)
         resources.sort(
             key=lambda item: (
                 _instant(_resource_times(item)[0]),
@@ -284,6 +311,31 @@ class ClinicalMemoryService:
             missing_event_ids=sorted(item[0].event_id for item in missing),
         )
 
+    @staticmethod
+    def _has_exact_pathway(resource: dict[str, Any], expected: str) -> bool:
+        pathway_references = [
+            reference
+            for reference in (
+                item.get("reference") for item in resource.get("basedOn", [])
+            )
+            if isinstance(reference, str)
+            and reference.startswith("urn:continucare:pathway:")
+        ]
+        return pathway_references == [expected]
+
+    @staticmethod
+    def _communication_has_exact_task(
+        resource: dict[str, Any], admitted_task_references: set[str]
+    ) -> bool:
+        task_references = [
+            reference
+            for reference in (
+                item.get("reference") for item in resource.get("basedOn", [])
+            )
+            if isinstance(reference, str) and reference.startswith("Task/")
+        ]
+        return len(task_references) == 1 and task_references[0] in admitted_task_references
+
     def list_timeline(
         self,
         patient_id: str,
@@ -294,7 +346,12 @@ class ClinicalMemoryService:
         records = self.repository.list_contracts(
             "timeline_event", patient_id=patient_id, current_only=True
         )
-        timeline = [cast(TimelineEvent, item) for item in records]
+        timeline = [
+            cast(TimelineEvent, item)
+            for item in records
+            if cast(TimelineEvent, item).pathway_code == self.pathway_code
+            and cast(TimelineEvent, item).pathway_version == self.pathway_version
+        ]
         revision_states = self._revision_states(patient_id)
         timeline = [self._timeline_with_revision_state(item, revision_states) for item in timeline]
         if not include_audit:
@@ -326,7 +383,12 @@ class ClinicalMemoryService:
             "memory_event", patient_id=patient_id, current_only=True
         )
         revision_states = self._revision_states(patient_id)
-        memory = [cast(MemoryEvent, item) for item in records]
+        memory = [
+            cast(MemoryEvent, item)
+            for item in records
+            if cast(MemoryEvent, item).pathway_code == self.pathway_code
+            and cast(MemoryEvent, item).pathway_version == self.pathway_version
+        ]
         memory = [
             item.model_copy(update={"current": False})
             if _event_revision_state(
@@ -417,12 +479,29 @@ class ClinicalMemoryService:
         return link
 
     def _revision_states(self, patient_id: str) -> dict[str, TimelineEventState]:
+        scoped_memory = self.repository.list_contracts(
+            "memory_event", patient_id=patient_id, current_only=True
+        )
+        scoped_sources = {
+            _versioned_reference(cast(MemoryEvent, item).source)
+            for item in scoped_memory
+            if cast(MemoryEvent, item).pathway_code == self.pathway_code
+            and cast(MemoryEvent, item).pathway_version == self.pathway_version
+        }
+        scoped_sources.update(
+            f"urn:continucare:memory-event:{cast(MemoryEvent, item).event_id}"
+            for item in scoped_memory
+            if cast(MemoryEvent, item).pathway_code == self.pathway_code
+            and cast(MemoryEvent, item).pathway_version == self.pathway_version
+        )
         records = self.repository.list_contracts(
             "revision_link", patient_id=patient_id, current_only=True
         )
         states: dict[str, TimelineEventState] = {}
         for record in records:
             link = cast(RevisionLink, record)
+            if _versioned_reference(link.predecessor) not in scoped_sources:
+                continue
             state = (
                 TimelineEventState.ENTERED_IN_ERROR
                 if link.relationship
@@ -634,7 +713,9 @@ class ClinicalMemoryService:
         for record in records:
             event = cast(MemoryEvent, record)
             if (
-                event.source.reference != successor.reference
+                event.pathway_code != self.pathway_code
+                or event.pathway_version != self.pathway_version
+                or event.source.reference != successor.reference
                 or event.source.version_id == successor.version_id
             ):
                 continue

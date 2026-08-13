@@ -30,8 +30,12 @@ class MutableInputReader:
     def __init__(self, snapshot: Layer4InputSnapshot):
         self.snapshot = snapshot
 
-    def read(self, patient_id: str) -> Layer4InputSnapshot:
+    def read(
+        self, patient_id: str, *, pathway_code: str, pathway_version: str
+    ) -> Layer4InputSnapshot:
         assert patient_id == self.snapshot.patient_id
+        assert pathway_code == self.snapshot.pathway_code
+        assert pathway_version == self.snapshot.pathway_version
         return self.snapshot
 
 
@@ -123,6 +127,8 @@ def _nausea_definition() -> StateMetricDefinition:
 def _snapshot(observations: list[dict]) -> Layer4InputSnapshot:
     return Layer4InputSnapshot(
         patient_id=PATIENT_ID,
+        pathway_code=PATHWAY_CODE,
+        pathway_version=PATHWAY_VERSION,
         observations=observations,
         assembled_at=AS_OF,
     )

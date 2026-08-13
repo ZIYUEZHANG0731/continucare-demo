@@ -13,11 +13,13 @@ from continucare.fhir.observations import (
 from continucare.fhir.questionnaires import build_free_text_questionnaire_response
 from continucare.fhir.r4 import validate_official_json_schema
 from continucare.fhir.terminology import BODY_WEIGHT, VOMITING_COUNT_24H
+from continucare.db import connect
 from continucare.layer4 import (
     ClinicalMemoryService,
     DoctorReviewService,
     EvidenceSummaryService,
     Layer4InputSnapshot,
+    Layer4SummaryDraft,
     Layer4SQLiteStore,
     SummaryEvidenceItem,
     TaskWorkflowService,
@@ -47,8 +49,12 @@ class MutableInputReader:
     def __init__(self, snapshot: Layer4InputSnapshot):
         self.snapshot = snapshot
 
-    def read(self, patient_id: str) -> Layer4InputSnapshot:
+    def read(
+        self, patient_id: str, *, pathway_code: str, pathway_version: str
+    ) -> Layer4InputSnapshot:
         assert patient_id == self.snapshot.patient_id
+        assert pathway_code == self.snapshot.pathway_code
+        assert pathway_version == self.snapshot.pathway_version
         return self.snapshot
 
 
@@ -87,6 +93,8 @@ def _snapshot(
 ) -> Layer4InputSnapshot:
     return Layer4InputSnapshot(
         patient_id=PATIENT_ID,
+        pathway_code=PATHWAY_CODE,
+        pathway_version=PATHWAY_VERSION,
         questionnaire_responses=responses or [],
         observations=observations or [],
         assembled_at="2026-08-02T12:00:00+00:00",
@@ -139,6 +147,9 @@ def test_deterministic_summary_covers_current_timeline_sections_with_evidence(tm
         trigger_reference="Observation/observation-summary-conflict-1",
         due_at="2026-08-02T14:30:00+00:00",
         task_id="task-summary-source",
+        based_on_references=[
+            f"urn:continucare:pathway:{PATHWAY_CODE}|{PATHWAY_VERSION}"
+        ],
         evidence_references=["Observation/observation-summary-conflict-1/_history/1"],
     )
     repository.save_fhir_resource(task, patient_id=PATIENT_ID)
@@ -205,6 +216,26 @@ def test_summary_generation_is_idempotent_and_new_timeline_creates_new_version(
     repository, _, memory, summaries, _ = _services(
         tmp_path, _snapshot(responses=[response], observations=[observation])
     )
+    task = build_workflow_task(
+        patient_id=PATIENT_ID,
+        rule_id="synthetic-summary-version-rule",
+        rule_version="1.0.0",
+        task_code_system="urn:continucare:task-code",
+        task_code="synthetic-review",
+        task_code_display="合成人工复核",
+        description="仅用于 Communication Pathway 传递测试。",
+        requester_reference="Organization/continucare",
+        owner_reference="PractitionerRole/nurse",
+        authored_on="2026-08-02T10:30:00+00:00",
+        trigger_reference="Observation/observation-summary-version/_history/1",
+        due_at="2026-08-02T14:30:00+00:00",
+        task_id="task-summary-version",
+        based_on_references=[
+            f"urn:continucare:pathway:{PATHWAY_CODE}|{PATHWAY_VERSION}"
+        ],
+        evidence_references=["Observation/observation-summary-version/_history/1"],
+    )
+    repository.save_fhir_resource(task, patient_id=PATIENT_ID)
     memory.rebuild(PATIENT_ID)
 
     first = _generate(summaries)
@@ -216,12 +247,14 @@ def test_summary_generation_is_idempotent_and_new_timeline_creates_new_version(
         recipient_references=["PractitionerRole/nurse"],
         sent_at="2026-08-02T11:30:00+00:00",
         communication_id="communication-summary-version",
+        based_on_references=["Task/task-summary-version/_history/1"],
     )
     repository.save_fhir_resource(communication, patient_id=PATIENT_ID)
     memory.rebuild(PATIENT_ID)
     changed = _generate(summaries, generated_at="2026-08-02T12:03:00+00:00")
 
     assert repeated == first
+    assert first.summary_id.startswith("summary-v2-")
     assert first.version == "1"
     assert changed.version == "2"
     assert len(changed.source_timeline_event_ids) == (
@@ -231,6 +264,53 @@ def test_summary_generation_is_idempotent_and_new_timeline_creates_new_version(
         "summary_draft", first.summary_id, version="1"
     ) == first
     assert repository.get_contract("summary_draft", first.summary_id) == changed
+
+
+def test_legacy_timeline_summary_remains_byte_identical_and_read_only(tmp_path):
+    response = _response()
+    observation = _vomiting(1, observation_id="observation-summary-legacy")
+    repository, _, memory, summaries, reviews = _services(
+        tmp_path, _snapshot(responses=[response], observations=[observation])
+    )
+    legacy = Layer4SummaryDraft(
+        summary_id="summary-legacy-timeline",
+        patient_id=PATIENT_ID,
+        pathway_code=PATHWAY_CODE,
+        pathway_version=PATHWAY_VERSION,
+        period_start=PERIOD_START,
+        period_end=PERIOD_END,
+        status=SummaryDraftStatus.SAFETY_REVIEWED,
+        created_at=GENERATED_AT,
+    )
+    repository.save_contract(legacy)
+    with connect(repository.db_path) as connection:
+        before = connection.execute(
+            "SELECT record_json FROM layer4_contract_records "
+            "WHERE record_type='summary_draft' AND record_id=?",
+            (legacy.summary_id,),
+        ).fetchone()["record_json"]
+
+    memory.rebuild(PATIENT_ID)
+    generated = _generate(summaries, generated_at="2026-08-02T12:02:00+00:00")
+
+    with connect(repository.db_path) as connection:
+        after = connection.execute(
+            "SELECT record_json FROM layer4_contract_records "
+            "WHERE record_type='summary_draft' AND record_id=?",
+            (legacy.summary_id,),
+        ).fetchone()["record_json"]
+    assert before == after
+    assert generated.summary_id.startswith("summary-v2-")
+    assert generated.summary_id != legacy.summary_id
+    assert generated.version == "1"
+    with pytest.raises(ValueError, match="legacy timeline Summary is read-only"):
+        reviews.review(
+            summary_id=legacy.summary_id,
+            summary_version="1",
+            reviewer_reference="Practitioner/doctor",
+            decision=DoctorReviewDecision.ACCEPT,
+            reviewed_at="2026-08-02T12:03:00+00:00",
+        )
 
 
 def test_empty_timeline_creates_empty_summary_without_inventing_fact(tmp_path):

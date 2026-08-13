@@ -139,9 +139,32 @@ def _rule(
     )
 
 
+class _RuleInputReader:
+    def __init__(self):
+        self.observations: list[dict] = []
+
+    def read(
+        self,
+        patient_id: str,
+        *,
+        pathway_code: str,
+        pathway_version: str,
+        assembled_at: str | None = None,
+    ) -> Layer4InputSnapshot:
+        return Layer4InputSnapshot(
+            patient_id=patient_id,
+            pathway_code=pathway_code,
+            pathway_version=pathway_version,
+            observations=self.observations,
+            assembled_at=assembled_at or NOW,
+        )
+
+
 def _engine(repository: Layer4SQLiteStore) -> ApprovedRuleEngine:
+    input_reader = _RuleInputReader()
     return ApprovedRuleEngine(
         repository,
+        input_reader=input_reader,
         requester_reference="Organization/continucare",
         owner_references={"nurse": "PractitionerRole/nurse"},
     )
@@ -154,6 +177,7 @@ def _evaluate(
     evaluated_at: str = NOW,
     region: str = "DE-demo",
 ):
+    engine.input_reader.observations = observations
     return engine.evaluate(
         patient_id=PATIENT_ID,
         observations=observations,
@@ -166,9 +190,13 @@ def _evaluate(
 
 
 class _EmptyInputReader:
-    def read(self, patient_id: str) -> Layer4InputSnapshot:
+    def read(
+        self, patient_id: str, *, pathway_code: str, pathway_version: str
+    ) -> Layer4InputSnapshot:
         return Layer4InputSnapshot(
             patient_id=patient_id,
+            pathway_code=pathway_code,
+            pathway_version=pathway_version,
             assembled_at=NOW,
         )
 
@@ -337,6 +365,23 @@ def test_rule_engine_rejects_non_final_or_wrong_patient_observation(tmp_path):
     wrong_patient["subject"]["reference"] = "Patient/P-WRONG"
     with pytest.raises(ValueError, match="patient does not match"):
         _evaluate(engine, [wrong_patient])
+
+
+def test_rule_engine_rejects_caller_supplied_unadmitted_final_observation(tmp_path):
+    repository = Layer4SQLiteStore(tmp_path / "unadmitted-rule-input.db")
+    repository.save_contract(_rule())
+    engine = _engine(repository)
+
+    with pytest.raises(ValueError, match="Pathway-admitted Observation"):
+        engine.evaluate(
+            patient_id=PATIENT_ID,
+            observations=[_observation()],
+            pathway_code=PATHWAY_CODE,
+            pathway_version=PATHWAY_VERSION,
+            evaluated_at=NOW,
+            region="DE-demo",
+            synthetic_data=True,
+        )
 
 
 def test_task_deduplication_window_reuses_then_allows_new_task(tmp_path):

@@ -253,7 +253,16 @@ class ClinicalStateService:
         as_of: str | None = None,
         generated_at: str | None = None,
     ) -> ClinicalStateSnapshot:
-        snapshot = self.input_reader.read(patient_id)
+        snapshot = self.input_reader.read(
+            patient_id,
+            pathway_code=self.pathway_code,
+            pathway_version=self.pathway_version,
+        )
+        if (
+            snapshot.pathway_code != self.pathway_code
+            or snapshot.pathway_version != self.pathway_version
+        ):
+            raise ValueError("Layer-4 input snapshot Pathway does not match state service")
         cutoff_text = as_of or snapshot.assembled_at
         generated_text = generated_at or cutoff_text
         cutoff = _instant(cutoff_text)

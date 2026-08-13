@@ -36,8 +36,12 @@ class MutableInputReader:
     def __init__(self, snapshot: Layer4InputSnapshot):
         self.snapshot = snapshot
 
-    def read(self, patient_id: str) -> Layer4InputSnapshot:
+    def read(
+        self, patient_id: str, *, pathway_code: str, pathway_version: str
+    ) -> Layer4InputSnapshot:
         assert patient_id == self.snapshot.patient_id
+        assert pathway_code == self.snapshot.pathway_code
+        assert pathway_version == self.snapshot.pathway_version
         return self.snapshot
 
 
@@ -80,6 +84,8 @@ def _nausea(observation_id: str, response_id: str, effective_time: str) -> dict:
 def _snapshot(*, responses: list[dict], observations: list[dict]) -> Layer4InputSnapshot:
     return Layer4InputSnapshot(
         patient_id=PATIENT_ID,
+        pathway_code="GLP1-14D",
+        pathway_version="1.0.0",
         questionnaire_responses=responses,
         observations=observations,
         audit_events=[
@@ -523,7 +529,7 @@ def test_real_layer3_boundary_builds_memory_and_keeps_rule_tasks_disabled(tmp_pa
     kinds = {item.kind for item in service.list_timeline(DEMO_PATIENT_ID)}
     assert MemoryEventKind.QUESTIONNAIRE_RESPONSE in kinds
     assert MemoryEventKind.OBSERVATION in kinds
-    assert MemoryEventKind.COMMUNICATION in kinds
+    assert MemoryEventKind.COMMUNICATION not in kinds
     assert repository.list_fhir_resources(
         patient_id=DEMO_PATIENT_ID, resource_type="Task"
     ) == []

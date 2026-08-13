@@ -164,6 +164,7 @@ def test_pending_and_ready_briefs_are_verbatim_versioned_and_traceable(tmp_path)
         generated_at=_after(approved.communication),
     )
     assert ready.summary_id == pending.summary_id
+    assert ready.summary_id.startswith("summary-manual-review-")
     assert ready.version == "2"
     assert ready.period_end > pending.period_end
     ready_text = "\n".join(item.text for item in ready.items)
