@@ -1,6 +1,6 @@
 # HANDOFF
 
-> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。本文记录的是 2026-08-13 M5-B 已完成且准备提交时的真实状态；不要把它当成长期路线图。
+> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。本文记录的是 2026-08-13 M5-C 已完成实现、尚未提交时的真实状态；不要把它当成长期路线图。
 
 ## 1. Git 基线与已完成提交
 
@@ -19,10 +19,10 @@ codex/docs-collaboration-init
 upstream 为：
 
 ```text
-3fa2e2a812dbf29d228cef95badb64bc894c8b3e
+20d2521bf7bacaebe7d980c4013819d37de7fffb
 ```
 
-`43012df` 之后的三个 M5 基础提交都已位于 upstream：
+`43012df` 之后的四个 M5 基础提交都已位于 upstream：
 
 1. `8151161d527f717ad47a78cf145a6722e4268ece`
    `docs: define collaboration workflow and handoff`
@@ -31,6 +31,8 @@ upstream 为：
 
 3. `3fa2e2a812dbf29d228cef95badb64bc894c8b3e`
    `feat: add confirmed manual review task flow`
+4. `20d2521bf7bacaebe7d980c4013819d37de7fffb`
+   `feat: add controlled nurse review workflow`
 
 Knowledge Evidence Foundation 已经正式提交，不再是未跟踪成果。它仍保持 Pathway-agnostic；GLP1-14D 只是 fixture。没有 `target_number`、固定分母或人工目标序号；20/11/9/0/0 只是当前 GLP 数据快照。Knowledge 只解释采集/展示依据，不能授权 Task、ClinicalRule 或其他运行时行为。
 
@@ -42,14 +44,21 @@ feat: add confirmed manual review task flow
 
 收口。
 
+M5-B 已以单独 commit 收口：
+
+```text
+20d2521bf7bacaebe7d980c4013819d37de7fffb
+feat: add controlled nurse review workflow
+```
+
 当前 HEAD 为：
 
 ```text
-3fa2e2a812dbf29d228cef95badb64bc894c8b3e
-feat: add confirmed manual review task flow
+20d2521bf7bacaebe7d980c4013819d37de7fffb
+feat: add controlled nurse review workflow
 ```
 
-HEAD 与 `origin/codex/docs-collaboration-init` 相同。M5-B 已完成并准备以 `feat: add controlled nurse review workflow` 提交；用户只授权本次 commit，仍不得 push。
+HEAD 与 `origin/codex/docs-collaboration-init` 相同。M5-C 已完成但未暂存、未提交；本轮不得 commit 或 push。
 
 ## 2. M5-A 目标与完成结论
 
@@ -354,30 +363,69 @@ git rev-parse @{upstream}
 git status --short --untracked-files=all
 ```
 
-提交前状态：
+当前 M5-C 交接状态：
 
-- 工作区包含 M5-B 未提交改动；
+- 工作区包含 M5-C 未提交改动；
 - 暂存区为空；
 - 分支仍为 `codex/docs-collaboration-init`；
 - HEAD 与 upstream 相同；
 - 未 push。
 
-本次授权提交成功后的预期状态：
-
-- 工作区与暂存区均干净；
-- 分支仍为 `codex/docs-collaboration-init`；
-- 本地分支相对 upstream ahead 1、behind 0；
-- 未 push。
-
-M5-B 没有数据库迁移或外部系统操作。若用户决定放弃本切片，只需由用户明确授权后回退未提交代码并重置本地 Demo 数据；未经授权不得 reset、clean、checkout、revert、commit 或 push。
+M5-C 没有数据库迁移或外部系统操作。若用户决定放弃本切片，只能在用户明确授权后回退未提交代码并重置本地 Demo 数据；未经授权不得 reset、clean、checkout、revert、commit 或 push。
 
 ## 9. 一句话接管结论
 
-M5-B 已完成“人工 Task 受控处理 → 记录结果 → 待批中性 Communication → 人工批准为 ready-to-send”的可点击闭环，并准备以 `feat: add controlled nurse review workflow` 提交；全量测试为 290 passed、3 skipped，仍保持 synthetic-only、clinical_rules=[]、not_assessed、无外发。用户只授权本次 commit，不得 push 或开始 M5-C。
+M5-B 已提交并位于 upstream。M5-C 已完成“逐字原话 + 最终 Observation + 受控护士结果 + Communication readiness → 确定性、版本化、可追溯医生简报”的可点击闭环，仍保持 synthetic-only、clinical_rules=[]、not_assessed、无外发；M5-C 当前未暂存、未提交，且不得开始 M5-K/D/E。
 
-## 10. 后续顺序（均尚未开始）
+## 10. 后续顺序
 
-1. M5-C：把患者原话、Observation、护士处理结果和审计接入医生复诊简报；
-2. M5-K：比赛最小版 Knowledge Expansion；
-3. M5-D：把 M5-A/B/C/K 串成稳定的一键比赛 Demo；
-4. M5-E：接入 M6 飞书/Aily，并保留无 Token 的 Mock fallback。
+1. M5-C：本轮已完成，尚未提交；
+2. M5-K：比赛最小版 Knowledge Expansion，尚未开始；
+3. M5-D：把 M5-A/B/C/K 串成稳定的一键比赛 Demo，尚未开始；
+4. M5-E：接入 M6 飞书/Aily，并保留无 Token 的 Mock fallback，尚未开始。
+
+## 11. M5-C（已完成，未提交）
+
+M5-C 新增 `ManualReviewBriefService`，只从 completed manual-review Task、completed QuestionnaireResponse、final Observation、Communication preparation、精确 Provenance 与必要 AuditEvent 形成固定模板 Summary。患者原话逐字显示；护士自由 note 不进入正文；pending 与 ready 两态分别明确为“尚不可发送；未发送”和“已人工批准；尚未发送”。
+
+核心边界：
+
+- `summary_kind=manual_review_brief` 隔离旧 Timeline Summary；
+- 正文只由本地固定模板与受控来源事实生成；护士自由 note、AuditEvent 和模型候选不作为临床事实正文，Controlled Summary / controlled LLM 未调用；
+- 同来源重复生成返回当前版本；来源变化生成新的不可变版本，旧医生审阅决定不迁移；
+- 原子写入在 `BEGIN IMMEDIATE` 内重查精确来源并一次提交 Summary、Provenance 与 audit；
+- 页面普通查询和陈旧性判断只读，只有明确生成/刷新按钮写入；
+- Workbench as-of、精确/资源级 Provenance 关系和应用审计记录均可追踪；
+- Timeline 明确标注可能为空或过时，不作为本简报事实来源；
+- Alert、获批 ClinicalRule、M6 clinical-rule Task 都保持 0，发送能力关闭，临床评估保持 `not_assessed`。
+- 不生成诊断、风险分级、阈值、治疗或改药建议，不发送消息，也不写回 EMR。
+
+浏览器已完成从首页候选、患者确认、护士确认收到/接受/记录结果、医生查看 pending、护士批准、医生查看陈旧提示并明确刷新到 ready、审计全链的点击验收。桌面和 390×844 移动端通过，console 无 error/warn。
+
+实现细节见 `docs/26_m5_c_deterministic_doctor_brief.md`。本轮还修复了批准动作的一个既有并发重试竞态：第二个同 payload 请求在看到 ready 版本后会再次执行精确幂等查找，而不是误报状态错误。
+
+最终本地验证：
+
+```text
+.venv/bin/python -m pytest -q
+299 passed, 3 skipped
+
+.venv/bin/python -m compileall -q continucare app.py pages
+通过
+
+git diff --check
+通过
+```
+
+3 个 skip 仍只因没有设置官方 `FHIR_R4_SCHEMA_ZIP`。实施前已完成一次 Opus Level 4 策略审查，并吸收其关于事务内精确来源重查、不可变版本/审阅绑定、Summary 生产者隔离、as-of 总排序、Timeline 陈旧标记以及精确/资源级 Provenance 区分的 blocker；没有遗留 Opus blocker。
+
+实现冻结后完成一次 Sonnet final diff review。初次结论无 blocker，但要求补充 3 个最小上下文：`_replay` 是否精确匹配 actor/note、Workbench artifact version 是否来自真实 FHIR `meta.versionId`、共享准入是否拒绝非 completed/final。补充对应源码并加强 Communication v2 精确 Provenance / QR 资源级 Provenance 测试后，Sonnet 逐项关闭 NEED_CONTEXT，最终结论：
+
+```text
+CLEAN PASS
+BLOCKER: 无
+NON-BLOCKING: 无
+NEED_CONTEXT: 无
+```
+
+当前仍未执行 commit、push、M5-K、M5-D 或 M5-E。

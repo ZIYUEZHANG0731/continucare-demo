@@ -32,6 +32,7 @@ from continucare.layer4.contracts import (
 from continucare.layer4.inputs import Layer4InputReader
 from continucare.layer4.repository import Layer4Repository
 from continucare.layer4.manual_reviews import is_clinical_rule_task
+from continucare.pathways import PathwayNotFoundError, load_builtin_pathways
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
@@ -73,11 +74,15 @@ class DoctorWorkbenchService:
         *,
         pathway_code: str,
         pathway_version: str,
+        summary_kind: str | None = None,
     ):
         self.input_reader = input_reader
         self.repository = repository
         self.pathway_code = pathway_code
         self.pathway_version = pathway_version
+        if summary_kind not in {None, "timeline_evidence", "manual_review_brief"}:
+            raise ValueError("unsupported workbench summary kind")
+        self.summary_kind = summary_kind
 
     def query(
         self,
@@ -383,6 +388,10 @@ class DoctorWorkbenchService:
             if cast(Layer4SummaryDraft, item).pathway_code == self.pathway_code
             and cast(Layer4SummaryDraft, item).pathway_version
             == self.pathway_version
+            and (
+                self.summary_kind is None
+                or cast(Layer4SummaryDraft, item).summary_kind == self.summary_kind
+            )
             and _instant(cast(Layer4SummaryDraft, item).period_end) <= cutoff
             and _instant(cast(Layer4SummaryDraft, item).created_at) <= cutoff
         ]
@@ -540,6 +549,62 @@ class DoctorWorkbenchService:
     def _resolve_contract_urn(
         self, patient_id: str, reference: str, cutoff: datetime
     ) -> EvidenceTraceArtifact | None:
+        message_prefix = "urn:continucare:followup-message:"
+        if reference.startswith(message_prefix):
+            message_id = reference.removeprefix(message_prefix)
+            message = self.input_reader.store.get_message(message_id)
+            if (
+                message is None
+                or message.patient_id != patient_id
+                or _instant(message.submitted_at) > cutoff
+            ):
+                return None
+            return EvidenceTraceArtifact(
+                reference=reference,
+                artifact_type=EvidenceArtifactType.APPLICATION_RECORD,
+                record_type="followup_message",
+                version="1",
+                payload=message.model_dump(mode="json"),
+            )
+
+        audit_prefix = "urn:continucare:audit-event:"
+        if reference.startswith(audit_prefix):
+            event_id = reference.removeprefix(audit_prefix)
+            event = next(
+                (
+                    item
+                    for item in self.input_reader.store.list_audit_events(patient_id)
+                    if item.event_id == event_id and _instant(item.created_at) <= cutoff
+                ),
+                None,
+            )
+            if event is None:
+                return None
+            return EvidenceTraceArtifact(
+                reference=reference,
+                artifact_type=EvidenceArtifactType.APPLICATION_RECORD,
+                record_type="audit_event",
+                version="1",
+                payload=event.model_dump(mode="json"),
+            )
+
+        pathway_prefix = "urn:continucare:pathway:"
+        if reference.startswith(pathway_prefix) and "|" in reference:
+            code, version = reference.removeprefix(pathway_prefix).rsplit("|", 1)
+            if code != self.pathway_code or version != self.pathway_version:
+                return None
+            try:
+                pathway = load_builtin_pathways().get(code, version)
+            except PathwayNotFoundError:
+                return None
+            return EvidenceTraceArtifact(
+                reference=reference,
+                artifact_type=EvidenceArtifactType.APPLICATION_RECORD,
+                record_type="pathway_definition",
+                version=version,
+                payload=pathway.model_dump(mode="json"),
+            )
+
         mappings = (
             ("urn:continucare:timeline-event:", "timeline_event", "timeline_event_id"),
             ("urn:continucare:memory-event:", "memory_event", "event_id"),
@@ -726,11 +791,18 @@ class DoctorWorkbenchService:
                         f":version:{payload['result_summary_version']}",
                     )
                 )
-        if artifact.resource_type == "Task":
-            task = artifact.payload
-            task_reference = (
-                f"Task/{task['id']}/_history/{task['meta']['versionId']}"
+        if artifact.resource_type in {
+            "Observation",
+            "QuestionnaireResponse",
+            "Communication",
+            "Task",
+        }:
+            resource = artifact.payload
+            exact_reference = (
+                f"{artifact.resource_type}/{resource['id']}/_history/"
+                f"{artifact.version or '1'}"
             )
+            resource_reference = f"{artifact.resource_type}/{resource['id']}"
             try:
                 provenance_resources = self.repository.list_fhir_resources(
                     patient_id=patient_id,
@@ -743,10 +815,15 @@ class DoctorWorkbenchService:
                     targets = {
                         item.get("reference") for item in resource.get("target", [])
                     }
-                    if task_reference in targets:
+                    relation = None
+                    if exact_reference in targets:
+                        relation = "provenance_exact_version"
+                    elif resource_reference in targets:
+                        relation = "provenance_resource_level"
+                    if relation:
                         relations.add(
                             (
-                                "provenance",
+                                relation,
                                 f"Provenance/{resource['id']}/_history/"
                                 f"{resource['meta']['versionId']}",
                             )

@@ -1,94 +1,74 @@
-"""Doctor-facing, outcome-first pre-visit evidence brief."""
+"""Read-only M5-C Doctor Workbench with explicit controlled actions."""
 
 from __future__ import annotations
 
-import html
-from datetime import datetime
+import json
 
 import streamlit as st
 
-from continucare.adapters.mock_extractor import MockExtractor
-from continucare.adapters.mock_notifier import MockNotifier
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.config import get_settings
+from continucare.db import utc_now_iso
 from continucare.demo_data import DEMO_PATIENT_ID
-from continucare.models import AlertStatus
-from continucare.presentation import (
-    alert_status_text,
-    observation_evidence_text,
-    observation_text,
-    owner_text,
+from continucare.layer4 import (
+    BRIEF_SUMMARY_KIND,
+    DoctorReviewService,
+    DoctorWorkbenchService,
+    Layer4InputReader,
+    Layer4SQLiteStore,
+    ManualReviewBriefService,
+    SummaryEvidenceItem,
+    WorkbenchAccessContext,
+    WorkbenchPurpose,
+    WorkbenchRole,
 )
-from continucare.services.summaries import SummaryService
+from continucare.layer4.contracts import DoctorReviewDecision, SummaryDraftStatus
+from continucare.layer4.manual_reviews import SEND_ENABLED
+from continucare.pathways import load_builtin_pathways
 from continucare.ui import inject_global_styles, render_mode_badges
 
 
-def _in_period(timestamp: str, start: str, end: str) -> bool:
-    item_date = datetime.fromisoformat(timestamp).date().isoformat()
-    return start <= item_date <= end
+DOCTOR_REFERENCE = "Practitioner/synthetic-doctor-review"
 
 
-def _source_message(store, alert):
-    for ref in alert.evidence_refs:
-        if ref.startswith(("message-", "message_")):
-            return store.get_message(ref)
-    return None
-
-
-def _alert_observations(store, alert):
-    observations = []
-    for ref in alert.evidence_refs:
-        if ref.startswith(("observation-", "observation_")):
-            item = store.get_observation(ref)
-            if item:
-                observations.append(item)
-    return observations
-
-
-def _human_trigger(alert) -> str:
-    return alert.trigger_reason
-
-
-def _render_alert_evidence_story(store, alert):
-    message = _source_message(store, alert)
-    observations = _alert_observations(store, alert)
-    actions = store.list_alert_actions(alert.alert_id)
-
-    st.markdown('<div class="cc-chain-step"><b>1 · 患者原话</b></div>', unsafe_allow_html=True)
-    if message:
-        st.markdown(
-            f'<div class="cc-quote">{html.escape(message.message_text)}</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.warning("原始消息记录缺失。")
-
-    st.markdown('<div class="cc-chain-step"><b>2 · 形成患者报告事实</b></div>', unsafe_allow_html=True)
-    for observation in observations:
-        st.write(f"- {observation_evidence_text(observation)}")
-
-    st.markdown('<div class="cc-chain-step"><b>3 · 确定性规则创建医护任务</b></div>', unsafe_allow_html=True)
-    st.write(f"{alert.severity} · {_human_trigger(alert)}")
-    st.caption(
-        f"规则 {alert.trigger_rule_id} · 技术条件 {alert.trigger_reason} · "
-        f"责任角色 {owner_text(alert.owner_role)} · "
-        f"当前状态 {alert_status_text(alert)}"
+def _access() -> WorkbenchAccessContext:
+    return WorkbenchAccessContext(
+        actor_reference=DOCTOR_REFERENCE,
+        role=WorkbenchRole.DOCTOR,
+        purpose=WorkbenchPurpose.TREATMENT,
+        permitted_patient_ids=[DEMO_PATIENT_ID],
+        identity_verified=True,
     )
 
-    st.markdown('<div class="cc-chain-step"><b>4 · 医护处理结果</b></div>', unsafe_allow_html=True)
-    if actions:
-        for action in actions:
-            label = {
-                "acknowledge": "确认收到",
-                "escalate_to_doctor": "升级医生",
-                "resolve": "记录结果并完成",
-            }.get(action.action_type, action.action_type)
-            st.write(f"- {action.created_at} · {label}：{action.note}")
-    else:
-        st.warning("任务尚无医护处理记录。")
 
-    with st.expander("查看技术 evidence_refs"):
-        st.code("\n".join(alert.evidence_refs), language=None)
+def _versioned_evidence(evidence) -> str:
+    if evidence.resource.reference.startswith("urn:"):
+        return evidence.resource.reference
+    if evidence.resource.version_id:
+        return (
+            f"{evidence.resource.reference}/_history/"
+            f"{evidence.resource.version_id}"
+        )
+    return evidence.resource.reference
+
+
+def _task_id(summary) -> str | None:
+    ids = {
+        evidence.resource.reference.split("/", 2)[1]
+        for item in summary.items
+        for evidence in item.evidence_refs
+        if evidence.resource.reference.startswith("Task/")
+    }
+    return next(iter(ids)) if len(ids) == 1 else None
+
+
+def _section_label(section: str) -> str:
+    return {
+        "overview": "患者原话与 completed QuestionnaireResponse",
+        "key_changes": "final Observation 与 derivedFrom",
+        "tasks_and_actions": "护士受控处理与 Communication readiness",
+        "doctor_to_confirm": "医生待确认",
+    }.get(section, section)
 
 
 st.set_page_config(
@@ -99,178 +79,256 @@ st.set_page_config(
 )
 inject_global_styles(st)
 st.title("医生复诊前简报")
-st.error("仅使用合成数据 · 不生成诊断、治疗或用药建议 · 默认不写入 EMR")
+st.error("仅使用合成数据 · 不生成诊断、风险、阈值、治疗或用药建议 · 不写入 EMR")
 
-store = SQLiteStore(get_settings().db_path)
-service = SummaryService(store, MockExtractor(), MockNotifier())
+settings = get_settings()
+store = SQLiteStore(settings.db_path)
+repository = Layer4SQLiteStore(settings.db_path)
 patient = store.get_patient(DEMO_PATIENT_ID)
+pathway = load_builtin_pathways().get(patient.pathway_code if patient else "GLP1-14D")
+briefs = ManualReviewBriefService(
+    store,
+    repository,
+    pathway_code=pathway.code,
+    pathway_version=pathway.version,
+)
+workbench = DoctorWorkbenchService(
+    Layer4InputReader(store),
+    repository,
+    pathway_code=pathway.code,
+    pathway_version=pathway.version,
+    summary_kind=BRIEF_SUMMARY_KIND,
+)
+access = _access()
+as_of = utc_now_iso()
+view = workbench.query(
+    patient_id=DEMO_PATIENT_ID,
+    access=access,
+    as_of=as_of,
+    generated_at=as_of,
+)
+manual_tasks = briefs.list_manual_tasks(DEMO_PATIENT_ID, as_of=as_of)
 
-header, generate_col = st.columns([3, 1])
+header, status_col = st.columns([3, 1])
 with header:
-    st.markdown("### 复诊前 30 秒：重点、处理结果、待确认项")
+    st.markdown("### 复诊前 30 秒：患者原话、最终事实、人工处理与发送准备度")
     if patient:
         st.caption(
-            f"{patient.display_name} · Pathway {patient.pathway_code} · "
+            f"{patient.display_name} · Pathway {pathway.code}|{pathway.version} · "
             f"下次复诊 {patient.next_visit_date}"
         )
-with generate_col:
-    if st.button("生成 / 刷新简报", type="primary", width="stretch"):
-        service.generate(DEMO_PATIENT_ID)
-        st.rerun()
+with status_col:
+    st.metric("临床评估", "not_assessed")
 
-summary = store.get_latest_summary(DEMO_PATIENT_ID)
+alert_count = len(store.list_alerts(DEMO_PATIENT_ID))
+metric_one, metric_two, metric_three, metric_four = st.columns(4)
+metric_one.metric("Alert", alert_count)
+metric_two.metric("获批 ClinicalRule", 0)
+metric_three.metric("M6 clinical-rule Task", len(view.tasks))
+metric_four.metric("发送能力", "关闭" if not SEND_ENABLED else "开启")
+st.caption("M6 Task 列表继续只正向选择 clinical-rule Task；manual-review Task 不进入该列表。")
+
+completed_tasks = [item for item in manual_tasks if item.get("status") == "completed"]
+summary = view.summary
 if summary is None:
     with st.container(border=True):
-        st.markdown('<div class="cc-kicker">简报尚未生成</div>', unsafe_allow_html=True)
-        st.markdown("### 生成后，这里不会只显示一段总结文字")
-        preview_one, preview_two, preview_three = st.columns(3)
-        preview_one.info("**本期重点**\n\n患者报告发生了什么变化")
-        preview_two.success("**已完成处理**\n\n护士任务的状态与最终记录")
-        preview_three.warning("**复诊待确认**\n\n数据缺失、未关闭任务和患者问题")
-        st.caption("先从首页载入合成场景，在护士端完成处理，再点击“生成 / 刷新简报”。")
+        st.markdown("### M5-C 简报尚未生成")
+        if completed_tasks:
+            st.write("已找到处理完成的 manual-review Task。生成是明确动作；页面加载和刷新本身不写入。")
+            selected_task_id = st.selectbox(
+                "选择受控人工复核 Task",
+                options=[item["id"] for item in completed_tasks],
+            )
+            if st.button("明确生成 M5-C 证据简报", type="primary", width="stretch"):
+                try:
+                    briefs.generate(
+                        patient_id=DEMO_PATIENT_ID,
+                        task_id=selected_task_id,
+                        generated_at=utc_now_iso(),
+                    )
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
+        elif manual_tasks:
+            current = manual_tasks[0]
+            st.info(
+                f"Task/{current['id']} 当前为 {current['status']}；"
+                "只有 completed 且证据完整的任务才能生成简报。"
+            )
+        else:
+            st.info("尚无患者明确确认后创建的 manual-review Task。请先完成 M5-A 与 M5-B。")
     st.stop()
 
-messages = [
-    item
-    for item in store.list_messages(DEMO_PATIENT_ID)
-    if _in_period(item.submitted_at, summary.period_start, summary.period_end)
-]
-observations = [
-    item
-    for item in store.list_observations(DEMO_PATIENT_ID)
-    if _in_period(item.effective_time, summary.period_start, summary.period_end)
-]
-alerts = [
-    item
-    for item in store.list_alerts(DEMO_PATIENT_ID)
-    if _in_period(item.created_at, summary.period_start, summary.period_end)
-]
-resolved_alerts = [item for item in alerts if item.status == AlertStatus.RESOLVED]
-unresolved_alerts = [item for item in alerts if item.status != AlertStatus.RESOLVED]
-submitted_dates = {datetime.fromisoformat(item.submitted_at).date() for item in messages}
-missing_days = max(0, 14 - len(submitted_dates))
-content = summary.summary_json
-
-st.success(
-    f"复诊简报已生成 · 覆盖 {summary.period_start} 至 {summary.period_end} · "
-    "所有关键内容都可以回看证据"
-)
-
-report_metric, fact_metric, task_metric, missing_metric = st.columns(4)
-report_metric.metric("患者随访", f"{len(messages)} 次")
-fact_metric.metric("患者报告事实", f"{len(observations)} 条")
-task_metric.metric("医护任务", f"{len(resolved_alerts)}/{len(alerts)} 已完成")
-missing_metric.metric("缺少记录", f"{missing_days} 天")
-
-st.markdown("## 医生 30 秒读完")
-focus_col, handled_col, confirm_col = st.columns(3)
-
-with focus_col:
-    with st.container(border=True):
-        st.markdown('<div class="cc-kicker">本期重点</div>', unsafe_allow_html=True)
-        st.markdown("### 患者报告了什么")
-        if content.key_changes:
-            for item in content.key_changes[:4]:
-                st.write(f"- {item.text}")
-        else:
-            st.write("本期没有形成有证据支持的关键变化。")
-        st.caption("只展示患者报告事实，不生成诊断。")
-
-with handled_col:
-    with st.container(border=True):
-        st.markdown('<div class="cc-kicker">已完成处理</div>', unsafe_allow_html=True)
-        st.markdown("### 医护团队做了什么")
-        if alerts:
-            for alert in alerts:
-                st.write(f"**{alert.severity} · {alert_status_text(alert)}**")
-                if alert.resolution_reason:
-                    st.write(alert.resolution_reason)
-                elif alert.status == AlertStatus.ESCALATED:
-                    st.write("任务已升级医生，尚未关闭。")
-                else:
-                    st.write("任务尚未形成最终处理结果。")
-        else:
-            st.write("本期患者报告未创建额外医护任务。")
-        st.caption("任务状态与护士处理记录来自数据库。")
-
-with confirm_col:
-    with st.container(border=True):
-        st.markdown('<div class="cc-kicker">复诊待确认</div>', unsafe_allow_html=True)
-        st.markdown("### 复诊时还要看什么")
-        if unresolved_alerts:
-            st.write(f"- 仍有 {len(unresolved_alerts)} 个医护任务未关闭。")
-        if content.patient_questions:
-            for item in content.patient_questions:
-                st.write(f"- {item.text}")
-        if missing_days:
-            st.write(f"- 14 天窗口内有 {missing_days} 天没有随访记录。")
-        if not unresolved_alerts and not content.patient_questions and not missing_days:
-            st.write("当前没有额外待确认项。")
-        st.caption("这里记录待核对事项，不给出调整建议。")
-
-st.markdown("## 医护任务的最终结果")
-if not alerts:
-    st.info("本期没有创建医护任务。患者报告事实仍保留在下方随访时间线中。")
-for alert in alerts:
-    with st.container(border=True):
-        status_col, owner_col = st.columns([3, 1])
-        with status_col:
-            st.markdown(f"### {alert.severity} 工作流 · {alert_status_text(alert)}")
-            st.write(f"触发原因：{_human_trigger(alert)}")
-            if alert.resolution_reason:
-                st.success(f"最终处理结果：{alert.resolution_reason}")
-            else:
-                st.warning("尚未形成最终处理结果。")
-        with owner_col:
-            st.metric("当前责任角色", owner_text(alert.owner_role))
-
-        with st.expander("展开：这条结果是怎么形成的？", expanded=True):
-            _render_alert_evidence_story(store, alert)
-
-st.markdown("## 14 天患者报告时间线")
-if observations:
-    st.dataframe(
-        [
-            {
-                "日期": datetime.fromisoformat(item.effective_time).date().isoformat(),
-                "患者报告事实": observation_text(item),
-                "原文证据": item.evidence_text,
-                "来源": "患者本人",
-            }
-            for item in observations
-        ],
-        hide_index=True,
-        width="stretch",
+task_id = _task_id(summary)
+stale = task_id is None or briefs.is_stale(summary, as_of=as_of)
+if stale:
+    st.warning(
+        "这份简报是不可变版本快照；当前 Task、Communication 或证据版本已变化。"
+        "请明确生成新版本后再依据最新 readiness 工作。"
     )
 else:
-    st.caption("当前窗口没有患者报告事实。")
+    st.success("当前简报与已保存的来源版本一致。页面查询保持只读。")
 
-with st.expander("查看完整摘要中的缺失数据和其他待确认内容"):
-    st.markdown("**患者主要问题**")
-    if content.patient_questions:
-        for item in content.patient_questions:
-            st.write(f"- {item.text}")
+st.caption(
+    f"Summary/{summary.summary_id} · v{summary.version} · {summary.status.value} · "
+    f"as-of {summary.period_end} · source digest {summary.source_evidence_digest}"
+)
+if task_id and st.button("明确生成 / 刷新为当前来源版本", width="stretch"):
+    try:
+        briefs.generate(
+            patient_id=DEMO_PATIENT_ID,
+            task_id=task_id,
+            generated_at=utc_now_iso(),
+        )
+    except ValueError as exc:
+        st.error(str(exc))
     else:
-        st.caption("本期没有记录患者问题。")
-    st.markdown("**缺失数据**")
-    for item in content.missing_data:
-        st.write(f"- {item.text}")
-    st.markdown("**医生待确认**")
-    if content.doctor_to_confirm:
-        for item in content.doctor_to_confirm:
-            st.write(f"- {item.text}")
-    else:
-        st.caption("本期没有其他有证据支持的待确认项。")
+        st.rerun()
 
-st.markdown("## 审阅留痕")
-if summary.reviewed_at:
-    st.success(f"医生已审阅：{summary.reviewed_at} · 未写入 EMR")
-elif st.button("标记这份简报已审阅", type="primary", width="stretch"):
-    service.review(summary.summary_id)
-    st.rerun()
+st.markdown("## 确定性证据简报")
+st.caption(
+    "正文由本地固定模板和 canonical text 生成；患者原话逐字显示。"
+    "AuditEvent 只证明流程发生，不作为以下临床事实的 evidence reference。"
+)
+for section in ("overview", "key_changes", "tasks_and_actions", "doctor_to_confirm"):
+    section_items = [item for item in summary.items if item.section == section]
+    if not section_items:
+        continue
+    st.markdown(f"### {_section_label(section)}")
+    for item in section_items:
+        with st.container(border=True):
+            if item is summary.items[0]:
+                st.info(item.text)
+                st.caption("患者原话 · 逐字证据")
+            else:
+                st.write(item.text)
+            with st.expander("逐项查看精确 evidence reference"):
+                for evidence in item.evidence_refs:
+                    st.code(_versioned_evidence(evidence), language=None)
+                    st.caption(
+                        f"role={evidence.role.value} · "
+                        f"effective={evidence.effective_start or '—'}"
+                    )
+
+root = f"urn:continucare:summary:{summary.summary_id}:version:{summary.version}"
+trace = workbench.trace_evidence(
+    patient_id=DEMO_PATIENT_ID,
+    access=access,
+    root_reference=root,
+    as_of=as_of,
+    max_depth=10,
+    max_nodes=200,
+)
+st.markdown("## 完整来源、版本、Provenance 与审计链")
+if trace.degraded:
+    st.error("证据来源暂时不可用；系统没有补造内容。")
+if trace.unresolved_references:
+    st.warning("存在 unresolved evidence reference：")
+    st.code("\n".join(trace.unresolved_references), language=None)
+if trace.truncated:
+    st.warning("证据图达到展开上限，当前展示不完整。")
+
+fhir_artifacts = [
+    item for item in trace.artifacts if item.artifact_type.value == "fhir_resource"
+]
+application_artifacts = [
+    item for item in trace.artifacts if item.artifact_type.value == "application_record"
+]
+for label, artifacts in (
+    ("FHIR 与 Provenance 资源", fhir_artifacts),
+    ("流程审计与应用记录（非临床事实）", application_artifacts),
+):
+    with st.expander(f"{label} · {len(artifacts)} 项"):
+        for artifact in artifacts:
+            st.markdown(
+                f"**{artifact.reference}** · {artifact.resource_type or artifact.record_type} "
+                f"v{artifact.version or '—'}"
+            )
+            if artifact.record_type == "audit_event":
+                st.caption("流程证据：证明动作发生，不证明患者临床状态。")
+            st.code(
+                json.dumps(artifact.payload, ensure_ascii=False, indent=2),
+                language="json",
+            )
+
+with st.expander("查看证据图关系"):
+    for edge in trace.edges:
+        st.write(
+            f"{edge.source_reference} --{edge.relation}→ {edge.target_reference}"
+        )
+
+st.markdown("## 医生受控审阅")
+if summary.status == SummaryDraftStatus.SAFETY_REVIEWED:
+    st.caption("审阅只作用于当前不可变版本；生成新来源版本不会迁移旧决定。")
+    note = st.text_area(
+        "审阅说明",
+        placeholder="拒绝或修改时必填。不要添加没有来源证据的新临床结论。",
+    )
+    decision = st.radio(
+        "决定",
+        options=["accept", "modify", "reject"],
+        format_func=lambda value: {
+            "accept": "接受当前版本",
+            "modify": "修改已有措辞（保留原证据）",
+            "reject": "拒绝当前版本",
+        }[value],
+        horizontal=True,
+    )
+    replacement = None
+    selected_item_id = None
+    if decision == "modify":
+        selected_item_id = st.selectbox(
+            "选择要修改的条目",
+            options=[item.item_id for item in summary.items],
+            format_func=lambda value: next(
+                item.text for item in summary.items if item.item_id == value
+            ),
+        )
+        original = next(item for item in summary.items if item.item_id == selected_item_id)
+        replacement = st.text_area("修改后措辞", value=original.text)
+    if st.button("明确提交医生审阅", type="primary", width="stretch"):
+        try:
+            modified_items = None
+            if decision == "modify":
+                modified_items = [
+                    SummaryEvidenceItem(
+                        item_id=item.item_id,
+                        section=item.section,
+                        text=(replacement if item.item_id == selected_item_id else item.text),
+                        evidence_refs=item.evidence_refs,
+                        requires_doctor_confirmation=item.requires_doctor_confirmation,
+                    )
+                    for item in summary.items
+                ]
+            DoctorReviewService(repository).review(
+                summary_id=summary.summary_id,
+                summary_version=summary.version,
+                reviewer_reference=DOCTOR_REFERENCE,
+                decision=DoctorReviewDecision(decision),
+                reviewed_at=utc_now_iso(),
+                note=note or None,
+                modified_items=modified_items,
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.rerun()
+elif summary.status == SummaryDraftStatus.DOCTOR_REVIEWED:
+    st.success("医生已接受或修改此精确版本；未写入 EMR。")
 else:
-    st.caption("点击后只写入本地审计事件，不会写入 EMR。")
+    st.warning("医生已拒绝此精确版本；原始证据和历史版本仍保留。")
+
+st.markdown("## Timeline 读取边界")
+st.info(
+    "M5-C 不在页面加载或生成时重建 Clinical Memory。下方 Timeline 可能为空或过时，"
+    "因此不作为本简报事实来源；请以每条 Summary evidence reference 和上方证据图为准。"
+)
+st.caption(f"当前只读 Timeline 事件数：{len(view.timeline)}")
 
 with st.expander("演示模式说明"):
     render_mode_badges(st)
-    st.caption("摘要由本地模板生成；飞书通知为 Mock，未完成真实联调。")
+    st.caption(
+        "controlled LLM 未实例化、未调用；Communication 始终未发送；"
+        "所有身份和患者数据均为合成。"
+    )

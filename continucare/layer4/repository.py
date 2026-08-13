@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from continucare.layer4.contracts import Layer4ContractRecord
+from continucare.layer4.contracts import Layer4ContractRecord, Layer4SummaryDraft
+from continucare.models import AuditEvent, FollowUpMessage
 
 
 class Layer4Repository(Protocol):
@@ -30,6 +31,23 @@ class Layer4Repository(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     def save_contract(self, record: Layer4ContractRecord) -> Layer4ContractRecord: ...
+
+    def persist_manual_review_brief(
+        self,
+        *,
+        patient_id: str,
+        expected_task: dict[str, Any],
+        expected_communication: dict[str, Any],
+        expected_questionnaire_response: dict[str, Any],
+        expected_observations: list[dict[str, Any]],
+        expected_message: FollowUpMessage,
+        expected_provenances: list[dict[str, Any]],
+        expected_audits: list[AuditEvent],
+        expected_current_summary: Layer4SummaryDraft | None,
+        summary: Layer4SummaryDraft,
+        summary_provenance: dict[str, Any],
+        audit_event: AuditEvent,
+    ) -> bool: ...
 
     def get_contract(
         self,

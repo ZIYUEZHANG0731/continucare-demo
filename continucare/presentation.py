@@ -52,6 +52,7 @@ EVENT_LABELS = {
     "notification_mock_sent": "记录模拟飞书通知",
     "nurse_alert_action": "护士更新处理进展",
     "summary_generated": "生成复诊前简报",
+    "manual_review_brief_generated": "生成确定性人工复核简报",
     "summary_notification_mock_sent": "记录模拟医生通知",
     "doctor_reviewed_summary": "医生完成简报审阅",
 }

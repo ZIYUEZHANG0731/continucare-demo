@@ -17,6 +17,7 @@ from continucare.layer4.fhir import (
 )
 from continucare.layer4.manual_reviews import (
     EVIDENCE_DIGEST_EXTENSION_URL,
+    MANUAL_REVIEW_OUTCOME_LABELS,
     MANUAL_REVIEW_COMMUNICATION_IDENTIFIER_SYSTEM,
     PENDING_APPROVAL,
     READY_TO_SEND,
@@ -38,10 +39,7 @@ MANUAL_REVIEW_DRAFT_TEMPLATE = (
 
 ManualReviewOutcome = Literal["evidence_consistent", "clarification_needed"]
 
-_OUTCOME_LABELS: dict[str, str] = {
-    "evidence_consistent": "已核对原话、确认结果与最终证据链，记录一致",
-    "clarification_needed": "已核对原话、确认结果与最终证据链，需要后续补充说明",
-}
+_OUTCOME_LABELS = MANUAL_REVIEW_OUTCOME_LABELS
 
 
 class ManualReviewActionResult(BaseModel):
@@ -371,6 +369,15 @@ class ManualReviewWorkflowService:
         if current.get("subject", {}).get("reference") != f"Patient/{patient_id}":
             raise ValueError("manual review Communication patient mismatch")
         if communication_readiness(current) != PENDING_APPROVAL:
+            replay = self._replay(
+                patient_id,
+                task_id,
+                "manual_review_communication_approved",
+                actor_reference,
+                note_text,
+            )
+            if replay:
+                return replay
             raise ValueError("only a pending draft can be approved")
         task_reference = f"Task/{task_id}/_history/{task['meta']['versionId']}"
         if task_reference not in {

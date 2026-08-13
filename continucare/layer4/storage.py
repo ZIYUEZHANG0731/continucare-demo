@@ -20,6 +20,7 @@ from continucare.layer4.contracts import (
     TimelineEvent,
 )
 from continucare.layer4.fhir import validate_layer4_fhir_resource
+from continucare.fhir.r4 import validate_r4_resource
 from continucare.layer4.manual_reviews import (
     PENDING_APPROVAL,
     READY_TO_SEND,
@@ -27,7 +28,7 @@ from continucare.layer4.manual_reviews import (
     is_manual_review_communication,
     is_manual_review_task,
 )
-from continucare.models import AuditEvent
+from continucare.models import AuditEvent, FollowUpMessage
 
 _CONTRACT_MODELS: dict[str, type[BaseModel]] = {
     "clinical_rule": ClinicalRuleDefinition,
@@ -454,6 +455,301 @@ class Layer4SQLiteStore:
 
     def _manual_review_action_fault(self, event_type: str) -> None:
         """Test seam for proving rollback after all M5-B domain writes."""
+
+        return None
+
+    def persist_manual_review_brief(
+        self,
+        *,
+        patient_id: str,
+        expected_task: dict[str, Any],
+        expected_communication: dict[str, Any],
+        expected_questionnaire_response: dict[str, Any],
+        expected_observations: list[dict[str, Any]],
+        expected_message: FollowUpMessage,
+        expected_provenances: list[dict[str, Any]],
+        expected_audits: list[AuditEvent],
+        expected_current_summary: Layer4SummaryDraft | None,
+        summary: Layer4SummaryDraft,
+        summary_provenance: dict[str, Any],
+        audit_event: AuditEvent,
+    ) -> bool:
+        """CAS one M5-C brief after rechecking every source in one transaction."""
+
+        if summary.summary_kind != "manual_review_brief":
+            raise ValueError("M5-C persistence requires a manual-review brief")
+        if summary.patient_id != patient_id or audit_event.patient_id != patient_id:
+            raise ValueError("M5-C brief patient mismatch")
+        task = validate_layer4_fhir_resource(
+            expected_task, expected_resource_type="Task"
+        )
+        communication = validate_layer4_fhir_resource(
+            expected_communication, expected_resource_type="Communication"
+        )
+        response = validate_r4_resource(
+            expected_questionnaire_response,
+            expected_resource_type="QuestionnaireResponse",
+        )
+        observations = [
+            validate_r4_resource(item, expected_resource_type="Observation")
+            for item in expected_observations
+        ]
+        provenances = [
+            validate_layer4_fhir_resource(item, expected_resource_type="Provenance")
+            for item in expected_provenances
+        ]
+        generated_provenance = validate_layer4_fhir_resource(
+            summary_provenance, expected_resource_type="Provenance"
+        )
+        summary_reference = (
+            f"urn:continucare:summary:{summary.summary_id}:version:{summary.version}"
+        )
+        if summary_reference not in {
+            item.get("reference")
+            for item in generated_provenance.get("target", [])
+        }:
+            raise ValueError("M5-C Provenance must target the exact Summary version")
+        if not provenances or not expected_audits:
+            raise ValueError("M5-C brief requires Provenance and process audit evidence")
+
+        summary_identity = _contract_identity(summary)
+        summary_payload = _json(summary.model_dump(mode="json"))
+        generated_provenance_payload = _json(generated_provenance)
+        audit_payload = _json(audit_event.details_json)
+        with connect(self.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+
+            existing_summary = connection.execute(
+                """
+                SELECT record_json, patient_id FROM layer4_contract_records
+                WHERE record_type='summary_draft' AND record_id=? AND record_version=?
+                """,
+                (summary.summary_id, summary.version),
+            ).fetchone()
+            existing_provenance = connection.execute(
+                """
+                SELECT resource_json, patient_id FROM layer4_fhir_resources
+                WHERE resource_type='Provenance' AND resource_id=? AND version_id=?
+                """,
+                (
+                    generated_provenance["id"],
+                    generated_provenance["meta"]["versionId"],
+                ),
+            ).fetchone()
+            existing_audit = connection.execute(
+                "SELECT * FROM audit_events WHERE event_id=?",
+                (audit_event.event_id,),
+            ).fetchone()
+            if any(
+                item is not None
+                for item in (existing_summary, existing_provenance, existing_audit)
+            ):
+                exact = (
+                    existing_summary is not None
+                    and existing_summary["record_json"] == summary_payload
+                    and existing_summary["patient_id"] == patient_id
+                    and existing_provenance is not None
+                    and existing_provenance["resource_json"]
+                    == generated_provenance_payload
+                    and existing_provenance["patient_id"] == patient_id
+                    and existing_audit is not None
+                    and existing_audit["patient_id"] == patient_id
+                    and existing_audit["entity_type"] == audit_event.entity_type
+                    and existing_audit["entity_id"] == audit_event.entity_id
+                    and existing_audit["event_type"] == audit_event.event_type
+                    and existing_audit["actor_type"] == audit_event.actor_type
+                    and _json(json.loads(existing_audit["details_json"]))
+                    == audit_payload
+                    and existing_audit["created_at"] == audit_event.created_at
+                )
+                if exact:
+                    return False
+                raise ValueError("M5-C brief has a conflicting partial replay")
+
+            current_summary = connection.execute(
+                """
+                SELECT record_json FROM layer4_contract_records
+                WHERE record_type='summary_draft' AND record_id=? AND is_current=1
+                """,
+                (summary.summary_id,),
+            ).fetchone()
+            expected_summary_json = (
+                _json(expected_current_summary.model_dump(mode="json"))
+                if expected_current_summary is not None
+                else None
+            )
+            if (current_summary is None) != (expected_summary_json is None) or (
+                current_summary is not None
+                and current_summary["record_json"] != expected_summary_json
+            ):
+                raise ValueError("M5-C Summary changed; refresh and retry")
+
+            self._require_current_fhir_source(
+                connection, task, patient_id=patient_id
+            )
+            self._require_current_fhir_source(
+                connection, communication, patient_id=patient_id
+            )
+            qr_row = connection.execute(
+                """
+                SELECT resource_json, patient_id FROM fhir_questionnaire_responses
+                WHERE resource_id=?
+                """,
+                (response["id"],),
+            ).fetchone()
+            if (
+                qr_row is None
+                or qr_row["patient_id"] != patient_id
+                or _json(json.loads(qr_row["resource_json"])) != _json(response)
+            ):
+                raise ValueError("M5-C QuestionnaireResponse changed")
+            for observation in observations:
+                row = connection.execute(
+                    """
+                    SELECT resource_json, patient_id FROM fhir_observations
+                    WHERE observation_id=?
+                    """,
+                    (observation["id"],),
+                ).fetchone()
+                if (
+                    row is None
+                    or row["patient_id"] != patient_id
+                    or _json(json.loads(row["resource_json"])) != _json(observation)
+                ):
+                    raise ValueError("M5-C Observation changed")
+            message_row = connection.execute(
+                "SELECT * FROM followup_messages WHERE message_id=?",
+                (expected_message.message_id,),
+            ).fetchone()
+            if message_row is None or any(
+                message_row[field] != value
+                for field, value in expected_message.model_dump(mode="json").items()
+            ):
+                raise ValueError("M5-C patient message changed")
+            for provenance in provenances:
+                row = connection.execute(
+                    """
+                    SELECT resource_json, patient_id FROM layer4_fhir_resources
+                    WHERE resource_type='Provenance' AND resource_id=? AND version_id=?
+                    """,
+                    (provenance["id"], provenance["meta"]["versionId"]),
+                ).fetchone()
+                if (
+                    row is None
+                    or row["patient_id"] != patient_id
+                    or row["resource_json"] != _json(provenance)
+                ):
+                    raise ValueError("M5-C Provenance changed")
+            for expected_audit in expected_audits:
+                row = connection.execute(
+                    "SELECT * FROM audit_events WHERE event_id=?",
+                    (expected_audit.event_id,),
+                ).fetchone()
+                if (
+                    row is None
+                    or row["patient_id"] != patient_id
+                    or row["entity_type"] != expected_audit.entity_type
+                    or row["entity_id"] != expected_audit.entity_id
+                    or row["event_type"] != expected_audit.event_type
+                    or row["actor_type"] != expected_audit.actor_type
+                    or _json(json.loads(row["details_json"]))
+                    != _json(expected_audit.details_json)
+                    or row["created_at"] != expected_audit.created_at
+                ):
+                    raise ValueError("M5-C audit evidence changed")
+
+            meta = generated_provenance["meta"]
+            connection.execute(
+                """
+                UPDATE layer4_fhir_resources SET is_current=0
+                WHERE resource_type='Provenance' AND resource_id=? AND is_current=1
+                """,
+                (generated_provenance["id"],),
+            )
+            connection.execute(
+                """
+                INSERT INTO layer4_fhir_resources (
+                    resource_type, resource_id, version_id, patient_id, status,
+                    clinical_time, resource_json, is_current, created_at, updated_at
+                ) VALUES ('Provenance', ?, ?, ?, NULL, ?, ?, 1, ?, ?)
+                """,
+                (
+                    generated_provenance["id"],
+                    meta["versionId"],
+                    patient_id,
+                    _fhir_clinical_time(generated_provenance),
+                    generated_provenance_payload,
+                    meta["lastUpdated"],
+                    meta["lastUpdated"],
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE layer4_contract_records SET is_current=0
+                WHERE record_type='summary_draft' AND record_id=? AND is_current=1
+                """,
+                (summary.summary_id,),
+            )
+            connection.execute(
+                """
+                INSERT INTO layer4_contract_records (
+                    record_type, record_id, record_version, patient_id,
+                    pathway_code, status, effective_time, record_json,
+                    is_current, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    summary_identity[0],
+                    summary_identity[1],
+                    summary_identity[2],
+                    summary_identity[3],
+                    summary_identity[4],
+                    summary_identity[5],
+                    summary_identity[6],
+                    summary_payload,
+                    summary_identity[7],
+                    summary_identity[7],
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO audit_events (
+                    event_id, patient_id, entity_type, entity_id, event_type,
+                    actor_type, details_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    audit_event.event_id,
+                    audit_event.patient_id,
+                    audit_event.entity_type,
+                    audit_event.entity_id,
+                    audit_event.event_type,
+                    audit_event.actor_type,
+                    audit_payload,
+                    audit_event.created_at,
+                ),
+            )
+            self._manual_review_brief_fault(summary.version)
+        return True
+
+    @staticmethod
+    def _require_current_fhir_source(connection, resource, *, patient_id: str) -> None:
+        row = connection.execute(
+            """
+            SELECT resource_json, patient_id FROM layer4_fhir_resources
+            WHERE resource_type=? AND resource_id=? AND is_current=1
+            """,
+            (resource["resourceType"], resource["id"]),
+        ).fetchone()
+        if (
+            row is None
+            or row["patient_id"] != patient_id
+            or row["resource_json"] != _json(resource)
+        ):
+            raise ValueError("M5-C source changed; refresh and retry")
+
+    def _manual_review_brief_fault(self, version: str) -> None:
+        """Test seam proving rollback after every M5-C write."""
 
         return None
 

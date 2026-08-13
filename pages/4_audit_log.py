@@ -19,6 +19,7 @@ STAGES = (
     ("manual_review_task_created", "人工复核任务已创建"),
     ("manual_review_outcome_recorded", "人工复核结果已记录"),
     ("manual_review_communication_approved", "沟通草稿已人工批准"),
+    ("manual_review_brief_generated", "人工复核简报已生成"),
     ("alert_created", "任务已创建"),
     ("nurse_alert_action", "护士已处理"),
     ("summary_generated", "简报已生成"),
@@ -89,6 +90,12 @@ def _event_detail(event) -> str:
             f"生成 {details.get('period_start', '—')} 至 "
             f"{details.get('period_end', '—')} 的证据简报。"
         )
+    if event.event_type == "manual_review_brief_generated":
+        return (
+            f"从不可变来源版本生成确定性人工复核简报 v{details.get('summary_version', '—')}；"
+            f"沟通准备度为 {details.get('communication_readiness', '—')}，"
+            "临床评估保持 not_assessed。"
+        )
     if event.event_type == "doctor_reviewed_summary":
         return "医生已审阅复诊前简报；系统未写入 EMR。"
     if event.event_type == "demo_reset":
@@ -120,6 +127,7 @@ manual_review_stages = (
     ("manual_review_task_started", "开始复核"),
     ("manual_review_outcome_recorded", "结果与草稿"),
     ("manual_review_communication_approved", "人工批准"),
+    ("manual_review_brief_generated", "医生简报"),
 )
 st.markdown("## 本次人工复核链路")
 for row_start in range(0, len(manual_review_stages), 4):

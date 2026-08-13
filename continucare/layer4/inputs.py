@@ -14,11 +14,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from continucare.care_agent.release import LAYER3_RELEASE
 from continucare.db import utc_now_iso
 from continucare.fhir.r4 import validate_r4_resource
-from continucare.models import AuditEvent, Observation
+from continucare.models import AuditEvent, FollowUpMessage, Observation
 from continucare.layer4.manual_reviews import admit_final_patient_report
 
 
 class Layer4ReadStore(Protocol):
+    def get_message(self, message_id: str) -> FollowUpMessage | None: ...
+
     def list_completed_questionnaire_responses(
         self, patient_id: str
     ) -> list[dict[str, Any]]: ...

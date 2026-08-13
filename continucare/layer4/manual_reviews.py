@@ -18,6 +18,10 @@ COMMUNICATION_READINESS_EXTENSION_URL = (
 EVIDENCE_DIGEST_EXTENSION_URL = "urn:continucare:evidence-digest"
 PENDING_APPROVAL = "pending-approval"
 READY_TO_SEND = "ready-to-send"
+MANUAL_REVIEW_OUTCOME_LABELS = {
+    "evidence_consistent": "已核对原话、确认结果与最终证据链，记录一致",
+    "clarification_needed": "已核对原话、确认结果与最终证据链，需要后续补充说明",
+}
 
 # M5-B deliberately has no sender.  A future slice must change this flag and
 # still pass is_send_eligible before it can introduce any delivery adapter.

@@ -61,6 +61,11 @@ from continucare.layer4.manual_reviews import (
     communication_readiness,
     is_send_eligible,
 )
+from continucare.layer4.manual_review_briefs import (
+    BRIEF_SUMMARY_KIND,
+    ManualReviewBriefService,
+    ManualReviewBriefSnapshot,
+)
 from continucare.layer4.memory import ClinicalMemoryService
 from continucare.layer4.repository import Layer4Repository
 from continucare.layer4.rules import ApprovedRuleEngine
@@ -106,6 +111,9 @@ __all__ = [
     "Layer4InputSnapshot",
     "Layer4Repository",
     "Layer4SummaryDraft",
+    "BRIEF_SUMMARY_KIND",
+    "ManualReviewBriefService",
+    "ManualReviewBriefSnapshot",
     "ManualReviewQueue",
     "Layer4SQLiteStore",
     "MemoryEvent",
