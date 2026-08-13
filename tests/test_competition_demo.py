@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
@@ -12,12 +14,17 @@ from continucare.care_agent.model_api import SemanticModelConfig, UnconfiguredMo
 from continucare.care_engine import CareEngine
 from continucare.db import connect, reset_demo
 from continucare.demo_data import DEMO_PATIENT_ID
-from continucare.layer4 import Layer4SQLiteStore, ManualReviewBriefService
+from continucare.layer4 import (
+    Layer4SQLiteStore,
+    ManualReviewBriefService,
+    TaskWorkflowService,
+)
 from continucare.layer4.manual_reviews import SEND_ENABLED
 from continucare.pathways import load_builtin_pathways
 from continucare.services import competition_demo
 from continucare.services.competition_demo import (
     CompetitionDemoConflict,
+    CompetitionDemoProgress,
     CompetitionDemoStage,
     demo_write_guard,
     read_competition_demo,
@@ -25,6 +32,7 @@ from continucare.services.competition_demo import (
 )
 from continucare.services.confirmed_review import ConfirmedReviewService
 from continucare.services.manual_review_workflow import ManualReviewWorkflowService
+from continucare.ui import COMPETITION_STEP_LABELS, render_competition_progress
 
 
 def _after(resource, seconds: int = 1) -> str:
@@ -97,6 +105,124 @@ def _briefs(store, repository):
 
 def _file_hash(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _candidate_ids(db_path):
+    progress, store, _, _, _ = _services(db_path)
+    result = store.get_agent_run(progress.run_id).output_json
+    return [item["candidate_id"] for item in result["candidates"]]
+
+
+def _add_second_candidate(db_path):
+    with connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT run_id, output_json FROM agent_runs ORDER BY completed_at DESC LIMIT 1"
+        ).fetchone()
+        output = json.loads(row["output_json"])
+        second = json.loads(json.dumps(output["candidates"][0]))
+        second["candidate_id"] = f"{second['candidate_id']}-second"
+        second["patient_message"] = "我还整理了另一项合成候选，仍须患者确认。"
+        output["candidates"].append(second)
+        connection.execute(
+            "UPDATE agent_runs SET output_json=? WHERE run_id=?",
+            (json.dumps(output, ensure_ascii=False), row["run_id"]),
+        )
+    return [item["candidate_id"] for item in output["candidates"]]
+
+
+def _persist_candidate_decision(db_path, candidate_id, decision):
+    with connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT run_id, session_id, completed_at FROM agent_runs "
+            "ORDER BY completed_at DESC LIMIT 1"
+        ).fetchone()
+        connection.execute(
+            """
+            INSERT INTO conversation_action_resolutions (
+                action_id, source_run_id, session_id, decision, resolved_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                candidate_id,
+                row["run_id"],
+                row["session_id"],
+                decision,
+                row["completed_at"],
+            ),
+        )
+
+
+def _clinical_resource_counts(db_path):
+    with connect(db_path) as connection:
+        return {
+            "QuestionnaireResponse": connection.execute(
+                "SELECT COUNT(*) FROM fhir_questionnaire_responses"
+            ).fetchone()[0],
+            "Observation": connection.execute(
+                "SELECT COUNT(*) FROM fhir_observations"
+            ).fetchone()[0],
+            "Task": connection.execute(
+                "SELECT COUNT(*) FROM layer4_fhir_resources "
+                "WHERE resource_type='Task'"
+            ).fetchone()[0],
+            "Communication": connection.execute(
+                "SELECT COUNT(*) FROM layer4_fhir_resources "
+                "WHERE resource_type='Communication'"
+            ).fetchone()[0],
+            "Summary": connection.execute(
+                "SELECT COUNT(*) FROM layer4_contract_records "
+                "WHERE record_type='summary_draft'"
+            ).fetchone()[0],
+            "Alert": connection.execute(
+                "SELECT COUNT(*) FROM alerts"
+            ).fetchone()[0],
+        }
+
+
+def _database_snapshot(db_path):
+    stat = db_path.stat()
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        tables = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            ).fetchall()
+        ]
+        row_counts = tuple(
+            (table, connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+            for table in tables
+        )
+    return (
+        _file_hash(db_path),
+        stat.st_size,
+        stat.st_mtime_ns,
+        row_counts,
+    )
+
+
+def _assert_projection_is_read_only(db_path):
+    before = _database_snapshot(db_path)
+    expected = read_competition_demo(db_path)
+    assert all(read_competition_demo(db_path) == expected for _ in range(3))
+    assert _database_snapshot(db_path) == before
+    assert not any(
+        (db_path.parent / f"{db_path.name}{suffix}").exists()
+        for suffix in ("-journal", "-wal", "-shm")
+    )
+
+
+def _assert_terminal_navigation(progress):
+    assert progress.is_terminal
+    assert progress.terminal_reason
+    assert progress.next_page == "pages/4_audit_log.py"
+    assert progress.next_label == "查看终态审计"
+    assert progress.terminal_reason in progress.next_help
+    assert "明确重新开始" in progress.next_help
+    assert "患者端" not in progress.next_label
+    assert "护士端" not in progress.next_label
+    assert "医生" not in progress.next_label
 
 
 def test_missing_story_read_is_read_only_and_does_not_create_database(tmp_path):
@@ -175,6 +301,238 @@ def test_concurrent_starts_leave_one_complete_candidate_generation(tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM fhir_observations").fetchone()[0] == 0
 
 
+def test_all_candidates_rejected_is_a_read_only_terminal_without_clinical_resources(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "candidate-rejected.db"
+    start_competition_demo(db_path)
+    progress, _, confirmed, _, _ = _services(db_path)
+    confirmed.care_agent.reject_candidates(progress.run_id, _candidate_ids(db_path))
+    monkeypatch.setattr(
+        "socket.create_connection",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("projection attempted an external connection")
+        ),
+    )
+
+    rejected = read_competition_demo(db_path)
+
+    assert rejected.stage == CompetitionDemoStage.CANDIDATE_REJECTED
+    _assert_terminal_navigation(rejected)
+    assert "明确拒绝" in rejected.terminal_reason
+    assert _clinical_resource_counts(db_path) == {
+        "QuestionnaireResponse": 0,
+        "Observation": 0,
+        "Task": 0,
+        "Communication": 0,
+        "Summary": 0,
+        "Alert": 0,
+    }
+    _assert_projection_is_read_only(db_path)
+
+
+def test_partial_rejected_candidates_keep_the_remaining_decision_available(tmp_path):
+    db_path = tmp_path / "candidate-partial.db"
+    start_competition_demo(db_path)
+    first, second = _add_second_candidate(db_path)
+    _persist_candidate_decision(db_path, first, "rejected")
+
+    progress = read_competition_demo(db_path)
+
+    assert progress.stage == CompetitionDemoStage.CANDIDATE_READY
+    assert not progress.is_terminal
+    assert progress.terminal_reason is None
+    assert progress.candidate_decisions == {first: "rejected"}
+    assert second not in progress.candidate_decisions
+    assert progress.next_page == "pages/1_patient_followup.py"
+    assert _clinical_resource_counts(db_path) == {
+        "QuestionnaireResponse": 0,
+        "Observation": 0,
+        "Task": 0,
+        "Communication": 0,
+        "Summary": 0,
+        "Alert": 0,
+    }
+
+
+def test_rejected_and_unsure_candidates_are_non_terminal_and_can_continue(tmp_path):
+    db_path = tmp_path / "candidate-unsure-mixed.db"
+    start_competition_demo(db_path)
+    rejected_id, unsure_id = _add_second_candidate(db_path)
+    _persist_candidate_decision(db_path, rejected_id, "rejected")
+    _persist_candidate_decision(db_path, unsure_id, "unsure")
+
+    progress = read_competition_demo(db_path)
+
+    assert progress.stage == CompetitionDemoStage.CANDIDATE_UNSURE
+    assert not progress.is_terminal
+    assert progress.terminal_reason is None
+    assert progress.next_page == "pages/1_patient_followup.py"
+    assert "接受或拒绝" in progress.next_label
+    assert _clinical_resource_counts(db_path) == {
+        "QuestionnaireResponse": 0,
+        "Observation": 0,
+        "Task": 0,
+        "Communication": 0,
+        "Summary": 0,
+        "Alert": 0,
+    }
+
+
+def test_unsure_candidate_can_later_be_accepted_without_duplicate_resources(tmp_path):
+    db_path = tmp_path / "candidate-unsure-accepted.db"
+    start_competition_demo(db_path)
+    progress, _, confirmed, _, _ = _services(db_path)
+    candidate_ids = _candidate_ids(db_path)
+    confirmed.care_agent.mark_candidates_unsure(progress.run_id, candidate_ids)
+    unsure = read_competition_demo(db_path)
+    assert unsure.stage == CompetitionDemoStage.CANDIDATE_UNSURE
+    assert not unsure.is_terminal
+
+    confirmed.accept_all(progress.run_id, candidate_ids)
+    accepted = read_competition_demo(db_path)
+
+    assert accepted.stage == CompetitionDemoStage.TASK_REQUESTED
+    assert not accepted.is_terminal
+    assert accepted.terminal_reason is None
+    assert accepted.candidate_decisions == {candidate_ids[0]: "accepted"}
+    assert accepted.questionnaire_response_count == 1
+    assert accepted.observation_count == 1
+    assert accepted.manual_task_count == 1
+    counts = _clinical_resource_counts(db_path)
+    assert counts["QuestionnaireResponse"] == 1
+    assert counts["Observation"] == 1
+    assert counts["Task"] == 1
+    assert counts["Communication"] == 0
+    assert counts["Summary"] == 0
+    _assert_projection_is_read_only(db_path)
+
+
+def test_unsure_candidate_can_later_be_rejected_without_clinical_resources(tmp_path):
+    db_path = tmp_path / "candidate-unsure-rejected.db"
+    start_competition_demo(db_path)
+    progress, _, confirmed, _, _ = _services(db_path)
+    candidate_ids = _candidate_ids(db_path)
+    confirmed.care_agent.mark_candidates_unsure(progress.run_id, candidate_ids)
+    confirmed.care_agent.reject_candidates(progress.run_id, candidate_ids)
+
+    rejected = read_competition_demo(db_path)
+
+    assert rejected.stage == CompetitionDemoStage.CANDIDATE_REJECTED
+    assert rejected.candidate_decisions == {candidate_ids[0]: "rejected"}
+    _assert_terminal_navigation(rejected)
+    assert _clinical_resource_counts(db_path) == {
+        "QuestionnaireResponse": 0,
+        "Observation": 0,
+        "Task": 0,
+        "Communication": 0,
+        "Summary": 0,
+        "Alert": 0,
+    }
+    _assert_projection_is_read_only(db_path)
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_stage", "reason_fragment"),
+    [
+        ("reject", CompetitionDemoStage.TASK_REJECTED, "明确拒绝"),
+        ("cancel", CompetitionDemoStage.TASK_CANCELLED, "明确取消"),
+    ],
+)
+def test_manual_task_rejected_or_cancelled_has_terminal_priority(
+    action, expected_stage, reason_fragment, tmp_path
+):
+    db_path = tmp_path / f"task-{action}.db"
+    start_competition_demo(db_path)
+    _, _, workflow, confirmed = _confirm(db_path)
+    if action == "reject":
+        received = workflow.acknowledge(
+            patient_id=DEMO_PATIENT_ID,
+            task_id=confirmed.task["id"],
+            note="已收到合成任务。",
+            occurred_at=_after(confirmed.task),
+        )
+        workflow.reject(
+            patient_id=DEMO_PATIENT_ID,
+            task_id=confirmed.task["id"],
+            note="明确拒绝合成人工复核任务。",
+            occurred_at=_after(received.task),
+        )
+    else:
+        workflow.cancel(
+            patient_id=DEMO_PATIENT_ID,
+            task_id=confirmed.task["id"],
+            note="明确取消合成人工复核任务。",
+            occurred_at=_after(confirmed.task),
+        )
+
+    terminal = read_competition_demo(db_path)
+
+    assert terminal.stage == expected_stage
+    assert reason_fragment in terminal.terminal_reason
+    _assert_terminal_navigation(terminal)
+    assert terminal.milestones["patient_confirmed"]
+    assert terminal.milestones["task_requested"]
+    assert terminal.communication_count == 0
+    assert terminal.manual_brief_count == 0
+    assert _clinical_resource_counts(db_path)["Communication"] == 0
+    assert _clinical_resource_counts(db_path)["Summary"] == 0
+    _assert_projection_is_read_only(db_path)
+
+
+@pytest.mark.parametrize(
+    ("task_status", "expected_stage", "reason_fragment"),
+    [
+        ("failed", CompetitionDemoStage.TASK_FAILED, "fail-closed"),
+        (
+            "entered-in-error",
+            CompetitionDemoStage.TASK_ENTERED_IN_ERROR,
+            "fail-closed",
+        ),
+    ],
+)
+def test_manual_task_error_statuses_fail_closed_without_success_actions(
+    task_status, expected_stage, reason_fragment, tmp_path
+):
+    db_path = tmp_path / f"task-{task_status}.db"
+    start_competition_demo(db_path)
+    _, repository, workflow, confirmed = _confirm(db_path)
+    task = confirmed.task
+    if task_status == "failed":
+        received = workflow.acknowledge(
+            patient_id=DEMO_PATIENT_ID,
+            task_id=task["id"],
+            note="已收到合成任务。",
+            occurred_at=_after(task),
+        )
+        started = workflow.start(
+            patient_id=DEMO_PATIENT_ID,
+            task_id=task["id"],
+            note="接受并开始核对合成证据。",
+            occurred_at=_after(received.task),
+        )
+        task = started.task
+    TaskWorkflowService(repository).transition(
+        patient_id=DEMO_PATIENT_ID,
+        task_id=task["id"],
+        to_status=task_status,
+        actor_reference="PractitionerRole/synthetic-data-steward",
+        note=f"将合成任务标记为 {task_status}。",
+        transitioned_at=_after(task),
+    )
+
+    terminal = read_competition_demo(db_path)
+
+    assert terminal.stage == expected_stage
+    assert reason_fragment in terminal.terminal_reason
+    _assert_terminal_navigation(terminal)
+    assert "成功" not in terminal.next_label
+    assert "继续" not in terminal.next_label
+    assert terminal.communication_count == 0
+    assert terminal.manual_brief_count == 0
+    _assert_projection_is_read_only(db_path)
+
+
 def test_recommended_click_flow_is_derived_from_persisted_facts(tmp_path):
     db_path = tmp_path / "full-flow.db"
     start = start_competition_demo(db_path)
@@ -244,12 +602,17 @@ def test_recommended_click_flow_is_derived_from_persisted_facts(tmp_path):
     )
     complete = read_competition_demo(db_path)
     assert complete.stage == CompetitionDemoStage.STORY_COMPLETE
+    _assert_terminal_navigation(complete)
+    assert "9 项持久化事实已完成" in complete.terminal_reason
     assert complete.summary_version == final_summary.version
     assert complete.milestones["doctor_brief_ready"]
     assert complete.milestones["story_complete"]
     assert complete.alert_count == 0
     assert complete.approved_clinical_rule_count == 0
     assert complete.communication_readiness == "ready-to-send"
+    assert sum(
+        bool(complete.milestones[step]) for step, _ in COMPETITION_STEP_LABELS
+    ) == len(COMPETITION_STEP_LABELS) == 9
 
 
 def test_legal_approval_before_first_brief_does_not_invent_pending_brief(tmp_path):
@@ -302,6 +665,7 @@ def test_knowledge_availability_is_not_a_clinical_completion_gate(
 
     progress = read_competition_demo(db_path)
     assert progress.stage == CompetitionDemoStage.STORY_COMPLETE
+    assert progress.is_terminal
     assert not progress.knowledge_available
 
 
@@ -335,3 +699,98 @@ def test_patient_page_no_longer_creates_a_session_on_load_and_knowledge_stays_is
     assert "continucare.services.competition_demo" not in knowledge_source
     assert "continucare.db" not in knowledge_source
     assert "patient_id" not in knowledge_source
+
+
+class _RenderContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class _ProgressRenderer(_RenderContext):
+    def __init__(self, *, url=None):
+        self.messages = []
+        self.links = []
+        self.context = type("Context", (), {"url": url})()
+        self.stopped = False
+
+    def markdown(self, value, **kwargs):
+        self.messages.append(str(value))
+
+    def progress(self, value, **kwargs):
+        self.messages.append(str(kwargs.get("text", value)))
+
+    def columns(self, count):
+        return [_RenderContext() for _ in range(count)]
+
+    def container(self, **kwargs):
+        return _RenderContext()
+
+    def page_link(self, page, *, label, **kwargs):
+        self.links.append((page, label))
+
+    def success(self, value):
+        self.messages.append(str(value))
+
+    def info(self, value):
+        self.messages.append(str(value))
+
+    def warning(self, value):
+        self.messages.append(str(value))
+
+    def error(self, value):
+        self.messages.append(str(value))
+
+    def caption(self, value):
+        self.messages.append(str(value))
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_shared_progress_renderer_and_home_use_terminal_contract(monkeypatch):
+    reason = "所有候选均已由患者明确拒绝；未创建临床资源或护士任务。"
+    progress = CompetitionDemoProgress(
+        stage=CompetitionDemoStage.CANDIDATE_REJECTED,
+        generation="session:run",
+        is_terminal=True,
+        terminal_reason=reason,
+        next_page="pages/4_audit_log.py",
+        next_label="查看终态审计",
+        next_help=f"{reason} 如需新故事，请明确重新开始；系统不会自动重启。",
+    )
+    renderer = _ProgressRenderer()
+    monkeypatch.setattr("continucare.ui.render_integration_status", lambda st: None)
+
+    render_competition_progress(renderer, progress)
+
+    rendered = "\n".join(renderer.messages)
+    assert reason in rendered
+    assert "推荐下一步" not in rendered
+    assert renderer.links == [
+        ("pages/4_audit_log.py", "查看终态审计 →"),
+        ("app.py", "返回首页（不会自动重新开始） →"),
+    ]
+    assert renderer.stopped
+    home_renderer = _ProgressRenderer(url="http://localhost:8501/")
+    render_competition_progress(home_renderer, progress)
+    assert not home_renderer.stopped
+    doctor_renderer = _ProgressRenderer(url="http://localhost:8501/doctor_summary")
+    render_competition_progress(doctor_renderer, progress)
+    assert doctor_renderer.stopped
+    audit_renderer = _ProgressRenderer(url="http://localhost:8501/audit_log")
+    render_competition_progress(audit_renderer, progress)
+    assert not audit_renderer.stopped
+    prefixed_audit_renderer = _ProgressRenderer(
+        url="https://example.test/continucare/audit_log"
+    )
+    render_competition_progress(prefixed_audit_renderer, progress)
+    assert not prefixed_audit_renderer.stopped
+    app_source = (__import__("pathlib").Path(__file__).parents[1] / "app.py").read_text(
+        "utf-8"
+    )
+    assert "if progress.is_terminal:" in app_source
+    assert "st.write(progress.terminal_reason)" in app_source
+    assert 'st.page_link("pages/4_audit_log.py", label="查看终态证据链 →"' in app_source

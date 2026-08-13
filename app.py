@@ -58,6 +58,8 @@ with st.container(border=True):
     with status:
         if progress.stage == CompetitionDemoStage.STORY_COMPLETE:
             st.success("故事已完成")
+        elif progress.is_terminal:
+            st.warning("故事已终止")
         elif progress.generation:
             st.info("故事进行中")
         else:
@@ -111,65 +113,71 @@ if progress.generation:
         "Communication 始终停在 preparation，ready-to-send 也不等于 sent。"
     )
 
-st.markdown("## 按角色查看同一故事")
-patient, nurse, doctor, audit = st.columns(4)
-with patient:
-    st.markdown("### 患者")
-    st.write("主动确认候选，再查看 completed QR、final Observation 与 derivedFrom。")
-    st.page_link("pages/1_patient_followup.py", label="患者随访 →", icon="💬")
-with nurse:
-    st.markdown("### 护士")
-    st.write("显式接收、开始、记录受控结果，并人工批准中性草稿。")
-    st.page_link("pages/2_nurse_risk_center.py", label="护士任务 →", icon="🧭")
-with doctor:
-    st.markdown("### 医生")
-    st.write("只在明确动作后生成或刷新确定性证据简报。")
-    st.page_link("pages/3_doctor_summary.py", label="医生简报 →", icon="📋")
-with audit:
-    st.markdown("### 审计")
-    st.write("区分临床事实证据与只证明流程发生的 AuditEvent。")
-    st.page_link("pages/4_audit_log.py", label="证据链 →", icon="🧾")
+if progress.is_terminal:
+    st.markdown("## 终态可用入口")
+    st.write(progress.terminal_reason)
+    st.page_link("pages/4_audit_log.py", label="查看终态证据链 →", icon="🧾")
+    st.caption("如需新故事，只能使用上方已明确确认的重新开始按钮；页面不会自动重启或写入资源。")
+else:
+    st.markdown("## 按角色查看同一故事")
+    patient, nurse, doctor, audit = st.columns(4)
+    with patient:
+        st.markdown("### 患者")
+        st.write("主动确认候选，再查看 completed QR、final Observation 与 derivedFrom。")
+        st.page_link("pages/1_patient_followup.py", label="患者随访 →", icon="💬")
+    with nurse:
+        st.markdown("### 护士")
+        st.write("显式接收、开始、记录受控结果，并人工批准中性草稿。")
+        st.page_link("pages/2_nurse_risk_center.py", label="护士任务 →", icon="🧭")
+    with doctor:
+        st.markdown("### 医生")
+        st.write("只在明确动作后生成或刷新确定性证据简报。")
+        st.page_link("pages/3_doctor_summary.py", label="医生简报 →", icon="📋")
+    with audit:
+        st.markdown("### 审计")
+        st.write("区分临床事实证据与只证明流程发生的 AuditEvent。")
+        st.page_link("pages/4_audit_log.py", label="证据链 →", icon="🧾")
 
-with st.container(border=True):
-    st.markdown("### 独立查看腹泻 Knowledge Evidence")
-    st.write("查看精确术语、Claim scope、supports / does_not_support、review 与 CoverageGap。")
-    st.caption(
-        "Knowledge 离线只读，不读取患者数据库，不授权 Observation、Task、Summary 或 ClinicalRule，"
-        "也不参与故事完成判定。"
-    )
-    if knowledge_available:
-        st.success("Knowledge CURRENT registry 可用 · review=not_assessed")
-    else:
-        st.warning("Knowledge CURRENT registry 暂不可用；不改变临床故事事实。")
-    st.page_link(
-        "pages/5_knowledge_evidence.py",
-        label="查看腹泻采集依据 →",
-        icon="📚",
-    )
+    with st.container(border=True):
+        st.markdown("### 独立查看腹泻 Knowledge Evidence")
+        st.write("查看精确术语、Claim scope、supports / does_not_support、review 与 CoverageGap。")
+        st.caption(
+            "Knowledge 离线只读，不读取患者数据库，不授权 Observation、Task、Summary 或 ClinicalRule，"
+            "也不参与故事完成判定。"
+        )
+        if knowledge_available:
+            st.success("Knowledge CURRENT registry 可用 · review=not_assessed")
+        else:
+            st.warning("Knowledge CURRENT registry 暂不可用；不改变临床故事事实。")
+        st.page_link(
+            "pages/5_knowledge_evidence.py",
+            label="查看腹泻采集依据 →",
+            icon="📚",
+        )
 
-with st.expander("其他技术演示（会替换当前本地合成故事）"):
-    st.warning("以下旧 fixture 与主比赛故事共用本地合成数据库，必须先勾选上方重置确认。")
-    columns = st.columns(3)
-    for column, (title, message_text) in zip(columns, SCENARIOS.items()):
-        with column:
-            st.markdown(f"**{title}**")
-            st.code(message_text, language=None)
-            if st.button(
-                f"明确重置并载入 {title}",
-                key=f"technical::{title}",
-                width="stretch",
-                disabled=not consent,
-            ):
-                try:
-                    load_technical_demo_atomically(settings.db_path, title)
-                except CompetitionDemoStartError as exc:
-                    st.error(str(exc))
-                else:
-                    clear_demo_session_state(st)
-                    st.session_state["competition::notice"] = (
-                        f"已载入旧技术 fixture：{title}。它不是 M5-D 完整比赛主线。"
-                    )
-                    st.rerun()
+    with st.expander("其他技术演示（会替换当前本地合成故事）"):
+        st.warning("以下旧 fixture 与主比赛故事共用本地合成数据库，必须先勾选上方重置确认。")
+        columns = st.columns(3)
+        for column, (title, message_text) in zip(columns, SCENARIOS.items()):
+            with column:
+                st.markdown(f"**{title}**")
+                st.code(message_text, language=None)
+                if st.button(
+                    f"明确重置并载入 {title}",
+                    key=f"technical::{title}",
+                    width="stretch",
+                    disabled=not consent,
+                ):
+                    try:
+                        load_technical_demo_atomically(settings.db_path, title)
+                    except CompetitionDemoStartError as exc:
+                        st.error(str(exc))
+                    else:
+                        clear_demo_session_state(st)
+                        st.session_state["competition::notice"] = (
+                            f"已载入旧技术 fixture：{title}。它不是 M5-D 完整比赛主线。"
+                        )
+                        st.rerun()
 
 with st.expander("能力边界与比赛诚实说明"):
     st.write("当前真实实现：本地 SQLite 持久化、FHIR R4 基础资源、人工门禁、版本化 Provenance 与审计。")

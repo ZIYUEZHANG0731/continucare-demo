@@ -38,10 +38,16 @@ from continucare.services.demo_scenarios import (
 class CompetitionDemoStage(StrEnum):
     NOT_STARTED = "not_started"
     CANDIDATE_READY = "candidate_ready"
+    CANDIDATE_UNSURE = "candidate_unsure"
+    CANDIDATE_REJECTED = "candidate_rejected"
     PATIENT_CONFIRMED = "patient_confirmed"
     TASK_REQUESTED = "task_requested"
     NURSE_RECEIVED = "nurse_received"
     NURSE_IN_PROGRESS = "nurse_in_progress"
+    TASK_REJECTED = "task_rejected"
+    TASK_CANCELLED = "task_cancelled"
+    TASK_FAILED = "task_failed"
+    TASK_ENTERED_IN_ERROR = "task_entered_in_error"
     COMMUNICATION_PENDING = "communication_pending"
     DOCTOR_BRIEF_PENDING = "doctor_brief_pending"
     COMMUNICATION_READY = "communication_ready"
@@ -84,6 +90,8 @@ class CompetitionDemoProgress(BaseModel):
     approved_clinical_rule_count: int = 0
     knowledge_available: bool = False
     knowledge_error: str | None = None
+    is_terminal: bool = False
+    terminal_reason: str | None = None
     next_page: str = "app.py"
     next_label: str = "开始完整比赛 Demo"
     next_help: str = "明确开始后，系统只准备未确认候选。"
@@ -334,16 +342,44 @@ def read_competition_demo(db_path: Path | str) -> CompetitionDemoProgress:
         and _summary_mentions(current_summary, communication)
     )
     task_status = task.get("status") if task else None
+    candidate_ids = {item.candidate_id for item in result.candidates}
+    candidate_resolution_values = {
+        candidate_id: decisions.get(candidate_id) for candidate_id in candidate_ids
+    }
+    has_pending_candidate = any(
+        decision is None for decision in candidate_resolution_values.values()
+    )
+    all_candidates_rejected = bool(candidate_ids) and all(
+        decision == "rejected" for decision in candidate_resolution_values.values()
+    )
+    has_unsure_candidate = any(
+        decision == "unsure" for decision in candidate_resolution_values.values()
+    )
+    candidate_stage = CompetitionDemoStage.CANDIDATE_READY
+    if all_candidates_rejected:
+        candidate_stage = CompetitionDemoStage.CANDIDATE_REJECTED
+    elif has_unsure_candidate and not has_pending_candidate:
+        candidate_stage = CompetitionDemoStage.CANDIDATE_UNSURE
+
     milestones = {item: False for item in MILESTONE_ORDER}
     milestones.update(
         {
             CompetitionDemoStage.CANDIDATE_READY.value: bool(result.candidates),
+            CompetitionDemoStage.CANDIDATE_UNSURE.value: candidate_stage
+            == CompetitionDemoStage.CANDIDATE_UNSURE,
+            CompetitionDemoStage.CANDIDATE_REJECTED.value: candidate_stage
+            == CompetitionDemoStage.CANDIDATE_REJECTED,
             CompetitionDemoStage.PATIENT_CONFIRMED.value: patient_confirmed,
             CompetitionDemoStage.TASK_REQUESTED.value: task is not None,
             CompetitionDemoStage.NURSE_RECEIVED.value: task_status
             in {"received", "accepted", "in-progress", "completed"},
             CompetitionDemoStage.NURSE_IN_PROGRESS.value: task_status
             in {"accepted", "in-progress", "completed"},
+            CompetitionDemoStage.TASK_REJECTED.value: task_status == "rejected",
+            CompetitionDemoStage.TASK_CANCELLED.value: task_status == "cancelled",
+            CompetitionDemoStage.TASK_FAILED.value: task_status == "failed",
+            CompetitionDemoStage.TASK_ENTERED_IN_ERROR.value: task_status
+            == "entered-in-error",
             CompetitionDemoStage.COMMUNICATION_PENDING.value: has_pending_communication,
             CompetitionDemoStage.DOCTOR_BRIEF_PENDING.value: current_pending_brief
             or any(
@@ -360,11 +396,34 @@ def read_competition_demo(db_path: Path | str) -> CompetitionDemoProgress:
         }
     )
 
-    stage = CompetitionDemoStage.CANDIDATE_READY
+    stage = candidate_stage
     next_page = "pages/1_patient_followup.py"
     next_label = "前往患者端明确确认"
     next_help = "患者确认前不会创建 QR、Observation 或护士任务。"
-    if task is not None and task_status == "requested":
+    is_terminal = False
+    terminal_reason = None
+    terminal_tasks = {
+        "rejected": (
+            CompetitionDemoStage.TASK_REJECTED,
+            "护士已明确拒绝人工复核任务；流程已终止，未创建 Communication 或医生简报。",
+        ),
+        "cancelled": (
+            CompetitionDemoStage.TASK_CANCELLED,
+            "护士已明确取消人工复核任务；流程已终止，未创建 Communication 或医生简报。",
+        ),
+        "failed": (
+            CompetitionDemoStage.TASK_FAILED,
+            "人工复核任务以 failed 异常终止；流程已 fail-closed，未继续生成业务资源。",
+        ),
+        "entered-in-error": (
+            CompetitionDemoStage.TASK_ENTERED_IN_ERROR,
+            "人工复核任务已标记 entered-in-error；流程已 fail-closed，未继续生成业务资源。",
+        ),
+    }
+    if task_status in terminal_tasks:
+        stage, terminal_reason = terminal_tasks[task_status]
+        is_terminal = True
+    elif task is not None and task_status == "requested":
         stage = CompetitionDemoStage.TASK_REQUESTED
         next_page = "pages/2_nurse_risk_center.py"
         next_label = "前往护士端确认收到"
@@ -393,9 +452,11 @@ def read_competition_demo(db_path: Path | str) -> CompetitionDemoProgress:
     elif task_status == "completed" and readiness == READY_TO_SEND:
         if current_ready_brief:
             stage = CompetitionDemoStage.STORY_COMPLETE
-            next_page = "pages/5_knowledge_evidence.py"
-            next_label = "独立查看腹泻 Knowledge Evidence"
-            next_help = "Knowledge 只解释采集依据，不参与临床完成判定。"
+            is_terminal = True
+            terminal_reason = (
+                "合成 happy path 的 9 项持久化事实已完成；"
+                "这不代表临床结论，Communication 仍未发送。"
+            )
         else:
             stage = CompetitionDemoStage.COMMUNICATION_READY
             next_page = "pages/3_doctor_summary.py"
@@ -403,6 +464,23 @@ def read_competition_demo(db_path: Path | str) -> CompetitionDemoProgress:
             next_help = "当前来源已变化，旧简报保持不可变并显示陈旧。"
     elif patient_confirmed:
         stage = CompetitionDemoStage.PATIENT_CONFIRMED
+
+    if stage == CompetitionDemoStage.CANDIDATE_REJECTED:
+        is_terminal = True
+        terminal_reason = (
+            "所有候选均已由患者明确拒绝；未创建临床资源或护士任务。"
+        )
+    elif stage == CompetitionDemoStage.CANDIDATE_UNSURE:
+        next_label = "返回患者端明确接受或拒绝"
+        next_help = "暂不确定不是终态；患者仍可明确接受或拒绝现有候选。"
+
+    if is_terminal:
+        next_page = "pages/4_audit_log.py"
+        next_label = "查看终态审计"
+        next_help = (
+            f"{terminal_reason} 如需新故事，请返回首页勾选确认后明确重新开始；"
+            "系统不会自动重启。"
+        )
 
     generation = f"{run_row['session_id']}:{run_row['run_id']}"
     return CompetitionDemoProgress(
@@ -431,6 +509,8 @@ def read_competition_demo(db_path: Path | str) -> CompetitionDemoProgress:
         approved_clinical_rule_count=approved_rule_count,
         knowledge_available=knowledge_available,
         knowledge_error=knowledge_error,
+        is_terminal=is_terminal,
+        terminal_reason=terminal_reason,
         next_page=next_page,
         next_label=next_label,
         next_help=next_help,

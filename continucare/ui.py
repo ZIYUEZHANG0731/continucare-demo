@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+from urllib.parse import urlparse
 
 
 COMPETITION_STEP_LABELS = (
@@ -117,7 +118,26 @@ def render_competition_progress(st, progress, *, show_next: bool = True) -> None
         st.caption("Knowledge CURRENT registry：可用（独立只读，不参与临床进度判定）")
     elif progress.knowledge_error:
         st.warning(progress.knowledge_error)
-    if show_next and progress.generation:
+    if progress.is_terminal:
+        if progress.stage.value == "story_complete":
+            st.success(f"流程终态：{progress.terminal_reason}")
+        else:
+            st.warning(f"流程终态：{progress.terminal_reason}")
+    if show_next and progress.generation and progress.is_terminal:
+        with st.container(border=True):
+            st.markdown(f"**{progress.next_label}**")
+            st.caption(progress.next_help)
+            st.page_link(
+                progress.next_page,
+                label=f"{progress.next_label} →",
+                icon="🧾",
+            )
+            st.page_link(
+                "app.py",
+                label="返回首页（不会自动重新开始） →",
+                icon="↩️",
+            )
+    elif show_next and progress.generation:
         with st.container(border=True):
             st.markdown(f"**推荐下一步：{progress.next_label}**")
             st.caption(progress.next_help)
@@ -127,6 +147,13 @@ def render_competition_progress(st, progress, *, show_next: bool = True) -> None
                 icon="🧭",
             )
     render_integration_status(st)
+    if progress.is_terminal:
+        current_url = getattr(getattr(st, "context", None), "url", None)
+        current_path = urlparse(current_url).path.rstrip("/") if current_url else ""
+        is_home = bool(current_url) and current_path == ""
+        is_audit = bool(current_url) and current_path.endswith("/audit_log")
+        if not (is_home or is_audit):
+            st.stop()
 
 
 def render_integration_status(st) -> None:
