@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from continucare.agents.contracts import (
     CandidateIssue,
     CandidateIssueAction,
+    CandidateSource,
     ClarificationKind,
     ClarificationOption,
     ClarificationRequest,
@@ -231,6 +232,7 @@ class MiMoSemanticAdapter:
                 negated=item.negated,
                 patient_message=message,
                 template_id=template_id,
+                source_mode=CandidateSource.MIMO,
             )
             clarification_kind = self._clarification_kind(candidate)
             if clarification_kind is None:
@@ -265,6 +267,7 @@ class MiMoSemanticAdapter:
                     subject=mention.subject,
                     temporality=mention.temporality,
                     negated=mention.negated,
+                    source_mode=CandidateSource.MIMO,
                 )
             )
 

@@ -863,6 +863,7 @@ class CareAgentService:
                 f"（SNOMED CT {match.coding.code}），请确认这是您{time_label}情况。"
             ),
             template_id="confirm_terminology_match",
+            source_mode=mention.source_mode,
             origin=origin,
             terminology_match=match,
         )
@@ -998,7 +999,10 @@ class CareAgentService:
     ) -> AgentStageTrace:
         result = outcome.result
         config = self.agent.model_adapter.config
-        model_mode = result.mode == "model_api:xiaomi_mimo"
+        model_mode = result.mode in {
+            "model_api:xiaomi_mimo",
+            "model_api:feishu_aily_not_live_verified",
+        }
         return AgentStageTrace(
             stage="care_extraction",
             agent_name="care_agent",

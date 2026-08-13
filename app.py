@@ -174,4 +174,8 @@ with st.expander("其他技术演示（会替换当前本地合成故事）"):
 with st.expander("能力边界与比赛诚实说明"):
     st.write("当前真实实现：本地 SQLite 持久化、FHIR R4 基础资源、人工门禁、版本化 Provenance 与审计。")
     st.write("当前 Mock / 合成：患者与医护身份、Layer 3 本地语义整理、所有演示数据。")
-    st.write("尚未实现：医院集成、飞书/Aily、真实模型、真实患者、临床审批、自动风险分级和实际消息发送。")
+    st.write(
+        "当前合同测试能力：可选飞书 Bot、Aily 与 Bitable 适配器已用 FakeTransport 验证；"
+        "默认仍为 Mock/disabled，未做真实租户验证，也未发生任何外部调用。"
+    )
+    st.write("尚未实现：医院集成、真实患者、临床审批、自动风险分级和实际消息发送。")

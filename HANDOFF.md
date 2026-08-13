@@ -1,27 +1,29 @@
 # HANDOFF
 
-> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。本文记录的是 2026-08-13 M5-D 已完成实现、尚未暂存或提交时的真实状态；不要把它当成长期路线图。后文 M5-A/B/C/K 小节保留历史实现细节；若状态描述冲突，以本页最前面的 M5-D 当前交接为准。
+> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。本文最前面记录 2026-08-13 M5-E 当前交接；后文 M5-A/B/C/D/K 小节保留历史实现细节。若状态描述冲突，以本页最前面的 M5-E 交接为准。
 
-## 0. M5-D 当前交接（完成，未暂存/未提交）
+## 0. M5-E 当前交接（已完成并在本次切片提交中收口）
 
 - 分支：`codex/docs-collaboration-init`；
-- HEAD / upstream：`35ba612c5d04eed08ddfd4a7cb0fbdca30be0484`；ahead/behind=`0/0`；
-- M5-K 已以 `35ba612 feat: add symptom-centered knowledge evidence index` 提交并推送；
-- M5-D 已完成但所有本轮改动仍未暂存、未提交、未推送；暂存区为空；
-- 没有开始 M5-E，没有真实外部 API、真实模型、真实患者、飞书发送、EMR 写回或生产权限操作。
+- 本次 M5-E 提交前 HEAD / upstream 基线：`389f5361e62ab6ef3b0c4b92e1d06e204567ebb4`；ahead/behind=`0/0`；
+- M5-D 已以 `389f536 feat: add guided competition demo flow` 提交并推送；
+- M5-E 已完成；代码、测试、文档与本文件在本次切片提交中一并收口，不 push；
+- 本轮没有使用真实 Token，没有真实外部 API、Aily 推理、飞书发送、Bitable 写入、真实患者、EMR 写回或生产权限操作。
 
-M5-D 把既有 M5-A/B/C/K 串成固定合成患者的一键比赛主线：显式同意后原子准备未确认候选，随后依次由患者确认、护士接收/处理/批准、医生生成 pending 并刷新 ready 简报；首页、患者、护士、医生、审计页共享从持久化事实派生的 9 项进度。Knowledge 仍是独立离线只读页面，不参与 `story_complete`。
+M5-E 新增统一 `AdapterFactory`/status、安全配置状态机、内存 tenant token cache、固定官方 host 的标准库 HTTPS transport、脱敏 `FakeTransport`、飞书 Bot 通知合同、Aily Layer 3 候选合同和 write-only Bitable 合成投影合同。默认飞书/Aily 为 Mock、Bitable disabled；无 Token 时零网络。Aily 候选仍经过本地 Schema、Safety、术语重绑和患者确认；Bitable 不是第二真相源；Bot 没有接入 manual-review Communication。
 
-重置使用同目录唯一 staging SQLite、跨进程文件锁、SQLite `mode=ro` 校验、文件 fsync、`os.replace` 与目录 fsync；替换前失败保留旧数据库字节。所有 UI 写动作使用相同锁并核对 `(session_id, run_id)` generation，旧标签页在重新开始后不能写入新故事。页面普通加载不创建数据库、session 或临床资源。
+精确能力状态：`mock_fallback_verified=true`、`adapter_implemented=true`、`contract_tested_with_fake_transport=true`、`live_tenant_verified=false`、`production_ready=false`。页面状态是纯配置投影，不认证、不探活、不联网。M5-D 九项进度和 `story_complete` 仍只依赖 SQLite/FHIR 事实。
 
-最终验证（M5-D）：
+下一阶段先进行单独的 UX/UI 优化；完成后才考虑 M6 真实测试租户接线。M6 Live 必须另行获得明确授权，不得从本次提交自动开始，也不得复用本轮“仅 FakeTransport”的验收结论冒充真实联调。
+
+最终验证（M5-E，完成后以本段命令结果为准）：
 
 ```text
-.venv/bin/python -m pytest -q tests/test_competition_demo.py
-9 passed
+.venv/bin/python -m pytest -q tests/test_m5_e_external_adapters.py
+22 passed
 
 .venv/bin/python -m pytest -q
-316 passed, 3 skipped
+338 passed, 3 skipped
 
 .venv/bin/python -m compileall -q continucare app.py pages
 通过
@@ -30,11 +32,11 @@ git diff --check
 通过
 ```
 
-三个 skip 仍只因未配置官方 `FHIR_R4_SCHEMA_ZIP`。应用内 Browser 已在桌面与 390×844 手机视口分别从明确 start/restart 走完 9/9 全链；六个页面均有正确 title/URL、非空 DOM、无 console error/warn。逐页冷加载前后 QR=1、Observation=1、Layer4 FHIR rows=14、Summary versions=2、AuditEvent=12、Alert=0 且数据库 SHA-256 不变；Knowledge 浏览前后数据库字节、大小和 mtime 也不变。详细设计、点击顺序、比赛要求映射与回退见 `docs/28_m5_d_competition_demo.md`；演示讲稿见 `docs/demo_scripts.md`。
+三个 skip 仍只因未配置官方 `FHIR_R4_SCHEMA_ZIP`。应用内 Browser 在明确离线环境完成桌面与 390×844 六页面验收，并从 0/9 走完 M5-D 9/9；六页均显示一致的飞书/Aily Mock fallback 与 Bitable disabled 状态，没有发送按钮，console error/warn 为 0。逐页冷加载及 Knowledge 浏览前后数据库 SHA-256、大小和 mtime 不变；最终 QR=1、Observation=1、Layer4 FHIR rows=14、Summary versions=2、AuditEvent=12、Alert=0、外部审计事件=0、sent/received Communication=0、approved ClinicalRule=0。详细 API 事实、边界和回退见 `docs/29_m5_e_optional_feishu_aily_adapters.md`；用户另行授权隔离测试租户前，不得进行真实 health check、发送、写入或真实租户验证。
 
-实施前 Opus 策略审查的 blocker 已全部吸收：staging-only loader、唯一 staging/sidecar 处理、跨 reset/write 锁与 generation、`mode=ro` 投影、Knowledge 不作完成门、独立里程碑和旧 fixture 共用原子重置门。实现冻结后的 Sonnet final review 结论为 `CLEAN PASS`，无 BLOCKER、无 NEED_CONTEXT。三项非阻断意见中：POSIX `flock` 符合当前 macOS/Linux Demo 范围；固定合成审核 note 已在设计文档明确不可作为真实人工审阅证据；患者页所有写动作已统一 generation 校验并对拒绝/不确定提供可见冲突提示。
+实施前 Opus Level 4 审查的八项 blocker 已全部吸收：全链 secret 脱敏、transport egress permit 与固定 host、动态路径校验、HMAC UUIDv4 幂等键、`outcome_unknown` 禁止盲重试、Aily 全量白名单、本地 source provenance，以及不可变的未联调/非生产标识。最终 Sonnet diff review 为 `no BLOCKER / no NEED_CONTEXT`。其 defense-in-depth 建议“permit 传实际 capability flag”已采纳；剩余三项非阻断建议为多个 client 未来可共享 token provider、Bot 上线前增加跨实例服务端幂等、共享 timeout 环境变量可改为更通用命名，均不影响当前未接线、默认离线合同。
 
-## 1. Git 基线与已完成提交
+## 1. 本次 M5-E 提交前 Git 基线与已完成提交
 
 工作目录：
 
@@ -51,10 +53,10 @@ codex/docs-collaboration-init
 upstream 为：
 
 ```text
-35ba612c5d04eed08ddfd4a7cb0fbdca30be0484
+389f5361e62ab6ef3b0c4b92e1d06e204567ebb4
 ```
 
-`43012df` 之后的六个 M5 基础提交都已位于 upstream：
+`43012df` 之后的七个 M5 基础提交都已位于 upstream：
 
 1. `8151161d527f717ad47a78cf145a6722e4268ece`
    `docs: define collaboration workflow and handoff`
@@ -69,6 +71,8 @@ upstream 为：
    `feat: add deterministic manual review doctor briefs`
 6. `35ba612c5d04eed08ddfd4a7cb0fbdca30be0484`
    `feat: add symptom-centered knowledge evidence index`
+7. `389f5361e62ab6ef3b0c4b92e1d06e204567ebb4`
+   `feat: add guided competition demo flow`
 
 Knowledge Evidence Foundation 已经正式提交，不再是未跟踪成果。它仍保持 Pathway-agnostic；GLP1-14D 只是 fixture。没有 `target_number`、固定分母或人工目标序号；20/11/9/0/0 只是当前 GLP 数据快照。Knowledge 只解释采集/展示依据，不能授权 Task、ClinicalRule 或其他运行时行为。
 
@@ -87,14 +91,14 @@ M5-B 已以单独 commit 收口：
 feat: add controlled nurse review workflow
 ```
 
-当前 HEAD 为：
+本次 M5-E 提交前 HEAD 为：
 
 ```text
-35ba612c5d04eed08ddfd4a7cb0fbdca30be0484
-feat: add symptom-centered knowledge evidence index
+389f5361e62ab6ef3b0c4b92e1d06e204567ebb4
+feat: add guided competition demo flow
 ```
 
-HEAD 与 `origin/codex/docs-collaboration-init` 相同，ahead/behind 为 `0/0`。M5-C 与 M5-K 已提交并推送。M5-D 已完成但未暂存、未提交；本轮不得 commit 或 push。
+该提交前 HEAD 与 `origin/codex/docs-collaboration-init` 相同，ahead/behind 为 `0/0`。M5-C、M5-K 与 M5-D 已提交并推送。M5-E 已完成并在本次切片提交中收口；本轮不得 push。
 
 ## 2. M5-A 目标与完成结论
 
@@ -417,8 +421,10 @@ M5-K 已提交并位于 upstream。M5-D 已把 M5-A/B/C/K 串成稳定、可明�
 
 1. M5-C：已提交并推送；
 2. M5-K：已提交并推送；
-3. M5-D：本轮已完成，尚未暂存、提交或推送；
-4. M5-E：下一步；接入 M6 飞书/Aily，并保留无 Token 的 Mock fallback，尚未开始。
+3. M5-D：已提交并推送；
+4. M5-E：已完成并在本次切片提交中收口；保留无 Token Mock fallback，真实租户验证与生产可用均为 false；
+5. 下一阶段：先进行 UX/UI 优化；
+6. 后续 M6 Live：仅在 UX/UI 阶段之后、获得单独明确授权时，才进行真实测试租户接线。
 
 ## 11. M5-C（已提交并推送）
 
@@ -479,7 +485,7 @@ M5-K 新增严格版本化、reference-only 的 `SymptomIndexRecord` 与 `Sympto
 - 新页面 `pages/5_knowledge_evidence.py` 只读取离线 Knowledge bundle，不导入数据库、患者、Service、模型或网络客户端；四个症状可切换，Claim scope、supports/does_not_support、source locator、review、Binding Pathway 和 gap 都可见；
 - review aggregate 保持 `not_assessed`，`clinical_rules=[]` 不变；Knowledge 不授权 Observation、Task、Summary 或 ClinicalRule；
 - CLI 支持精确 `--symptom-index-id` / `--record-version` 与 `--historical` 查询；wheel 包含六个 Knowledge JSON manifest；
-- 最初只在首页增加独立只读入口；后续 M5-D 已将它作为不参与完成判定的独立证据出口，M5-E 仍未开始。
+- 最初只在首页增加独立只读入口；后续 M5-D 已将它作为不参与完成判定的独立证据出口，M5-E 完成后仍保持相同隔离边界。
 
 最终验证：
 

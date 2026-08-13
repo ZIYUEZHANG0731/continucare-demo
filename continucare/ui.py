@@ -85,7 +85,7 @@ def render_mode_badges(st) -> None:
         <span class="cc-mode-chip">{model_label}</span>
         <span class="cc-mode-chip">Safety Agent v4 · 规则 + 可选 MiMo Critic</span>
         <span class="cc-mode-chip">SQLite 持久化</span>
-        <span class="cc-mode-chip">飞书通知 Mock · 未联调</span>
+        <span class="cc-mode-chip">外部适配器默认离线 · 未联调</span>
         """,
         unsafe_allow_html=True,
     )
@@ -126,6 +126,41 @@ def render_competition_progress(st, progress, *, show_next: bool = True) -> None
                 label=f"{progress.next_label} →",
                 icon="🧭",
             )
+    render_integration_status(st)
+
+
+def render_integration_status(st) -> None:
+    """Render one pure config projection; this performs no auth or health check."""
+
+    from continucare.adapters.factory import read_adapter_statuses
+
+    statuses = read_adapter_statuses()
+    st.markdown("### 可选外部适配器状态")
+    labels = {
+        "feishu": ("飞书", "未进行真实租户联调"),
+        "aily": ("Aily", "未进行真实 API 调用"),
+        "bitable": ("Bitable", "未写入外部数据"),
+    }
+    for capability in ("feishu", "aily", "bitable"):
+        status = statuses[capability]
+        title, honest_boundary = labels[capability]
+        if status.selected_mode == "mock":
+            mode_text = "Mock fallback"
+        elif status.selected_mode == "disabled":
+            mode_text = "disabled"
+        elif status.external_calls_allowed:
+            mode_text = "test_tenant 已配置（本轮未验证）"
+        else:
+            mode_text = "test_tenant fail-closed"
+        missing = (
+            f" · 缺少配置：{', '.join(status.missing_config_keys)}"
+            if status.missing_config_keys
+            else ""
+        )
+        st.caption(
+            f"{title}：{mode_text} / {honest_boundary}{missing} · "
+            "live_tenant_verified=false · production_ready=false"
+        )
 
 
 def clear_demo_session_state(st) -> None:

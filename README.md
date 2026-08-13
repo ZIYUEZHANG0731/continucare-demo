@@ -6,7 +6,9 @@
 
 当前首页主入口为 M5-D“开始完整比赛 Demo”：它会在用户明确同意后原子重置本地合成运行数据，只生成固定原话“我今天拉肚子。”的 Layer 3 未确认候选。患者确认、护士处理与批准、医生简报生成/刷新仍分别需要明确人工点击；进度从 SQLite 事实恢复，不依赖浏览器 session state。完整设计见 [M5-D 稳定的一键比赛 Demo](docs/28_m5_d_competition_demo.md)。
 
-当前版本已接入小米 MiMo OpenAI-compatible 适配器；配置本地密钥时使用 `mimo-v2.5` JSON mode，分别承担受控抽取、Safety Critic 和患者语言改写。主抽取不可用时回退本地语义 Mock，辅助模型不可用时回退确定性硬规则或固定语言模板。无论哪种模式，Safety Agent 和患者确认门都不能绕过。飞书通知仍使用 Mock 适配器。
+当前版本已接入小米 MiMo OpenAI-compatible 适配器；配置本地密钥时使用 `mimo-v2.5` JSON mode，分别承担受控抽取、Safety Critic 和患者语言改写。主抽取不可用时回退本地语义 Mock，辅助模型不可用时回退确定性硬规则或固定语言模板。无论哪种模式，Safety Agent 和患者确认门都不能绕过。
+
+M5-E 增加了可选飞书 Bot、Aily 和 Bitable 协议适配器、统一配置工厂与 FakeTransport 合同测试。默认配置为飞书/Aily `mock`、Bitable `disabled`，不读取 Token、不创建真实 transport、不认证、不探活、不发送或写入。代码已实现且 FakeTransport 合同已验证；真实租户验证和生产可用性均为否。详见 [飞书 / Aily 集成状态](docs/feishu_integration.md) 与 [M5-E 设计验收](docs/29_m5_e_optional_feishu_aily_adapters.md)。
 
 ## 本地运行
 
@@ -66,6 +68,19 @@ MiMo 不生成医学代码。已知 Questionnaire 字段和患者自述新症状
 
 密钥不会进入 AgentRun、审计日志或 Git。当前只允许官方 `*.xiaomimimo.com` HTTPS 地址，并且只发送合成演示文本。[MiMo 官方快速接入](https://mimo.mi.com/docs/en-US/quick-start/summary/first-api-call) · [JSON mode](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/structured-output)
 
+## 可选飞书 / Aily / Bitable 配置
+
+`.env.example` 的安全默认值是：
+
+```dotenv
+CONTINUCARE_FEISHU_MODE=mock
+CONTINUCARE_AILY_MODE=mock
+CONTINUCARE_BITABLE_MODE=disabled
+CONTINUCARE_EXTERNAL_EGRESS_ENABLED=false
+```
+
+仅将 mode 改为 `test_tenant` 不足以创建外部 client；还必须同时设置对应 capability flag、全局 egress flag 和完整配置。偶然存在凭据不会自动启用。`test_tenant` 配置缺失时 fail-closed。当前仓库没有 `production` 模式；本轮也未用真实凭据或调用任何外部 API。
+
 ## 三个核心价值
 
 - 原始回答与 FHIR Observation 通过 `derivedFrom` 可追溯；
@@ -119,7 +134,8 @@ MiMo 不生成医学代码。已知 Questionnaire 字段和患者自述新症状
 - 第四层第 5 步工程基线：版本化指标定义、current/stale/unknown/conflict 状态、单位一致的端点数值方向、快照版本链及 Provenance；不输出好转/恶化或风险解释
 - 第四层第 6 步工程基线：Timeline/State/Summary/Task 只读组合查询、patient/pathway 权限隔离、历史 as-of 回放、版本化证据图及组件级故障降级；尚未替换旧医生页面或接入真实 IAM/EMR
 - 旧 M0–M5 自由文本链继续作为兼容测试夹具，不是患者端主流程
-- M6：真实飞书/Aily 接入，明确不在第一版范围内
+- M5-E：可选飞书/Aily/Bitable 合同、FakeTransport 与零 Token Mock fallback；真实租户联调仍未进行
+- M6：真实租户验收、回调与医院集成，仍不在本轮范围内
 
 ## 演示
 

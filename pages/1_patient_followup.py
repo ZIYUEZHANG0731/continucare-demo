@@ -385,6 +385,12 @@ def _render_semantic_result(record, result: SemanticResult) -> None:
                 with st.container(border=True):
                     st.write(candidate.patient_message)
                     st.caption(f"依据原话：‘{candidate.evidence_text}’")
+                    source_labels = {
+                        "deterministic_mock": "来源：本地确定性 Mock fallback（非真实模型）",
+                        "mimo": "来源：MiMo 候选（仍须 Safety 与患者确认）",
+                        "aily": "来源：Aily 候选（真实 API 未验证；仍须 Safety 与患者确认）",
+                    }
+                    st.caption(source_labels[candidate.source_mode.value])
                     if candidate.terminology_match is not None:
                         match = candidate.terminology_match
                         origin_label = (

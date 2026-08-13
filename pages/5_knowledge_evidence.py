@@ -9,7 +9,7 @@ from streamlit.errors import StreamlitPageNotFoundError
 
 from continucare.knowledge import LoadMode, load_builtin_bundle
 from continucare.knowledge.models import SourcedClinicalClaim, artifact_key
-from continucare.ui import inject_global_styles
+from continucare.ui import inject_global_styles, render_integration_status
 
 
 def _json(value) -> str:
@@ -44,6 +44,7 @@ st.caption(
     "四个条目只是当前比赛 fixture snapshot，不是常见症状排名、固定分母、"
     "target_number、覆盖率目标或完整症状库。"
 )
+render_integration_status(st)
 
 mode_label = st.radio(
     "注册表视图",
