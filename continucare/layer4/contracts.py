@@ -843,6 +843,7 @@ class DoctorReview(StrictModel):
 class DoctorReviewOutcome(StrictModel):
     review: DoctorReview
     summary: Layer4SummaryDraft
+    idempotent_replay: bool = False
 
 
 class StateMetricDefinition(StrictModel):

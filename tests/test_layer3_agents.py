@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -23,6 +25,7 @@ from continucare.care_agent.safety import SafetyAgent
 from continucare.care_engine import CareEngine
 from continucare.db import connect
 from continucare.demo_data import DEMO_PATIENT_ID
+from continucare.errors import ConcurrentWriteConflict
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "semantic_cases_v1.json"
@@ -295,6 +298,14 @@ def test_rejected_candidate_cannot_later_be_confirmed(tmp_path):
     business_before = _business_state(store, session.session_id)
     audit_before = _audit_state(store)
 
+    service.reject_candidates(
+        interaction.result.run_id,
+        [candidate.candidate_id],
+    )
+    assert _resolution_row(store, candidate.candidate_id) == resolution_before
+    assert _business_state(store, session.session_id) == business_before
+    assert _audit_state(store) == audit_before
+
     with pytest.raises(ValueError):
         service.confirm_candidates(
             interaction.result.run_id,
@@ -310,6 +321,141 @@ def test_rejected_candidate_cannot_later_be_confirmed(tmp_path):
     assert store.list_active_symptom_reports(session.session_id) == []
 
 
+def test_reject_candidates_strictly_rejects_invalid_and_cross_run_ids(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    first = service.analyze(session.session_id, "我今天拉肚子。")
+    second = service.analyze(session.session_id, "过去24小时我吐了2次。")
+    first_id = first.result.candidates[0].candidate_id
+    second_id = second.result.candidates[0].candidate_id
+    before_business = _business_state(store, session.session_id)
+    before_audit = _audit_state(store)
+
+    invalid_sets = [
+        [],
+        [""],
+        [first_id, first_id],
+        ["unknown-candidate"],
+        [first_id, second_id],
+        [first_id, "unknown-candidate"],
+    ]
+    for candidate_ids in invalid_sets:
+        with pytest.raises(ValueError):
+            service.reject_candidates(first.result.run_id, candidate_ids)
+
+    assert _resolution_row(store, first_id) is None
+    assert _resolution_row(store, second_id) is None
+    assert _business_state(store, session.session_id) == before_business
+    assert _audit_state(store) == before_audit
+
+
+@pytest.mark.parametrize(
+    "fault_stage",
+    [
+        "before_material",
+        "after_answer_context",
+        "after_symptom_report",
+        "after_session",
+        "after_resolution:0",
+        "after_resolution:1",
+        "after_audit:care_session_draft_saved",
+        "after_audit:semantic_candidate_patient_decision",
+        "before_commit",
+    ],
+)
+def test_conversation_decision_faults_roll_back_all_effects(tmp_path, fault_stage):
+    store, _, session, service = _service(tmp_path)
+    interaction = service.analyze(
+        session.session_id,
+        "过去24小时我吐了2次，今天拉肚子。",
+    )
+    candidate_ids = [item.candidate_id for item in interaction.result.candidates]
+    assert len(candidate_ids) >= 2
+    before_business = _business_state(store, session.session_id)
+    before_audit = _audit_state(store)
+
+    def inject(stage):
+        if stage == fault_stage:
+            raise RuntimeError(f"fault:{stage}")
+
+    store._conversation_decision_fault = inject
+    with pytest.raises(RuntimeError, match=fault_stage):
+        service.confirm_candidates(interaction.result.run_id, candidate_ids)
+
+    assert _resolution_rows(store, candidate_ids) == {
+        action_id: None for action_id in candidate_ids
+    }
+    assert _business_state(store, session.session_id) == before_business
+    assert _audit_state(store) == before_audit
+
+
+def test_concurrent_different_candidate_decisions_have_one_atomic_winner(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    interaction = service.analyze(
+        session.session_id,
+        "过去24小时我吐了2次，今天拉肚子。",
+    )
+    candidate_ids = [item.candidate_id for item in interaction.result.candidates]
+    barrier = Barrier(2)
+    original = store.persist_conversation_decision_bundle
+
+    def synchronized(**kwargs):
+        barrier.wait(timeout=5)
+        return original(**kwargs)
+
+    store.persist_conversation_decision_bundle = synchronized
+
+    def accept():
+        return service.confirm_candidates(interaction.result.run_id, candidate_ids)
+
+    def reject():
+        service.reject_candidates(interaction.result.run_id, candidate_ids)
+        return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(accept), pool.submit(reject)]
+    winners = []
+    conflicts = []
+    for future in futures:
+        try:
+            winners.append(future.result())
+        except ConcurrentWriteConflict as exc:
+            conflicts.append(exc)
+
+    assert len(winners) == 1
+    assert len(conflicts) == 1
+    decisions = {
+        row["decision"] for row in _resolution_rows(store, candidate_ids).values()
+    }
+    assert decisions in ({"accepted"}, {"rejected"})
+    decision_audits = [
+        event
+        for event in store.list_audit_events(DEMO_PATIENT_ID)
+        if event.event_type == "semantic_candidate_patient_decision"
+    ]
+    assert len(decision_audits) == 1
+    if decisions == {"accepted"}:
+        assert store.get_care_session(session.session_id).answers
+    else:
+        assert store.get_care_session(session.session_id).answers == {}
+
+
+def test_conversation_decision_sqlite_busy_is_a_stable_conflict(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    interaction = service.analyze(session.session_id, "我今天拉肚子。")
+    candidate_id = interaction.result.candidates[0].candidate_id
+    before_business = _business_state(store, session.session_id)
+    before_audit = _audit_state(store)
+
+    with connect(store.db_path) as locked:
+        locked.execute("BEGIN IMMEDIATE")
+        with pytest.raises(ConcurrentWriteConflict, match="database is busy"):
+            service.confirm_candidates(interaction.result.run_id, [candidate_id])
+
+    assert _resolution_row(store, candidate_id) is None
+    assert _business_state(store, session.session_id) == before_business
+    assert _audit_state(store) == before_audit
+
+
 def test_duplicate_confirmation_has_no_business_or_audit_side_effects(tmp_path):
     store, _, session, service = _service(tmp_path)
     interaction = service.analyze(
@@ -323,8 +469,7 @@ def test_duplicate_confirmation_has_no_business_or_audit_side_effects(tmp_path):
     business_before = _business_state(store, session.session_id)
     audit_before = _audit_state(store)
 
-    with pytest.raises(ValueError):
-        service.confirm_candidates(interaction.result.run_id, candidate_ids)
+    service.confirm_candidates(interaction.result.run_id, candidate_ids)
 
     business_after = _business_state(store, session.session_id)
     assert _resolution_rows(store, candidate_ids) == resolutions_before
@@ -357,8 +502,7 @@ def test_confirm_original_closes_all_actions_before_old_candidate_retry(tmp_path
     audit_before = _audit_state(store)
 
     assert {row["decision"] for row in resolutions_before.values()} == {"rejected"}
-    with pytest.raises(ValueError):
-        service.confirm_original_text(interaction.result.run_id)
+    service.confirm_original_text(interaction.result.run_id)
     assert _resolution_rows(store, action_ids) == resolutions_before
     assert _business_state(store, session.session_id) == business_before
     assert _audit_state(store) == audit_before
@@ -426,12 +570,11 @@ def test_unsure_action_can_be_finalized_once_as_accepted(tmp_path):
     assert unsure_row["decision"] == "unsure"
     business_after_unsure = _business_state(store, session.session_id)
     audit_after_unsure = _audit_state(store)
-    with pytest.raises(ValueError):
-        service.resolve_clarification(
-            interaction.result.run_id,
-            clarification.clarification_id,
-            "unsure",
-        )
+    service.resolve_clarification(
+        interaction.result.run_id,
+        clarification.clarification_id,
+        "unsure",
+    )
     assert _resolution_row(store, clarification.clarification_id) == unsure_row
     assert _business_state(store, session.session_id) == business_after_unsure
     assert _audit_state(store) == audit_after_unsure
@@ -498,12 +641,11 @@ def test_finalized_unsure_action_rejects_later_retry_without_side_effects(tmp_pa
     business_before = _business_state(store, session.session_id)
     audit_before = _audit_state(store)
 
-    with pytest.raises(ValueError):
-        service.resolve_clarification(
-            interaction.result.run_id,
-            clarification.clarification_id,
-            "yes_24h",
-        )
+    service.resolve_clarification(
+        interaction.result.run_id,
+        clarification.clarification_id,
+        "yes_24h",
+    )
 
     assert resolution_before["decision"] == "accepted"
     assert _resolution_row(store, clarification.clarification_id) == resolution_before
@@ -535,12 +677,11 @@ def test_unsure_action_can_be_finalized_once_as_rejected(tmp_path):
     assert store.get_care_session(session.session_id).answers == {}
     assert store.list_active_answer_contexts(session.session_id) == []
     assert store.list_active_symptom_reports(session.session_id) == []
-    with pytest.raises(ValueError):
-        service.resolve_clarification(
-            interaction.result.run_id,
-            clarification.clarification_id,
-            "no",
-        )
+    service.resolve_clarification(
+        interaction.result.run_id,
+        clarification.clarification_id,
+        "no",
+    )
 
     assert _resolution_row(store, clarification.clarification_id) == resolution_before
     assert _business_state(store, session.session_id) == business_before

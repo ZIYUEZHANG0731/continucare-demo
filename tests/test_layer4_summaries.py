@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from threading import Barrier
 
 import pytest
 from pydantic import ValidationError
@@ -14,6 +16,7 @@ from continucare.fhir.questionnaires import build_free_text_questionnaire_respon
 from continucare.fhir.r4 import validate_official_json_schema
 from continucare.fhir.terminology import BODY_WEIGHT, VOMITING_COUNT_24H
 from continucare.db import connect
+from continucare.errors import ConcurrentWriteConflict
 from continucare.layer4 import (
     ClinicalMemoryService,
     DoctorReviewService,
@@ -369,7 +372,10 @@ def test_doctor_accept_is_versioned_provenanced_and_idempotent(tmp_path):
         note="已核对合成证据。",
     )
 
-    assert repeated == first
+    assert repeated.review == first.review
+    assert repeated.summary == first.summary
+    assert first.idempotent_replay is False
+    assert repeated.idempotent_replay is True
     assert first.summary.version == "2"
     assert first.summary.status == SummaryDraftStatus.DOCTOR_REVIEWED
     assert first.summary.items == draft.items
@@ -423,7 +429,10 @@ def test_doctor_modify_requires_real_change_and_only_existing_evidence(tmp_path)
         modified_items=modified,
     )
 
-    assert repeated == outcome
+    assert repeated.review == outcome.review
+    assert repeated.summary == outcome.summary
+    assert outcome.idempotent_replay is False
+    assert repeated.idempotent_replay is True
     assert outcome.summary.items == modified
     assert outcome.review.amended_summary_id == draft.summary_id
     assert outcome.review.amended_summary_version == "2"
@@ -498,6 +507,216 @@ def test_doctor_reject_requires_note_and_blocks_further_review(tmp_path):
             decision=DoctorReviewDecision.ACCEPT,
             reviewed_at="2026-08-02T12:21:00+00:00",
         )
+
+
+def _doctor_bundle_counts(repository):
+    with connect(repository.db_path) as connection:
+        return {
+            "provenance": connection.execute(
+                "SELECT COUNT(*) AS count FROM layer4_fhir_resources "
+                "WHERE resource_type='Provenance'"
+            ).fetchone()["count"],
+            "summaries": connection.execute(
+                "SELECT COUNT(*) AS count FROM layer4_contract_records "
+                "WHERE record_type='summary_draft'"
+            ).fetchone()["count"],
+            "reviews": connection.execute(
+                "SELECT COUNT(*) AS count FROM layer4_contract_records "
+                "WHERE record_type='doctor_review'"
+            ).fetchone()["count"],
+            "audits": connection.execute(
+                "SELECT COUNT(*) AS count FROM audit_events "
+                "WHERE event_type='doctor_reviewed_summary'"
+            ).fetchone()["count"],
+        }
+
+
+@pytest.mark.parametrize(
+    "fault_stage",
+    [
+        "before_provenance",
+        "after_provenance",
+        "after_summary",
+        "after_review",
+        "after_audit",
+        "before_commit",
+    ],
+)
+def test_doctor_review_faults_roll_back_the_entire_bundle(tmp_path, fault_stage):
+    response = _response()
+    observation = _vomiting(1, observation_id=f"observation-review-{fault_stage}")
+    repository, _, memory, summaries, reviews = _services(
+        tmp_path, _snapshot(responses=[response], observations=[observation])
+    )
+    memory.rebuild(PATIENT_ID)
+    draft = _generate(summaries)
+    before = _doctor_bundle_counts(repository)
+
+    def inject(stage):
+        if stage == fault_stage:
+            raise RuntimeError(f"fault:{stage}")
+
+    repository._doctor_review_bundle_fault = inject
+    with pytest.raises(RuntimeError, match=fault_stage):
+        reviews.review(
+            summary_id=draft.summary_id,
+            summary_version=draft.version,
+            reviewer_reference="Practitioner/fault-doctor",
+            decision=DoctorReviewDecision.ACCEPT,
+            reviewed_at="2026-08-02T12:30:00+00:00",
+        )
+
+    assert _doctor_bundle_counts(repository) == before
+    assert repository.get_contract("summary_draft", draft.summary_id) == draft
+
+
+def test_doctor_review_replay_keeps_first_timestamp_and_adds_no_rows(tmp_path):
+    response = _response()
+    observation = _vomiting(1, observation_id="observation-review-replay")
+    repository, _, memory, summaries, reviews = _services(
+        tmp_path, _snapshot(responses=[response], observations=[observation])
+    )
+    memory.rebuild(PATIENT_ID)
+    draft = _generate(summaries)
+
+    first = reviews.review(
+        summary_id=draft.summary_id,
+        summary_version=draft.version,
+        reviewer_reference="Practitioner/replay-doctor",
+        decision=DoctorReviewDecision.ACCEPT,
+        reviewed_at="2026-08-02T12:31:00+00:00",
+        note="  已核对。  ",
+    )
+    after_first = _doctor_bundle_counts(repository)
+    replay = reviews.review(
+        summary_id=draft.summary_id,
+        summary_version=draft.version,
+        reviewer_reference="Practitioner/replay-doctor",
+        decision=DoctorReviewDecision.ACCEPT,
+        reviewed_at="2026-08-02T12:59:00+00:00",
+        note="已核对。",
+    )
+
+    assert replay.idempotent_replay is True
+    assert replay.review.reviewed_at == first.review.reviewed_at
+    assert replay.summary.created_at == first.summary.created_at
+    assert _doctor_bundle_counts(repository) == after_first
+
+    with connect(repository.db_path) as connection:
+        connection.execute(
+            "DELETE FROM audit_events WHERE event_type='doctor_reviewed_summary'"
+        )
+    with pytest.raises(ConcurrentWriteConflict, match="partial replay"):
+        reviews.review(
+            summary_id=draft.summary_id,
+            summary_version=draft.version,
+            reviewer_reference="Practitioner/replay-doctor",
+            decision=DoctorReviewDecision.ACCEPT,
+            reviewed_at="2026-08-02T13:00:00+00:00",
+            note="已核对。",
+        )
+
+
+def test_doctor_review_different_request_for_same_source_conflicts(tmp_path):
+    response = _response()
+    observation = _vomiting(1, observation_id="observation-review-conflict")
+    repository, _, memory, summaries, reviews = _services(
+        tmp_path, _snapshot(responses=[response], observations=[observation])
+    )
+    memory.rebuild(PATIENT_ID)
+    draft = _generate(summaries)
+    reviews.review(
+        summary_id=draft.summary_id,
+        summary_version=draft.version,
+        reviewer_reference="Practitioner/conflict-doctor",
+        decision=DoctorReviewDecision.ACCEPT,
+        reviewed_at="2026-08-02T12:32:00+00:00",
+        note="接受。",
+    )
+    before = _doctor_bundle_counts(repository)
+
+    with pytest.raises(ConcurrentWriteConflict, match="stale summary"):
+        reviews.review(
+            summary_id=draft.summary_id,
+            summary_version=draft.version,
+            reviewer_reference="Practitioner/conflict-doctor",
+            decision=DoctorReviewDecision.REJECT,
+            reviewed_at="2026-08-02T12:33:00+00:00",
+            note="改为拒绝。",
+        )
+    assert _doctor_bundle_counts(repository) == before
+
+
+def test_concurrent_different_doctor_reviews_have_one_complete_winner(tmp_path):
+    response = _response()
+    observation = _vomiting(1, observation_id="observation-review-concurrent")
+    repository, _, memory, summaries, _ = _services(
+        tmp_path, _snapshot(responses=[response], observations=[observation])
+    )
+    memory.rebuild(PATIENT_ID)
+    draft = _generate(summaries)
+    barrier = Barrier(2)
+    original = repository.persist_doctor_review_bundle
+
+    def synchronized(**kwargs):
+        barrier.wait(timeout=5)
+        return original(**kwargs)
+
+    repository.persist_doctor_review_bundle = synchronized
+
+    def submit(decision):
+        return DoctorReviewService(repository).review(
+            summary_id=draft.summary_id,
+            summary_version=draft.version,
+            reviewer_reference="Practitioner/concurrent-doctor",
+            decision=decision,
+            reviewed_at="2026-08-02T12:34:00+00:00",
+            note="并发审阅。",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(submit, DoctorReviewDecision.ACCEPT),
+            pool.submit(submit, DoctorReviewDecision.REJECT),
+        ]
+    outcomes = []
+    conflicts = []
+    for future in futures:
+        try:
+            outcomes.append(future.result())
+        except ConcurrentWriteConflict as exc:
+            conflicts.append(exc)
+
+    assert len(outcomes) == 1
+    assert len(conflicts) == 1
+    counts = _doctor_bundle_counts(repository)
+    assert counts["summaries"] == 2
+    assert counts["reviews"] == 1
+    assert counts["audits"] == 1
+
+
+def test_doctor_review_sqlite_busy_is_a_stable_conflict(tmp_path):
+    response = _response()
+    observation = _vomiting(1, observation_id="observation-review-busy")
+    repository, _, memory, summaries, reviews = _services(
+        tmp_path, _snapshot(responses=[response], observations=[observation])
+    )
+    memory.rebuild(PATIENT_ID)
+    draft = _generate(summaries)
+    before = _doctor_bundle_counts(repository)
+
+    with connect(repository.db_path) as locked:
+        locked.execute("BEGIN IMMEDIATE")
+        with pytest.raises(ConcurrentWriteConflict, match="database is busy"):
+            reviews.review(
+                summary_id=draft.summary_id,
+                summary_version=draft.version,
+                reviewer_reference="Practitioner/busy-doctor",
+                decision=DoctorReviewDecision.ACCEPT,
+                reviewed_at="2026-08-02T12:35:00+00:00",
+            )
+
+    assert _doctor_bundle_counts(repository) == before
 
 
 def test_summary_generation_and_review_provenance_pass_official_schema_when_available(

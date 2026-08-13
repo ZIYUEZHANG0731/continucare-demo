@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any, cast
 
 from pydantic import BaseModel
 
 from continucare.db import connect, initialize_database
+from continucare.errors import ConcurrentWriteConflict, is_sqlite_busy
 from continucare.layer4.contracts import (
     ClinicalStateSnapshot,
     ClinicalRuleDefinition,
@@ -220,6 +222,254 @@ class Layer4SQLiteStore:
                 ),
             )
         return normalized
+
+    def persist_doctor_review_bundle(
+        self,
+        *,
+        expected_source: Layer4SummaryDraft,
+        provenance: dict[str, Any],
+        result_summary: Layer4SummaryDraft,
+        review: DoctorReview,
+        audit_event: AuditEvent,
+    ) -> bool:
+        """CAS one exact Summary review and commit every result atomically."""
+
+        normalized_provenance = validate_layer4_fhir_resource(
+            provenance, expected_resource_type="Provenance"
+        )
+        patient_id = expected_source.patient_id
+        if (
+            result_summary.patient_id != patient_id
+            or review.patient_id != patient_id
+            or audit_event.patient_id != patient_id
+        ):
+            raise ValueError("doctor review bundle patient mismatch")
+        if (
+            result_summary.summary_id != expected_source.summary_id
+            or review.summary_id != expected_source.summary_id
+            or review.summary_version != expected_source.version
+            or review.result_summary_id != result_summary.summary_id
+            or review.result_summary_version != result_summary.version
+        ):
+            raise ValueError("doctor review bundle Summary references do not match")
+        try:
+            expected_result_version = str(int(expected_source.version) + 1)
+        except ValueError as exc:
+            raise ValueError("summary versions must be numeric") from exc
+        if result_summary.version != expected_result_version:
+            raise ValueError("doctor review result must be the next Summary version")
+        provenance_ref = f"Provenance/{normalized_provenance['id']}"
+        if review.provenance_reference != provenance_ref:
+            raise ValueError("doctor review Provenance reference mismatch")
+        targets = {
+            item.get("reference") for item in normalized_provenance.get("target", [])
+        }
+        if {
+            f"urn:continucare:summary:{result_summary.summary_id}:version:{result_summary.version}",
+            f"urn:continucare:doctor-review:{review.review_id}:version:{review.version}",
+        } - targets:
+            raise ValueError("doctor review Provenance must target result and review")
+        if (
+            audit_event.entity_type != "Layer4SummaryDraft"
+            or audit_event.entity_id != result_summary.summary_id
+            or audit_event.event_type != "doctor_reviewed_summary"
+        ):
+            raise ValueError("doctor review audit identity is invalid")
+
+        source_payload = _json(expected_source.model_dump(mode="json"))
+        provenance_payload = _json(normalized_provenance)
+        result_identity = _contract_identity(result_summary)
+        result_payload = _json(result_summary.model_dump(mode="json"))
+        review_identity = _contract_identity(review)
+        review_payload = _json(review.model_dump(mode="json"))
+        audit_payload = _json(audit_event.details_json)
+
+        try:
+            with connect(self.db_path) as connection:
+                connection.execute("PRAGMA busy_timeout=0")
+                connection.execute("BEGIN IMMEDIATE")
+                source_row = connection.execute(
+                    """
+                    SELECT record_json, patient_id, is_current
+                    FROM layer4_contract_records
+                    WHERE record_type='summary_draft' AND record_id=?
+                      AND record_version=?
+                    """,
+                    (expected_source.summary_id, expected_source.version),
+                ).fetchone()
+                provenance_row = connection.execute(
+                    """
+                    SELECT resource_json, patient_id FROM layer4_fhir_resources
+                    WHERE resource_type='Provenance' AND resource_id=? AND version_id=?
+                    """,
+                    (
+                        normalized_provenance["id"],
+                        normalized_provenance["meta"]["versionId"],
+                    ),
+                ).fetchone()
+                result_row = connection.execute(
+                    """
+                    SELECT record_json, patient_id FROM layer4_contract_records
+                    WHERE record_type='summary_draft' AND record_id=?
+                      AND record_version=?
+                    """,
+                    (result_summary.summary_id, result_summary.version),
+                ).fetchone()
+                review_row = connection.execute(
+                    """
+                    SELECT record_json, patient_id FROM layer4_contract_records
+                    WHERE record_type='doctor_review' AND record_id=?
+                      AND record_version=?
+                    """,
+                    (review.review_id, review.version),
+                ).fetchone()
+                audit_row = connection.execute(
+                    "SELECT * FROM audit_events WHERE event_id=?",
+                    (audit_event.event_id,),
+                ).fetchone()
+                output_rows = (provenance_row, result_row, review_row, audit_row)
+                if any(row is not None for row in output_rows):
+                    exact = (
+                        provenance_row is not None
+                        and provenance_row["resource_json"] == provenance_payload
+                        and provenance_row["patient_id"] == patient_id
+                        and result_row is not None
+                        and result_row["record_json"] == result_payload
+                        and result_row["patient_id"] == patient_id
+                        and review_row is not None
+                        and review_row["record_json"] == review_payload
+                        and review_row["patient_id"] == patient_id
+                        and audit_row is not None
+                        and audit_row["patient_id"] == patient_id
+                        and audit_row["entity_type"] == audit_event.entity_type
+                        and audit_row["entity_id"] == audit_event.entity_id
+                        and audit_row["event_type"] == audit_event.event_type
+                        and audit_row["actor_type"] == audit_event.actor_type
+                        and _json(json.loads(audit_row["details_json"]))
+                        == audit_payload
+                        and audit_row["created_at"] == audit_event.created_at
+                    )
+                    if exact:
+                        return False
+                    raise ConcurrentWriteConflict(
+                        "doctor review has a conflicting or partial replay"
+                    )
+                if (
+                    source_row is None
+                    or source_row["patient_id"] != patient_id
+                    or source_row["record_json"] != source_payload
+                    or source_row["is_current"] != 1
+                ):
+                    raise ConcurrentWriteConflict(
+                        "doctor review source changed; refresh and retry"
+                    )
+
+                self._doctor_review_bundle_fault("before_provenance")
+                meta = normalized_provenance["meta"]
+                connection.execute(
+                    """
+                    INSERT INTO layer4_fhir_resources (
+                        resource_type, resource_id, version_id, patient_id, status,
+                        clinical_time, resource_json, is_current, created_at, updated_at
+                    ) VALUES ('Provenance', ?, ?, ?, NULL, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        normalized_provenance["id"],
+                        meta["versionId"],
+                        patient_id,
+                        _fhir_clinical_time(normalized_provenance),
+                        provenance_payload,
+                        meta["lastUpdated"],
+                        meta["lastUpdated"],
+                    ),
+                )
+                self._doctor_review_bundle_fault("after_provenance")
+
+                connection.execute(
+                    """
+                    UPDATE layer4_contract_records SET is_current=0
+                    WHERE record_type='summary_draft' AND record_id=? AND is_current=1
+                    """,
+                    (result_summary.summary_id,),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO layer4_contract_records (
+                        record_type, record_id, record_version, patient_id,
+                        pathway_code, status, effective_time, record_json,
+                        is_current, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        result_identity[0],
+                        result_identity[1],
+                        result_identity[2],
+                        result_identity[3],
+                        result_identity[4],
+                        result_identity[5],
+                        result_identity[6],
+                        result_payload,
+                        result_identity[7],
+                        result_identity[7],
+                    ),
+                )
+                self._doctor_review_bundle_fault("after_summary")
+
+                connection.execute(
+                    """
+                    INSERT INTO layer4_contract_records (
+                        record_type, record_id, record_version, patient_id,
+                        pathway_code, status, effective_time, record_json,
+                        is_current, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        review_identity[0],
+                        review_identity[1],
+                        review_identity[2],
+                        review_identity[3],
+                        review_identity[4],
+                        review_identity[5],
+                        review_identity[6],
+                        review_payload,
+                        review_identity[7],
+                        review_identity[7],
+                    ),
+                )
+                self._doctor_review_bundle_fault("after_review")
+
+                connection.execute(
+                    """
+                    INSERT INTO audit_events (
+                        event_id, patient_id, entity_type, entity_id, event_type,
+                        actor_type, details_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        audit_event.event_id,
+                        audit_event.patient_id,
+                        audit_event.entity_type,
+                        audit_event.entity_id,
+                        audit_event.event_type,
+                        audit_event.actor_type,
+                        audit_payload,
+                        audit_event.created_at,
+                    ),
+                )
+                self._doctor_review_bundle_fault("after_audit")
+                self._doctor_review_bundle_fault("before_commit")
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_busy(exc):
+                raise ConcurrentWriteConflict(
+                    "doctor review database is busy; retry the same request"
+                ) from exc
+            raise
+        return True
+
+    def _doctor_review_bundle_fault(self, stage: str) -> None:
+        """Test seam for proving rollback at every DoctorReview write point."""
+
+        return None
 
     def persist_manual_review_action(
         self,

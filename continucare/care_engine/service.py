@@ -27,7 +27,7 @@ from continucare.models import (
 )
 from continucare.pathways import load_builtin_pathways, load_fhir_artifact
 from continucare.pathways.mappings import load_observation_mapping
-from continucare.services.audit import record_audit_event
+from continucare.services.audit import build_audit_event, record_audit_event
 
 
 class CareSubmissionResult(BaseModel):
@@ -170,37 +170,79 @@ class CareEngine:
         if existing.status == CareSessionStatus.COMPLETED:
             if answers != existing.answers:
                 raise ValueError("随访已经提交，不能用不同答案重复覆盖")
-            return self._completed_result(existing)
+            result = self._completed_result(existing)
+            message = self.store.get_message(result.questionnaire_response["id"])
+            if message is None:
+                raise ValueError("已完成随访缺少原始消息")
+            completed_at = existing.completed_at or existing.updated_at
+            self.store.complete_care_session_submission(
+                expected_session=existing,
+                session=existing,
+                message=message,
+                questionnaire_response=result.questionnaire_response,
+                questionnaire=self.questionnaire_for_session(existing),
+                observations=result.observations,
+                completed_at=completed_at,
+                audit_event=self._completion_audit(
+                    session=existing,
+                    response=result.questionnaire_response,
+                    observations=result.observations,
+                    completed_at=completed_at,
+                ),
+            )
+            return result
         plan = self.prepare_completion(session_id, answers)
         session = plan.session
-        session.answers = answers
         self.store.complete_care_session_submission(
+            expected_session=existing,
             session=session,
             message=plan.message,
             questionnaire_response=plan.questionnaire_response,
             questionnaire=plan.questionnaire,
             observations=plan.observations,
             completed_at=plan.completed_at,
-        )
-        record_audit_event(
-            self.store,
-            patient_id=session.patient_id,
-            entity_type="QuestionnaireResponse",
-            entity_id=plan.questionnaire_response["id"],
-            event_type="questionnaire_response_completed",
-            actor_type="synthetic_patient",
-            details={
-                "session_id": session.session_id,
-                "answered_link_ids": sorted(answers),
-                "observation_refs": [item.observation_id for item in plan.observations],
-                "clinical_assessment": "not_assessed",
-            },
+            audit_event=self._completion_audit(
+                session=session,
+                response=plan.questionnaire_response,
+                observations=plan.observations,
+                completed_at=plan.completed_at,
+            ),
         )
         completed = self.store.get_care_session(session.session_id)
         return CareSubmissionResult(
             session=completed,
             questionnaire_response=plan.questionnaire_response,
             observations=plan.observations,
+        )
+
+    @staticmethod
+    def _completion_audit(
+        *,
+        session: CareSession,
+        response: dict[str, Any],
+        observations: list[Observation],
+        completed_at: str,
+    ):
+        identity = uuid5(
+            NAMESPACE_URL,
+            f"care-completion|{session.session_id}|{response['id']}",
+        ).hex
+        return build_audit_event(
+            event_id=f"audit-{identity}",
+            patient_id=session.patient_id,
+            entity_type="QuestionnaireResponse",
+            entity_id=response["id"],
+            event_type="questionnaire_response_completed",
+            actor_type="synthetic_patient",
+            created_at=completed_at,
+            details={
+                "session_id": session.session_id,
+                "answered_link_ids": sorted(session.answers),
+                "observation_refs": sorted(
+                    item.observation_id for item in observations
+                ),
+                "clinical_assessment": "not_assessed",
+            },
         )
 
     def prepare_completion(

@@ -69,9 +69,17 @@ from continucare.care_agent.temporal import (
 from continucare.care_engine import CareEngine
 from continucare.config import get_settings
 from continucare.db import utc_now_iso
-from continucare.fhir.questionnaires import flatten_questionnaire_items
+from continucare.fhir.questionnaires import (
+    build_questionnaire_response,
+    flatten_questionnaire_items,
+)
 from continucare.services.audit import record_audit_event
-from continucare.models import ConfirmedAnswerContext, ConfirmedSymptomReport
+from continucare.services.audit import build_audit_event
+from continucare.models import (
+    CareSession,
+    ConfirmedAnswerContext,
+    ConfirmedSymptomReport,
+)
 from continucare.fhir.terminology import UCUM
 from continucare.terminology import (
     RepositoryTerminologyBackend,
@@ -102,6 +110,7 @@ class ConfirmedCandidatePlan(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     record: AgentRunRecord
+    session: CareSession
     candidates: list[SemanticCandidate]
     answers: dict[str, Any]
     answer_contexts: list[ConfirmedAnswerContext]
@@ -214,24 +223,54 @@ class CareAgentService:
             record = self._record(task, outcome)
             self.store.save_agent_run(record)
             if candidates:
-                self._apply_confirmed(source_record, candidates)
-                self._confirmation_audit(
-                    source_record,
-                    candidates,
-                    decision="natural_language_context_accepted",
+                plan = self.prepare_confirmed_candidates(
+                    source_record.run_id,
+                    [],
+                    resolved_at=record.completed_at,
+                    _candidate_values=candidates,
                 )
-            for action in actions:
-                self.store.resolve_conversation_action(
-                    action_id=action.action_id,
-                    source_run_id=action.source_run_id,
-                    session_id=task.session_id,
-                    response_run_id=record.run_id,
-                    decision=decision.value,
-                    option_id=option_id,
-                    response_text=task.message_text,
+            else:
+                current_session = self._session(source_record.session_id)
+                plan = ConfirmedCandidatePlan(
+                    record=source_record,
+                    session=current_session,
+                    candidates=[],
+                    answers=current_session.answers,
+                    answer_contexts=[],
+                    symptom_reports=[],
                     resolved_at=record.completed_at,
                 )
-            self._context_resolution_audit(task, result)
+            resolution = result.context_resolution
+            self._persist_conversation_decision(
+                plan=plan,
+                action_ids=[action.action_id for action in actions],
+                decision=decision.value,
+                resolution_decision=decision,
+                option_id=option_id,
+                audit_decision=(
+                    "natural_language_context_accepted"
+                    if candidates
+                    else f"natural_language_context_{decision.value}"
+                ),
+                persist_answers=bool(candidates),
+                response_run_id=record.run_id,
+                response_text=task.message_text,
+                context_audit_details=(
+                    {
+                        "session_id": task.session_id,
+                        "source_run_id": resolution.source_run_id,
+                        "action_ids": resolution.action_ids,
+                        "decision": resolution.decision.value,
+                        "applied_link_ids": resolution.applied_link_ids,
+                        "followup_occurrence_id": (
+                            task.temporal_context.followup_occurrence_id
+                        ),
+                        "received_at_local": task.temporal_context.received_at_local,
+                    }
+                    if resolution is not None
+                    else None
+                ),
+            )
             return SemanticInteraction(task=task, result=result, record=record)
 
         contextual_draft = self._contextual_answer_candidate(task)
@@ -279,18 +318,36 @@ class CareAgentService:
         )
         record = self._record(task, outcome)
         self.store.save_agent_run(record)
+        bindings_by_run: dict[str, set[str]] = {}
         for candidate in outcome.result.candidates:
             binding = candidate.context_binding
-            if binding is None:
-                continue
-            self.store.resolve_conversation_action(
-                action_id=binding.source_action_id,
-                source_run_id=binding.source_run_id,
-                session_id=task.session_id,
-                response_run_id=record.run_id,
+            if binding is not None:
+                bindings_by_run.setdefault(binding.source_run_id, set()).add(
+                    binding.source_action_id
+                )
+        for source_run_id, bound_action_ids in bindings_by_run.items():
+            source_record = self.store.get_agent_run(source_run_id)
+            if source_record is None:
+                raise ValueError("上下文候选引用的 Agent 运行记录不存在")
+            current_session = self._session(source_record.session_id)
+            self._persist_conversation_decision(
+                plan=ConfirmedCandidatePlan(
+                    record=source_record,
+                    session=current_session,
+                    candidates=[],
+                    answers=current_session.answers,
+                    answer_contexts=[],
+                    symptom_reports=[],
+                    resolved_at=record.completed_at,
+                ),
+                action_ids=sorted(bound_action_ids),
                 decision=ContextResolutionDecision.ACCEPTED.value,
+                resolution_decision=ContextResolutionDecision.ACCEPTED,
+                option_id=None,
+                audit_decision="context_binding_accepted",
+                persist_answers=False,
+                response_run_id=record.run_id,
                 response_text=task.message_text,
-                resolved_at=record.completed_at,
             )
         record_audit_event(
             self.store,
@@ -968,32 +1025,6 @@ class CareAgentService:
             }
         )
 
-    def _context_resolution_audit(
-        self, task: SemanticTask, result: SemanticResult
-    ) -> None:
-        resolution = result.context_resolution
-        if resolution is None:
-            return
-        record_audit_event(
-            self.store,
-            patient_id=task.patient_id,
-            entity_type="AgentRun",
-            entity_id=result.run_id,
-            event_type="conversation_context_resolved",
-            actor_type="deterministic_context_resolver",
-            details={
-                "session_id": task.session_id,
-                "source_run_id": resolution.source_run_id,
-                "action_ids": resolution.action_ids,
-                "decision": resolution.decision.value,
-                "applied_link_ids": resolution.applied_link_ids,
-                "followup_occurrence_id": (
-                    task.temporal_context.followup_occurrence_id
-                ),
-                "received_at_local": task.temporal_context.received_at_local,
-            },
-        )
-
     def _care_stage_trace(
         self, outcome: AgentRuntimeOutcome
     ) -> AgentStageTrace:
@@ -1303,7 +1334,11 @@ class CareAgentService:
     def confirm_candidates(
         self, run_id: str, candidate_ids: list[str]
     ):
-        if not candidate_ids:
+        if (
+            not candidate_ids
+            or len(candidate_ids) != len(set(candidate_ids))
+            or any(not item.strip() for item in candidate_ids)
+        ):
             raise ValueError("请选择至少一项记录后再确认")
         record, result = self._stored_result(run_id)
         available = {item.candidate_id: item for item in result.candidates}
@@ -1318,15 +1353,20 @@ class CareAgentService:
                 for candidate in candidates
             },
         )
-        session = self._apply_confirmed(record, candidates)
-        self._confirmation_audit(record, candidates, decision="accepted")
-        for candidate in candidates:
-            self._close_action(
-                record,
-                candidate.candidate_id,
-                decision=ContextResolutionDecision.ACCEPTED,
-            )
-        return session
+        resolved_at = utc_now_iso()
+        plan = self.prepare_confirmed_candidates(
+            run_id,
+            candidate_ids,
+            resolved_at=resolved_at,
+        )
+        return self._persist_conversation_decision(
+            plan=plan,
+            action_ids=candidate_ids,
+            decision="accepted",
+            resolution_decision=ContextResolutionDecision.ACCEPTED,
+            option_id=None,
+            audit_decision="accepted",
+        )
 
     def prepare_confirmed_candidates(
         self,
@@ -1485,6 +1525,7 @@ class CareAgentService:
             )
         return ConfirmedCandidatePlan(
             record=record,
+            session=session,
             candidates=candidates,
             answers=answers,
             answer_contexts=contexts,
@@ -1495,7 +1536,14 @@ class CareAgentService:
     def reject_candidates(self, run_id: str, candidate_ids: list[str]) -> None:
         record, result = self._stored_result(run_id)
         available = {item.candidate_id: item for item in result.candidates}
-        candidates = [available[item_id] for item_id in candidate_ids if item_id in available]
+        if (
+            not candidate_ids
+            or len(candidate_ids) != len(set(candidate_ids))
+            or any(not item.strip() for item in candidate_ids)
+            or set(candidate_ids) - set(available)
+        ):
+            raise ValueError("拒绝内容必须是该次安全审核中的非空唯一候选集")
+        candidates = [available[item_id] for item_id in candidate_ids]
         self._preflight_action_decisions(
             record,
             {
@@ -1503,20 +1551,37 @@ class CareAgentService:
                 for candidate in candidates
             },
         )
-        self._confirmation_audit(record, candidates, decision="rejected")
-        for candidate in candidates:
-            self._close_action(
-                record,
-                candidate.candidate_id,
-                decision=ContextResolutionDecision.REJECTED,
-            )
+        session = self._session(record.session_id)
+        resolved_at = utc_now_iso()
+        self._persist_conversation_decision(
+            plan=ConfirmedCandidatePlan(
+                record=record,
+                session=session,
+                candidates=candidates,
+                answers=session.answers,
+                answer_contexts=[],
+                symptom_reports=[],
+                resolved_at=resolved_at,
+            ),
+            action_ids=candidate_ids,
+            decision="rejected",
+            resolution_decision=ContextResolutionDecision.REJECTED,
+            option_id=None,
+            audit_decision="rejected",
+            persist_answers=False,
+        )
 
     def mark_candidates_unsure(self, run_id: str, candidate_ids: list[str]) -> None:
         """Record uncertainty without releasing any draft or clinical resource."""
 
         record, result = self._stored_result(run_id)
         available = {item.candidate_id: item for item in result.candidates}
-        if not candidate_ids or set(candidate_ids) - set(available):
+        if (
+            not candidate_ids
+            or len(candidate_ids) != len(set(candidate_ids))
+            or any(not item.strip() for item in candidate_ids)
+            or set(candidate_ids) - set(available)
+        ):
             raise ValueError("不确定内容不属于该次安全审核结果")
         candidates = [available[item_id] for item_id in candidate_ids]
         self._preflight_action_decisions(
@@ -1526,13 +1591,24 @@ class CareAgentService:
                 for item in candidates
             },
         )
-        self._confirmation_audit(record, candidates, decision="unsure")
-        for candidate in candidates:
-            self._close_action(
-                record,
-                candidate.candidate_id,
-                decision=ContextResolutionDecision.UNSURE,
-            )
+        session = self._session(record.session_id)
+        self._persist_conversation_decision(
+            plan=ConfirmedCandidatePlan(
+                record=record,
+                session=session,
+                candidates=candidates,
+                answers=session.answers,
+                answer_contexts=[],
+                symptom_reports=[],
+                resolved_at=utc_now_iso(),
+            ),
+            action_ids=candidate_ids,
+            decision="unsure",
+            resolution_decision=ContextResolutionDecision.UNSURE,
+            option_id=None,
+            audit_decision="unsure",
+            persist_answers=False,
+        )
 
     def confirm_original_text(self, run_id: str):
         """Patient explicitly chooses to retain only their verbatim report."""
@@ -1551,15 +1627,21 @@ class CareAgentService:
                 for action_id in action_ids
             },
         )
-        session = self._apply_confirmed(record, [])
-        self._confirmation_audit(record, [], decision="verbatim_only_accepted")
-        for action_id in action_ids:
-            self._close_action(
-                record,
-                action_id,
-                decision=ContextResolutionDecision.REJECTED,
-            )
-        return session
+        resolved_at = utc_now_iso()
+        plan = self.prepare_confirmed_candidates(
+            run_id,
+            [],
+            resolved_at=resolved_at,
+            _candidate_values=[],
+        )
+        return self._persist_conversation_decision(
+            plan=plan,
+            action_ids=action_ids,
+            decision="verbatim-only",
+            resolution_decision=ContextResolutionDecision.REJECTED,
+            option_id=None,
+            audit_decision="verbatim_only_accepted",
+        )
 
     def resolve_clarification(
         self, run_id: str, clarification_id: str, option_id: str
@@ -1601,19 +1683,28 @@ class CareAgentService:
             record,
             {clarification.clarification_id: decision},
         )
+        resolved_at = utc_now_iso()
         if clarification.kind == ClarificationKind.TERMINOLOGY_DISAMBIGUATION:
             mention = clarification.reported_symptom
             if option.terminology_match is None or mention is None:
-                self._confirmation_audit(
-                    record, [], decision=f"terminology_{option_id}"
-                )
-                self._close_action(
-                    record,
-                    clarification.clarification_id,
-                    decision=decision,
+                session = self._session(record.session_id)
+                return self._persist_conversation_decision(
+                    plan=ConfirmedCandidatePlan(
+                        record=record,
+                        session=session,
+                        candidates=[],
+                        answers=session.answers,
+                        answer_contexts=[],
+                        symptom_reports=[],
+                        resolved_at=resolved_at,
+                    ),
+                    action_ids=[clarification.clarification_id],
+                    decision=decision.value,
+                    resolution_decision=decision,
                     option_id=option_id,
+                    audit_decision=f"terminology_{option_id}",
+                    persist_answers=False,
                 )
-                return self._session(record.session_id)
             task = self._task_for_record(record)
             candidate = self._symptom_candidate(
                 task,
@@ -1634,30 +1725,39 @@ class CareAgentService:
             errors = self.safety.review_candidate(task, candidate)
             if errors:
                 raise ValueError("术语澄清后的候选未通过安全校验")
-            session = self._apply_confirmed(record, [candidate])
-            self._confirmation_audit(
-                record, [candidate], decision="terminology_clarification_accepted"
+            plan = self.prepare_confirmed_candidates(
+                run_id,
+                [],
+                resolved_at=resolved_at,
+                _candidate_values=[candidate],
             )
-            self._close_action(
-                record,
-                clarification.clarification_id,
-                decision=ContextResolutionDecision.ACCEPTED,
+            return self._persist_conversation_decision(
+                plan=plan,
+                action_ids=[clarification.clarification_id],
+                decision=ContextResolutionDecision.ACCEPTED.value,
+                resolution_decision=ContextResolutionDecision.ACCEPTED,
                 option_id=option_id,
+                audit_decision="terminology_clarification_accepted",
             )
-            return session
         if not option.accepts_candidate or candidate is None:
-            self._confirmation_audit(
-                record,
-                [candidate] if candidate else [],
-                decision=f"clarification_{option_id}",
-            )
-            self._close_action(
-                record,
-                clarification.clarification_id,
-                decision=decision,
+            session = self._session(record.session_id)
+            return self._persist_conversation_decision(
+                plan=ConfirmedCandidatePlan(
+                    record=record,
+                    session=session,
+                    candidates=[candidate] if candidate else [],
+                    answers=session.answers,
+                    answer_contexts=[],
+                    symptom_reports=[],
+                    resolved_at=resolved_at,
+                ),
+                action_ids=[clarification.clarification_id],
+                decision=decision.value,
+                resolution_decision=decision,
                 option_id=option_id,
+                audit_decision=f"clarification_{option_id}",
+                persist_answers=False,
             )
-            return self._session(record.session_id)
 
         if clarification.kind.value == "confirm_time_window":
             candidate = candidate.model_copy(
@@ -1669,15 +1769,20 @@ class CareAgentService:
         errors = self.safety.review_candidate(task, candidate)
         if errors:
             raise ValueError("澄清后的候选未通过安全校验")
-        session = self._apply_confirmed(record, [candidate])
-        self._confirmation_audit(record, [candidate], decision="clarification_accepted")
-        self._close_action(
-            record,
-            clarification.clarification_id,
-            decision=ContextResolutionDecision.ACCEPTED,
-            option_id=option_id,
+        plan = self.prepare_confirmed_candidates(
+            run_id,
+            [],
+            resolved_at=resolved_at,
+            _candidate_values=[candidate],
         )
-        return session
+        return self._persist_conversation_decision(
+            plan=plan,
+            action_ids=[clarification.clarification_id],
+            decision=ContextResolutionDecision.ACCEPTED.value,
+            resolution_decision=ContextResolutionDecision.ACCEPTED,
+            option_id=option_id,
+            audit_decision="clarification_accepted",
+        )
 
     def _preflight_action_decisions(
         self,
@@ -1690,62 +1795,111 @@ class CareAgentService:
             if current in {
                 ContextResolutionDecision.ACCEPTED.value,
                 ContextResolutionDecision.REJECTED.value,
-            }:
+            } and current != decision.value:
                 raise ValueError("该对话操作已经完成，不能重复提交")
-            if (
-                current == ContextResolutionDecision.UNSURE.value
-                and decision == ContextResolutionDecision.UNSURE
-            ):
-                raise ValueError("该对话操作已记录为不确定，请选择明确结果")
 
-    def _apply_confirmed(
-        self, record: AgentRunRecord, candidates: list[SemanticCandidate]
-    ):
-        plan = self.prepare_confirmed_candidates(
-            record.run_id,
-            [item.candidate_id for item in candidates],
-            _candidate_values=candidates,
-        )
-        updated = self.care_engine.save_draft(record.session_id, plan.answers)
-        for report in plan.symptom_reports:
-            self.store.save_confirmed_symptom_report(report)
-        for context in plan.answer_contexts:
-            self.store.save_confirmed_answer_context(context)
-        return updated
-
-    def _close_action(
+    def _persist_conversation_decision(
         self,
-        record: AgentRunRecord,
-        action_id: str,
         *,
-        decision: ContextResolutionDecision,
-        option_id: str | None = None,
-    ) -> None:
-        self.store.resolve_conversation_action(
-            action_id=action_id,
-            source_run_id=record.run_id,
-            session_id=record.session_id,
-            decision=decision.value,
-            option_id=option_id,
-            resolved_at=utc_now_iso(),
-        )
+        plan: ConfirmedCandidatePlan,
+        action_ids: list[str],
+        decision: str,
+        resolution_decision: ContextResolutionDecision,
+        option_id: str | None,
+        audit_decision: str,
+        persist_answers: bool = True,
+        response_run_id: str | None = None,
+        response_text: str | None = None,
+        context_audit_details: dict[str, Any] | None = None,
+    ) -> CareSession:
+        """Validate a draft and hand one immutable decision bundle to SQLite."""
 
-    def _confirmation_audit(self, record, candidates, *, decision: str) -> None:
-        record_audit_event(
-            self.store,
-            patient_id=record.patient_id,
-            entity_type="AgentRun",
-            entity_id=record.run_id,
-            event_type="semantic_candidate_patient_decision",
-            actor_type="synthetic_patient",
-            details={
-                "session_id": record.session_id,
+        if persist_answers:
+            questionnaire = self.care_engine.questionnaire_for_session(plan.session)
+            build_questionnaire_response(
+                questionnaire=questionnaire,
+                response_id=f"draft-{plan.session.session_id.removeprefix('session-')}",
+                patient_id=plan.session.patient_id,
+                authored=plan.resolved_at,
+                answers=plan.answers,
+                status="in-progress",
+            )
+        identity_payload = json.dumps(
+            {
+                "source_run_id": plan.record.run_id,
+                "action_ids": sorted(action_ids),
                 "decision": decision,
-                "candidate_ids": [item.candidate_id for item in candidates],
-                "confirmed_link_ids": [item.link_id for item in candidates],
-                "clinical_assessment": "not_assessed",
+                "option_id": option_id,
             },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )
+        identity = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()
+        audits = []
+        if persist_answers:
+            audits.append(
+                build_audit_event(
+                    event_id=f"audit-{identity[:32]}-draft",
+                    patient_id=plan.record.patient_id,
+                    entity_type="CareSession",
+                    entity_id=plan.record.session_id,
+                    event_type="care_session_draft_saved",
+                    actor_type="synthetic_patient",
+                    created_at=plan.resolved_at,
+                    details={"answered_link_ids": sorted(plan.answers)},
+                )
+            )
+        audits.append(
+            build_audit_event(
+                event_id=f"audit-{identity[:32]}-decision",
+                patient_id=plan.record.patient_id,
+                entity_type="AgentRun",
+                entity_id=plan.record.run_id,
+                event_type="semantic_candidate_patient_decision",
+                actor_type="synthetic_patient",
+                created_at=plan.resolved_at,
+                details={
+                    "session_id": plan.record.session_id,
+                    "decision": audit_decision,
+                    "candidate_ids": [item.candidate_id for item in plan.candidates],
+                    "confirmed_link_ids": [item.link_id for item in plan.candidates],
+                    "clinical_assessment": "not_assessed",
+                },
+            )
+        )
+        if context_audit_details is not None:
+            audits.append(
+                build_audit_event(
+                    event_id=f"audit-{identity[:32]}-context",
+                    patient_id=plan.record.patient_id,
+                    entity_type="AgentRun",
+                    entity_id=response_run_id or plan.record.run_id,
+                    event_type="conversation_context_resolved",
+                    actor_type="deterministic_context_resolver",
+                    created_at=plan.resolved_at,
+                    details=context_audit_details,
+                )
+            )
+        self.store.persist_conversation_decision_bundle(
+            expected_session=plan.session,
+            answers=plan.answers if persist_answers else None,
+            answer_contexts=plan.answer_contexts if persist_answers else [],
+            symptom_reports=plan.symptom_reports if persist_answers else [],
+            action_ids=action_ids,
+            source_run_id=plan.record.run_id,
+            decision=decision,
+            resolution_decision=resolution_decision.value,
+            option_id=option_id,
+            response_run_id=response_run_id,
+            response_text=response_text,
+            resolved_at=plan.resolved_at,
+            audit_events=audits,
+        )
+        session = self.store.get_care_session(plan.record.session_id)
+        if session is None:
+            raise ValueError("随访会话不存在")
+        return session
 
     def _record(
         self, task: SemanticTask, outcome: AgentRuntimeOutcome

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from continucare.agents.contracts import AgentRunRecord
 from continucare.db import connect, initialize_database
+from continucare.errors import ConcurrentWriteConflict, is_sqlite_busy
 from continucare.fhir.r4 import FHIRValidationError, validate_r4_resource
 from continucare.fhir.references import (
     validate_questionnaire_response_against_questionnaire,
@@ -242,6 +244,444 @@ class SQLiteStore:
                 ),
             )
 
+    def persist_conversation_decision_bundle(
+        self,
+        *,
+        expected_session: CareSession,
+        answers: dict | None,
+        answer_contexts: list[ConfirmedAnswerContext],
+        symptom_reports: list[ConfirmedSymptomReport],
+        action_ids: list[str],
+        source_run_id: str,
+        decision: str,
+        resolution_decision: str,
+        option_id: str | None,
+        response_run_id: str | None,
+        response_text: str | None,
+        resolved_at: str,
+        audit_events: list[AuditEvent],
+    ) -> bool:
+        """CAS one ordinary M2/M3 patient decision as an atomic command."""
+
+        if len(action_ids) != len(set(action_ids)) or any(
+            not item.strip() for item in action_ids
+        ):
+            raise ValueError("conversation action ids must be non-blank and unique")
+        if not action_ids and decision != "verbatim-only":
+            raise ValueError("conversation decision requires at least one action")
+        if decision not in {"accepted", "rejected", "unsure", "verbatim-only"}:
+            raise ValueError("conversation decision identity is invalid")
+        if resolution_decision not in {"accepted", "rejected", "unsure"}:
+            raise ValueError("conversation resolution decision is invalid")
+        if not audit_events:
+            raise ValueError("conversation decision requires audit evidence")
+        if len({event.event_id for event in audit_events}) != len(audit_events):
+            raise ValueError("conversation decision audit ids must be unique")
+        if any(
+            event.patient_id != expected_session.patient_id for event in audit_events
+        ):
+            raise ValueError("conversation decision audit patient mismatch")
+        if any(
+            item.session_id != expected_session.session_id
+            or item.source_run_id != source_run_id
+            for item in [*answer_contexts, *symptom_reports]
+        ):
+            raise ValueError("conversation material does not match source run/session")
+        if answers is None and (answer_contexts or symptom_reports):
+            raise ValueError("conversation material requires a draft answer update")
+
+        def payload(value) -> str:
+            return json.dumps(
+                value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            )
+
+        expected_answers_payload = payload(expected_session.answers)
+        target_answers_payload = payload(answers) if answers is not None else None
+
+        def audit_matches(row, event: AuditEvent) -> bool:
+            return bool(
+                row is not None
+                and row["patient_id"] == event.patient_id
+                and row["entity_type"] == event.entity_type
+                and row["entity_id"] == event.entity_id
+                and row["event_type"] == event.event_type
+                and row["actor_type"] == event.actor_type
+                and payload(json.loads(row["details_json"]))
+                == payload(event.details_json)
+            )
+
+        try:
+            with connect(self.db_path) as connection:
+                connection.execute("PRAGMA busy_timeout=0")
+                connection.execute("BEGIN IMMEDIATE")
+                session_row = connection.execute(
+                    "SELECT * FROM care_sessions WHERE session_id=?",
+                    (expected_session.session_id,),
+                ).fetchone()
+                if session_row is None:
+                    raise LookupError(
+                        f"care session {expected_session.session_id!r} was not found"
+                    )
+                run_row = connection.execute(
+                    "SELECT * FROM agent_runs WHERE run_id=?",
+                    (source_run_id,),
+                ).fetchone()
+                if (
+                    run_row is None
+                    or run_row["patient_id"] != expected_session.patient_id
+                    or run_row["session_id"] != expected_session.session_id
+                ):
+                    raise ValueError("conversation decision source AgentRun mismatch")
+                if response_run_id is not None:
+                    response_run = connection.execute(
+                        "SELECT patient_id, session_id FROM agent_runs WHERE run_id=?",
+                        (response_run_id,),
+                    ).fetchone()
+                    if (
+                        response_run is None
+                        or response_run["patient_id"] != expected_session.patient_id
+                        or response_run["session_id"] != expected_session.session_id
+                    ):
+                        raise ValueError(
+                            "conversation decision response AgentRun mismatch"
+                        )
+                result = json.loads(run_row["output_json"])
+                available_action_ids = {
+                    item["candidate_id"] for item in result.get("candidates", [])
+                } | {
+                    item["clarification_id"]
+                    for item in result.get("clarifications", [])
+                }
+                unknown = set(action_ids) - available_action_ids
+                if unknown:
+                    raise ValueError(
+                        "conversation decision contains an unknown or cross-run action"
+                    )
+
+                resolution_rows = {
+                    row["action_id"]: row
+                    for row in connection.execute(
+                        "SELECT * FROM conversation_action_resolutions "
+                        f"WHERE action_id IN ({','.join('?' for _ in action_ids)})",
+                        tuple(action_ids),
+                    ).fetchall()
+                } if action_ids else {}
+                all_resolutions_absent = not resolution_rows
+                all_resolutions_exact = all(
+                    (row := resolution_rows.get(action_id)) is not None
+                    and row["source_run_id"] == source_run_id
+                    and row["session_id"] == expected_session.session_id
+                    and row["decision"] == resolution_decision
+                    and row["option_id"] == option_id
+                    and row["response_run_id"] == response_run_id
+                    and row["response_text"] == response_text
+                    for action_id in action_ids
+                )
+                all_unsure_transition = bool(action_ids) and all(
+                    (row := resolution_rows.get(action_id)) is not None
+                    and row["source_run_id"] == source_run_id
+                    and row["session_id"] == expected_session.session_id
+                    and row["decision"] == "unsure"
+                    for action_id in action_ids
+                ) and resolution_decision in {"accepted", "rejected"}
+
+                audit_rows = {
+                    event.event_id: connection.execute(
+                        "SELECT * FROM audit_events WHERE event_id=?",
+                        (event.event_id,),
+                    ).fetchone()
+                    for event in audit_events
+                }
+                any_audit = any(row is not None for row in audit_rows.values())
+                all_audits_exact = all(
+                    audit_matches(audit_rows[event.event_id], event)
+                    for event in audit_events
+                )
+
+                context_rows = {
+                    context.answer_context_id: connection.execute(
+                        "SELECT * FROM confirmed_answer_contexts "
+                        "WHERE answer_context_id=?",
+                        (context.answer_context_id,),
+                    ).fetchone()
+                    for context in answer_contexts
+                }
+                report_rows = {
+                    report.report_id: connection.execute(
+                        "SELECT * FROM confirmed_symptom_reports WHERE report_id=?",
+                        (report.report_id,),
+                    ).fetchone()
+                    for report in symptom_reports
+                }
+                domain_rows_exist = any(
+                    row is not None for row in [*context_rows.values(), *report_rows.values()]
+                )
+                replay_domain_exact = (
+                    (answers is None or payload(json.loads(session_row["answers_json"])) == target_answers_payload)
+                    and all(
+                        row is not None
+                        and row["session_id"] == context.session_id
+                        and row["link_id"] == context.link_id
+                        and payload(json.loads(row["answer_json"]))
+                        == payload(context.answer)
+                        and row["source_run_id"] == context.source_run_id
+                        and row["followup_occurrence_id"]
+                        == context.followup_occurrence_id
+                        and row["patient_timezone"] == context.patient_timezone
+                        and row["reported_at"] == context.reported_at
+                        and row["effective_start"] == context.effective_start
+                        and row["effective_end"] == context.effective_end
+                        and row["temporal_kind"] == context.temporal_kind
+                        and row["resolution_basis"] == context.resolution_basis
+                        and row["raw_text"] == context.raw_text
+                        and (
+                            payload(json.loads(row["terminology_match_json"]))
+                            if row["terminology_match_json"]
+                            else None
+                        )
+                        == (
+                            payload(context.terminology_match)
+                            if context.terminology_match is not None
+                            else None
+                        )
+                        and row["status"] == "active"
+                        for context in answer_contexts
+                        for row in [context_rows[context.answer_context_id]]
+                    )
+                    and all(
+                        row is not None
+                        and row["session_id"] == report.session_id
+                        and row["concept_id"] == report.concept_id
+                        and row["source_run_id"] == report.source_run_id
+                        and row["report_id"] == report.report_id
+                        and row["status"] == "active"
+                        for report in symptom_reports
+                        for row in [report_rows[report.report_id]]
+                    )
+                )
+                if all_resolutions_exact and all_audits_exact and replay_domain_exact:
+                    return False
+                if (
+                    any_audit
+                    or (bool(action_ids) and all_resolutions_exact)
+                    or domain_rows_exist
+                    or not (
+                        all_resolutions_absent
+                        or all_unsure_transition
+                        or (not action_ids and not resolution_rows)
+                    )
+                ):
+                    raise ConcurrentWriteConflict(
+                        "conversation decision has a conflicting or partial replay"
+                    )
+
+                if (
+                    session_row["patient_id"] != expected_session.patient_id
+                    or session_row["status"] != CareSessionStatus.IN_PROGRESS.value
+                    or session_row["updated_at"] != expected_session.updated_at
+                    or payload(json.loads(session_row["answers_json"]))
+                    != expected_answers_payload
+                ):
+                    raise ConcurrentWriteConflict(
+                        "care session changed; refresh and retry"
+                    )
+
+                self._conversation_decision_fault("before_material")
+                for context in answer_contexts:
+                    connection.execute(
+                        """
+                        UPDATE confirmed_answer_contexts SET status='superseded'
+                        WHERE session_id=? AND link_id=? AND status='active'
+                        """,
+                        (context.session_id, context.link_id),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO confirmed_answer_contexts (
+                            answer_context_id, session_id, link_id, answer_json,
+                            source_run_id, followup_occurrence_id, patient_timezone,
+                            reported_at, effective_start, effective_end, temporal_kind,
+                            resolution_basis, raw_text, terminology_match_json,
+                            status, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            context.answer_context_id,
+                            context.session_id,
+                            context.link_id,
+                            payload(context.answer),
+                            context.source_run_id,
+                            context.followup_occurrence_id,
+                            context.patient_timezone,
+                            context.reported_at,
+                            context.effective_start,
+                            context.effective_end,
+                            context.temporal_kind,
+                            context.resolution_basis,
+                            context.raw_text,
+                            (
+                                payload(context.terminology_match)
+                                if context.terminology_match is not None
+                                else None
+                            ),
+                            context.status,
+                            context.created_at,
+                        ),
+                    )
+                    self._conversation_decision_fault("after_answer_context")
+                for report in symptom_reports:
+                    connection.execute(
+                        """
+                        INSERT INTO confirmed_symptom_reports (
+                            report_id, session_id, concept_id, preferred_zh, coding_json,
+                            terminology_match_json, source_kind, source_run_id,
+                            evidence_text, evidence_start, evidence_end,
+                            followup_occurrence_id, patient_timezone, reported_at,
+                            effective_start, effective_end, temporal_kind, status,
+                            created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(session_id, concept_id) DO UPDATE SET
+                            report_id=excluded.report_id,
+                            preferred_zh=excluded.preferred_zh,
+                            coding_json=excluded.coding_json,
+                            terminology_match_json=excluded.terminology_match_json,
+                            source_kind=excluded.source_kind,
+                            source_run_id=excluded.source_run_id,
+                            evidence_text=excluded.evidence_text,
+                            evidence_start=excluded.evidence_start,
+                            evidence_end=excluded.evidence_end,
+                            followup_occurrence_id=excluded.followup_occurrence_id,
+                            patient_timezone=excluded.patient_timezone,
+                            reported_at=excluded.reported_at,
+                            effective_start=excluded.effective_start,
+                            effective_end=excluded.effective_end,
+                            temporal_kind=excluded.temporal_kind,
+                            status='active', created_at=excluded.created_at
+                        """,
+                        (
+                            report.report_id,
+                            report.session_id,
+                            report.concept_id,
+                            report.preferred_zh,
+                            payload(report.coding),
+                            payload(report.terminology_match),
+                            report.source_kind,
+                            report.source_run_id,
+                            report.evidence_text,
+                            report.evidence_start,
+                            report.evidence_end,
+                            report.followup_occurrence_id,
+                            report.patient_timezone,
+                            report.reported_at,
+                            report.effective_start,
+                            report.effective_end,
+                            report.temporal_kind,
+                            report.status,
+                            report.created_at,
+                        ),
+                    )
+                    self._conversation_decision_fault("after_symptom_report")
+                if answers is not None:
+                    cursor = connection.execute(
+                        """
+                        UPDATE care_sessions SET answers_json=?, updated_at=?
+                        WHERE session_id=? AND status='in_progress'
+                          AND updated_at=? AND answers_json=?
+                        """,
+                        (
+                            target_answers_payload,
+                            resolved_at,
+                            expected_session.session_id,
+                            expected_session.updated_at,
+                            session_row["answers_json"],
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ConcurrentWriteConflict(
+                            "care session changed; refresh and retry"
+                        )
+                    self._conversation_decision_fault("after_session")
+                for index, action_id in enumerate(action_ids):
+                    if all_unsure_transition:
+                        cursor = connection.execute(
+                            """
+                            UPDATE conversation_action_resolutions
+                            SET decision=?, option_id=?, response_run_id=?,
+                                response_text=?, resolved_at=?
+                            WHERE action_id=? AND source_run_id=? AND session_id=?
+                              AND decision='unsure'
+                            """,
+                            (
+                                resolution_decision,
+                                option_id,
+                                response_run_id,
+                                response_text,
+                                resolved_at,
+                                action_id,
+                                source_run_id,
+                                expected_session.session_id,
+                            ),
+                        )
+                    else:
+                        cursor = connection.execute(
+                            """
+                            INSERT INTO conversation_action_resolutions (
+                                action_id, source_run_id, session_id, decision,
+                                option_id, response_run_id, response_text, resolved_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                action_id,
+                                source_run_id,
+                                expected_session.session_id,
+                                resolution_decision,
+                                option_id,
+                                response_run_id,
+                                response_text,
+                                resolved_at,
+                            ),
+                        )
+                    if cursor.rowcount != 1:
+                        raise ConcurrentWriteConflict(
+                            "conversation action changed; refresh and retry"
+                        )
+                    self._conversation_decision_fault(f"after_resolution:{index}")
+                for event in audit_events:
+                    connection.execute(
+                        """
+                        INSERT INTO audit_events (
+                            event_id, patient_id, entity_type, entity_id, event_type,
+                            actor_type, details_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            event.event_id,
+                            event.patient_id,
+                            event.entity_type,
+                            event.entity_id,
+                            event.event_type,
+                            event.actor_type,
+                            payload(event.details_json),
+                            event.created_at,
+                        ),
+                    )
+                    self._conversation_decision_fault(
+                        f"after_audit:{event.event_type}"
+                    )
+                self._conversation_decision_fault("before_commit")
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_busy(exc):
+                raise ConcurrentWriteConflict(
+                    "conversation decision database is busy; retry the same request"
+                ) from exc
+            raise
+        return True
+
+    def _conversation_decision_fault(self, stage: str) -> None:
+        """Test seam for proving ordinary decision bundle rollback."""
+
+        return None
+
     def conversation_action_decisions(self, session_id: str) -> dict[str, str]:
         with connect(self.db_path) as connection:
             rows = connection.execute(
@@ -449,14 +889,25 @@ class SQLiteStore:
         questionnaire: dict,
         observations: list[Observation],
         completed_at: str,
-    ) -> None:
-        """Atomically persist the Layer-2 response, facts, and session transition."""
+        expected_session: CareSession | None = None,
+        audit_event: AuditEvent | None = None,
+    ) -> bool:
+        """Atomically persist completion resources, session CAS, and audit."""
 
+        requires_atomic_audit = expected_session is not None
+        if requires_atomic_audit and audit_event is None:
+            raise ValueError("atomic care completion requires its audit event")
         resource = validate_questionnaire_response_against_questionnaire(
             questionnaire_response, questionnaire
         )
+        expected_session = expected_session or session
         patient_id = resource["subject"]["reference"].removeprefix("Patient/")
-        if patient_id != session.patient_id or message.patient_id != session.patient_id:
+        if (
+            patient_id != session.patient_id
+            or message.patient_id != session.patient_id
+            or expected_session.patient_id != session.patient_id
+            or expected_session.session_id != session.session_id
+        ):
             raise FHIRValidationError(
                 "care session, message and QuestionnaireResponse patient must match"
             )
@@ -473,102 +924,267 @@ class SQLiteStore:
             validated = Observation(resource=normalized, evidence=item.evidence)
             if validated.patient_id != session.patient_id:
                 raise FHIRValidationError("Observation patient must match care session")
+            if validated.message_id != resource["id"]:
+                raise FHIRValidationError(
+                    "Observation must derive from the completed QuestionnaireResponse"
+                )
             validated_observations.append(validated)
+        observation_ids = [item.observation_id for item in validated_observations]
+        if len(observation_ids) != len(set(observation_ids)):
+            raise ValueError("completion Observation ids must be unique")
+        if audit_event is not None and (
+            audit_event.patient_id != patient_id
+            or audit_event.entity_type != "QuestionnaireResponse"
+            or audit_event.entity_id != resource["id"]
+            or audit_event.event_type != "questionnaire_response_completed"
+        ):
+            raise ValueError("completion audit identity is invalid")
 
-        with connect(self.db_path) as connection:
-            current = connection.execute(
-                "SELECT status FROM care_sessions WHERE session_id = ?",
-                (session.session_id,),
-            ).fetchone()
-            if current is None:
-                raise LookupError(f"care session {session.session_id!r} was not found")
-            if current["status"] != CareSessionStatus.IN_PROGRESS.value:
-                raise ValueError("只有进行中的随访可以提交")
+        def payload(value) -> str:
+            return json.dumps(
+                value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            )
 
-            connection.execute(
-                """
-                INSERT INTO followup_messages (
-                    message_id, patient_id, message_text, submitted_at,
-                    source, processing_status
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                tuple(message.model_dump().values()),
+        target_answers_payload = payload(session.answers)
+        expected_answers_payload = payload(expected_session.answers)
+        resource_payload = payload(resource)
+        audit_payload = payload(audit_event.details_json) if audit_event else None
+
+        def audit_matches(row) -> bool:
+            if audit_event is None:
+                return row is None
+            return bool(
+                row is not None
+                and row["patient_id"] == audit_event.patient_id
+                and row["entity_type"] == audit_event.entity_type
+                and row["entity_id"] == audit_event.entity_id
+                and row["event_type"] == audit_event.event_type
+                and row["actor_type"] == audit_event.actor_type
+                and payload(json.loads(row["details_json"])) == audit_payload
+                and row["created_at"] == audit_event.created_at
             )
-            connection.execute(
-                """
-                INSERT INTO fhir_questionnaire_responses (
-                    resource_id, patient_id, message_id, resource_json, created_at
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    resource["id"],
-                    patient_id,
-                    message.message_id,
-                    json.dumps(resource, ensure_ascii=False, separators=(",", ":")),
-                    resource["authored"],
-                ),
-            )
-            for item in validated_observations:
+
+        try:
+            with connect(self.db_path) as connection:
+                connection.execute("PRAGMA busy_timeout=0")
+                connection.execute("BEGIN IMMEDIATE")
+                current = connection.execute(
+                    "SELECT * FROM care_sessions WHERE session_id=?",
+                    (session.session_id,),
+                ).fetchone()
+                if current is None:
+                    raise LookupError(
+                        f"care session {session.session_id!r} was not found"
+                    )
+                message_row = connection.execute(
+                    "SELECT * FROM followup_messages WHERE message_id=?",
+                    (message.message_id,),
+                ).fetchone()
+                response_row = connection.execute(
+                    "SELECT * FROM fhir_questionnaire_responses WHERE resource_id=?",
+                    (resource["id"],),
+                ).fetchone()
+                observation_rows = connection.execute(
+                    """
+                    SELECT o.*, e.confidence_tier, e.evidence_text,
+                           e.evidence_start, e.evidence_end, e.recorded_at,
+                           e.source_kind, e.terminology_match_json
+                    FROM fhir_observations o
+                    JOIN observation_evidence e USING (observation_id)
+                    WHERE o.questionnaire_response_id=?
+                    """,
+                    (resource["id"],),
+                ).fetchall()
+                audit_row = (
+                    connection.execute(
+                        "SELECT * FROM audit_events WHERE event_id=?",
+                        (audit_event.event_id,),
+                    ).fetchone()
+                    if audit_event is not None
+                    else None
+                )
+
+                if current["status"] == CareSessionStatus.COMPLETED.value:
+                    stored_observations = {
+                        item.observation_id: item
+                        for item in (row_to_observation(row) for row in observation_rows)
+                    }
+                    exact = (
+                        current["patient_id"] == patient_id
+                        and payload(json.loads(current["answers_json"]))
+                        == target_answers_payload
+                        and current["questionnaire_response_id"] == resource["id"]
+                        and current["completed_at"] == completed_at
+                        and message_row is not None
+                        and all(
+                            message_row[field] == value
+                            for field, value in message.model_dump(mode="json").items()
+                        )
+                        and response_row is not None
+                        and response_row["patient_id"] == patient_id
+                        and response_row["message_id"] == message.message_id
+                        and payload(json.loads(response_row["resource_json"]))
+                        == resource_payload
+                        and set(stored_observations) == set(observation_ids)
+                        and all(
+                            stored_observations[item.observation_id] == item
+                            for item in validated_observations
+                        )
+                        and (audit_event is None or audit_matches(audit_row))
+                    )
+                    if exact:
+                        return False
+                    raise ConcurrentWriteConflict(
+                        "completed care session has incomplete or conflicting evidence"
+                    )
+                if current["status"] != CareSessionStatus.IN_PROGRESS.value:
+                    raise ConcurrentWriteConflict(
+                        "care session status changed; refresh and retry"
+                    )
+                if (
+                    current["patient_id"] != expected_session.patient_id
+                    or expected_session.status != CareSessionStatus.IN_PROGRESS
+                    or current["updated_at"] != expected_session.updated_at
+                    or payload(json.loads(current["answers_json"]))
+                    != expected_answers_payload
+                ):
+                    raise ConcurrentWriteConflict(
+                        "care session changed; refresh and retry"
+                    )
+                if (
+                    message_row is not None
+                    or response_row is not None
+                    or observation_rows
+                    or audit_row is not None
+                ):
+                    raise ConcurrentWriteConflict(
+                        "care completion has a conflicting partial replay"
+                    )
+
+                self._completion_bundle_fault("before_message")
                 connection.execute(
                     """
-                    INSERT INTO fhir_observations (
-                        observation_id, patient_id, questionnaire_response_id,
-                        effective_time, resource_json, created_at
+                    INSERT INTO followup_messages (
+                        message_id, patient_id, message_text, submitted_at,
+                        source, processing_status
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (
-                        item.observation_id,
-                        item.patient_id,
-                        item.message_id,
-                        item.effective_time,
-                        json.dumps(
-                            item.as_fhir(), ensure_ascii=False, separators=(",", ":")
-                        ),
-                        item.created_at,
-                    ),
+                    tuple(message.model_dump(mode="json").values()),
                 )
+                self._completion_bundle_fault("after_message")
                 connection.execute(
                     """
-                    INSERT INTO observation_evidence (
-                        observation_id, confidence_tier, evidence_text,
-                        evidence_start, evidence_end, recorded_at, source_kind,
-                        terminology_match_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO fhir_questionnaire_responses (
+                        resource_id, patient_id, message_id, resource_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
                     """,
                     (
-                        item.observation_id,
-                        item.confidence_tier.value,
-                        item.evidence_text,
-                        item.evidence_start,
-                        item.evidence_end,
-                        item.created_at,
-                        item.evidence.source_kind,
-                        (
-                            json.dumps(
-                                item.evidence.terminology_match, ensure_ascii=False
-                            )
-                            if item.evidence.terminology_match is not None
-                            else None
-                        ),
+                        resource["id"],
+                        patient_id,
+                        message.message_id,
+                        resource_payload,
+                        resource["authored"],
                     ),
                 )
-            cursor = connection.execute(
-                """
-                UPDATE care_sessions
-                SET answers_json = ?, status = 'completed', updated_at = ?,
-                    questionnaire_response_id = ?, completed_at = ?
-                WHERE session_id = ? AND status = 'in_progress'
-                """,
-                (
-                    json.dumps(session.answers, ensure_ascii=False),
-                    completed_at,
-                    resource["id"],
-                    completed_at,
-                    session.session_id,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError("随访状态已变化，请刷新后重试")
+                self._completion_bundle_fault("after_questionnaire_response")
+                for index, item in enumerate(validated_observations):
+                    connection.execute(
+                        """
+                        INSERT INTO fhir_observations (
+                            observation_id, patient_id, questionnaire_response_id,
+                            effective_time, resource_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            item.observation_id,
+                            item.patient_id,
+                            item.message_id,
+                            item.effective_time,
+                            payload(item.as_fhir()),
+                            item.created_at,
+                        ),
+                    )
+                    self._completion_bundle_fault(f"after_observation:{index}")
+                    connection.execute(
+                        """
+                        INSERT INTO observation_evidence (
+                            observation_id, confidence_tier, evidence_text,
+                            evidence_start, evidence_end, recorded_at, source_kind,
+                            terminology_match_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            item.observation_id,
+                            item.confidence_tier.value,
+                            item.evidence_text,
+                            item.evidence_start,
+                            item.evidence_end,
+                            item.created_at,
+                            item.evidence.source_kind,
+                            (
+                                payload(item.evidence.terminology_match)
+                                if item.evidence.terminology_match is not None
+                                else None
+                            ),
+                        ),
+                    )
+                    self._completion_bundle_fault(f"after_evidence:{index}")
+                cursor = connection.execute(
+                    """
+                    UPDATE care_sessions
+                    SET answers_json=?, status='completed', updated_at=?,
+                        questionnaire_response_id=?, completed_at=?
+                    WHERE session_id=? AND status='in_progress'
+                      AND updated_at=? AND answers_json=?
+                    """,
+                    (
+                        target_answers_payload,
+                        completed_at,
+                        resource["id"],
+                        completed_at,
+                        session.session_id,
+                        expected_session.updated_at,
+                        current["answers_json"],
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ConcurrentWriteConflict(
+                        "care session changed; refresh and retry"
+                    )
+                self._completion_bundle_fault("after_session")
+                if audit_event is not None:
+                    connection.execute(
+                        """
+                        INSERT INTO audit_events (
+                            event_id, patient_id, entity_type, entity_id, event_type,
+                            actor_type, details_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            audit_event.event_id,
+                            audit_event.patient_id,
+                            audit_event.entity_type,
+                            audit_event.entity_id,
+                            audit_event.event_type,
+                            audit_event.actor_type,
+                            audit_payload,
+                            audit_event.created_at,
+                        ),
+                    )
+                    self._completion_bundle_fault("after_audit")
+                self._completion_bundle_fault("before_commit")
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_busy(exc):
+                raise ConcurrentWriteConflict(
+                    "care completion database is busy; retry the same request"
+                ) from exc
+            raise
+        return True
+
+    def _completion_bundle_fault(self, stage: str) -> None:
+        """Test seam for proving completion rollback at every write point."""
+
+        return None
 
     def persist_confirmed_review_bundle(
         self,
