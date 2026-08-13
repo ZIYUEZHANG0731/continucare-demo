@@ -1,8 +1,69 @@
 # HANDOFF
 
-> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。本文最前面记录 2026-08-13 M5-E 当前交接；后文 M5-A/B/C/D/K 小节保留历史实现细节。若状态描述冲突，以本页最前面的 M5-E 交接为准。
+> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。最新权威状态是 2026-08-13 M1–M5 Baseline Repair 已完成并通过完整验证；后面的 M5-A/B/C/D/E/K 内容均为历史实施记录。若状态描述冲突，以本页最前面的 Baseline Repair 当前交接为准。
 
-## 0. M5-E 当前交接（已完成并在本次切片提交中收口）
+## 0. M1–M5 Baseline Repair 当前交接（2026-08-13，已完成）
+
+### 0.1 Git 与提交
+
+- 分支：`codex/docs-collaboration-init`；
+- 已验证实现基线：`28b66a99688c1e586c7add66e4882ded45ad3d90`；
+- 该实现基线已经 push；完整验证时 HEAD 与 upstream 均为上述 SHA，ahead/behind=`0/0`；
+- BR-1：`2e1754e084795a8de39cef210db26ca6d92ca32b`，`fix(layer4): enforce pathway-scoped evidence admission`；
+- BR-2：`07e1c37b5ad99a95a4709ba4c97263a8a3ff2ae6`，`fix(persistence): make review and decision bundles atomic`；
+- BR-3：`28b66a99688c1e586c7add66e4882ded45ad3d90`，`fix(demo): project legal terminal workflow states`；
+- 本次文档收口提交只包含本文件与下列三份证据文档；其提交 SHA 以实际 Git 历史为准，不在本节预写，本轮不 push。
+
+### 0.2 B1–B5 收口
+
+- B1 Pathway 隔离与 Summary identity：由 BR-1 修复；
+- B2 DoctorReview 原子事务：由 BR-2 修复；
+- B3 clinical-rule Task 正向准入：由 BR-1 修复；
+- B4 M2/M3 decision 与 completion 原子事务：由 BR-2 修复；
+- B5 rejected/cancelled/failed 等合法终态投影：由 BR-3 修复；
+- B1–B5 不再是 UI blocker。
+
+### 0.3 Baseline Full Validation
+
+完整离线验证结论为 **PASS，无 BLOCKER**：
+
+- 全量测试：`404 passed, 3 skipped`；
+- 3 个 skip 仍仅因未配置官方 `FHIR_R4_SCHEMA_ZIP`；
+- `.venv/bin/python -m compileall -q continucare app.py pages` 通过；
+- `git diff --check dd9906215779c0b42004e5ef272321e698d6ef5c..HEAD` 与 `git diff --check` 均通过；
+- rejected、unsure、unsure→accept/reject、Task rejected/cancelled 与完整 happy path 9/9 均通过；
+- `task_failed` 与 `task_entered_in_error` 由自动测试证明 fail-closed，未绕过服务或直接修改数据库进行浏览器演示；
+- in-app Browser 的桌面 `1280×720` 与移动端 `390×844` 六页验收通过，console error/warn=0；
+- 页面刷新、终态导航和 Knowledge 浏览前后，隔离临时数据库的 SHA-256、大小、mtime、全部表行计数及 `-journal/-wal/-shm` 存在性均不变；
+- 工作区 `data/continucare.db` 验证前后 SHA-256、大小和 mtime 不变；
+- 没有实际发送、外部调用、真实患者、临床规则或 Alert。
+
+### 0.4 当前能力边界
+
+- 仅使用合成患者与合成运行数据；
+- clinical assessment 仍为 `not_assessed`；
+- 默认 `clinical_rules=[]`、Alert=0、approved ClinicalRule=0；
+- Communication 即使为 `ready-to-send`，仍保持 `status=preparation`，没有 `sent` 或 `received`；
+- `SEND_ENABLED=False`；
+- 飞书/Aily 为 Mock，Bitable disabled；
+- 不接真实患者、真实飞书/Aily/Bitable、EMR 或生产系统；
+- Knowledge 独立只读，不参与患者事实、Task、ClinicalRule 或故事完成判定。
+
+### 0.5 UI 状态与下一阶段
+
+- M1–M5 baseline 已满足 UI 开工前置条件；
+- UI/UX 可以进入独立的新切片，但不会从本次文档提交自动开始，实施仍需单独明确授权；
+- UI 不得重新引入 B1–B5，也不得宣称自动诊断、风险分级、Alert、治疗或实际发送已经实现；
+- 下一阶段先冻结中文原生的信息架构、状态词表和逐页文案，再开始代码实施；
+- 真实外部系统与生产能力仍需之后单独授权和验证。
+
+### 0.6 文档证据
+
+- 全局审核：[`docs/m1_m5_global_integration_audit_2026-08-13.md`](docs/m1_m5_global_integration_audit_2026-08-13.md)；
+- 冻结修复方案：[`docs/m1_m5_baseline_repair_plan_2026-08-13.md`](docs/m1_m5_baseline_repair_plan_2026-08-13.md)；
+- 完整验证报告：[`docs/m1_m5_baseline_full_validation_report_2026-08-13.md`](docs/m1_m5_baseline_full_validation_report_2026-08-13.md)。
+
+## 0A. M5-E 历史交接（已完成并在对应切片提交中收口）
 
 - 分支：`codex/docs-collaboration-init`；
 - 本次 M5-E 提交前 HEAD / upstream 基线：`389f5361e62ab6ef3b0c4b92e1d06e204567ebb4`；ahead/behind=`0/0`；
