@@ -31,6 +31,7 @@ from continucare.layer4.contracts import (
 )
 from continucare.layer4.inputs import Layer4InputReader
 from continucare.layer4.repository import Layer4Repository
+from continucare.layer4.manual_reviews import is_clinical_rule_task
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
@@ -412,6 +413,7 @@ class DoctorWorkbenchService:
             item
             for item in resources
             if _instant(item["meta"]["lastUpdated"]) <= cutoff
+            and is_clinical_rule_task(item)
             and pathway_reference
             in {entry.get("reference") for entry in item.get("basedOn", [])}
         ]

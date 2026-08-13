@@ -15,6 +15,7 @@ from continucare.care_agent.release import LAYER3_RELEASE
 from continucare.db import utc_now_iso
 from continucare.fhir.r4 import validate_r4_resource
 from continucare.models import AuditEvent, Observation
+from continucare.layer4.manual_reviews import admit_final_patient_report
 
 
 class Layer4ReadStore(Protocol):
@@ -64,6 +65,19 @@ class Layer4InputReader:
             if resource.get("status") != "final":
                 raise ValueError("Layer 4 only accepts final Observation resources")
             observations.append(resource)
+        for response in responses:
+            related = [
+                item
+                for item in observations
+                if f"QuestionnaireResponse/{response['id']}"
+                in {ref.get("reference") for ref in item.get("derivedFrom", [])}
+            ]
+            admit_final_patient_report(
+                patient_id=patient_id,
+                questionnaire_response=response,
+                observations=related,
+                require_observations=False,
+            )
         return Layer4InputSnapshot(
             patient_id=patient_id,
             questionnaire_responses=responses,

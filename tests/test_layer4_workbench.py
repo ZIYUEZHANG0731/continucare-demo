@@ -25,6 +25,7 @@ from continucare.layer4 import (
     WorkbenchPurpose,
     WorkbenchRole,
     build_workflow_task,
+    build_patient_confirmed_review_task,
 )
 from continucare.layer4.contracts import DoctorReviewDecision, SummaryDraftStatus
 
@@ -470,6 +471,29 @@ def test_workbench_excludes_other_pathway_summary_and_task(tmp_path):
     )
 
     assert view.summary.summary_id == scenario.summary_id
+    assert {item["id"] for item in view.tasks} == {scenario.task_id}
+
+
+def test_workbench_excludes_same_pathway_manual_review_task(tmp_path):
+    scenario = _scenario(tmp_path)
+    manual = build_patient_confirmed_review_task(
+        patient_id=PATIENT_ID,
+        receipt_digest="b" * 64,
+        questionnaire_response_reference="QuestionnaireResponse/response-workbench",
+        observation_references=["Observation/weight-workbench-recent"],
+        pathway_reference=f"urn:continucare:pathway:{PATHWAY_CODE}|{PATHWAY_VERSION}",
+        authored_on="2026-08-02T12:06:00+00:00",
+        task_id="task-manual-review-workbench",
+    )
+    scenario.repository.save_fhir_resource(manual, patient_id=PATIENT_ID)
+
+    view = scenario.workbench.query(
+        patient_id=PATIENT_ID,
+        access=_access(),
+        as_of="2026-08-02T12:07:00+00:00",
+        generated_at="2026-08-02T12:07:00+00:00",
+    )
+
     assert {item["id"] for item in view.tasks} == {scenario.task_id}
 
 

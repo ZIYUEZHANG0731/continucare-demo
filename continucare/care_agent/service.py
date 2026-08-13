@@ -96,6 +96,19 @@ class SemanticInteraction(BaseModel):
     idempotent_replay: bool = False
 
 
+class ConfirmedCandidatePlan(BaseModel):
+    """Patient-confirmed Layer-3 material, validated but not yet persisted."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    record: AgentRunRecord
+    candidates: list[SemanticCandidate]
+    answers: dict[str, Any]
+    answer_contexts: list[ConfirmedAnswerContext]
+    symptom_reports: list[ConfirmedSymptomReport]
+    resolved_at: str
+
+
 class CareAgentService:
     """The only bridge from agents into CareEngine, gated by patient action."""
 
@@ -1311,6 +1324,170 @@ class CareAgentService:
             )
         return session
 
+    def prepare_confirmed_candidates(
+        self,
+        run_id: str,
+        candidate_ids: list[str],
+        *,
+        resolved_at: str | None = None,
+        require_complete_set: bool = False,
+        _candidate_values: list[SemanticCandidate] | None = None,
+    ) -> ConfirmedCandidatePlan:
+        """Validate and materialize a confirmation without changing the store."""
+
+        if not candidate_ids and _candidate_values is None:
+            raise ValueError("请选择至少一项记录后再确认")
+        record, result = self._stored_result(run_id)
+        if result.status == SemanticStatus.BLOCKED:
+            raise ValueError("被安全边界阻断的内容不能确认")
+        if require_complete_set and result.clarifications:
+            raise ValueError("仍有澄清问题未处理，不能创建护士复核任务")
+        if _candidate_values is None:
+            available = {item.candidate_id: item for item in result.candidates}
+            if set(candidate_ids) - set(available):
+                raise ValueError("确认内容不属于该次安全审核结果")
+            if require_complete_set and set(candidate_ids) != set(available):
+                raise ValueError("必须一次处理本轮全部候选，不能留下未决候选")
+            candidates = [available[item_id] for item_id in candidate_ids]
+            self._preflight_action_decisions(
+                record,
+                {
+                    candidate.candidate_id: ContextResolutionDecision.ACCEPTED
+                    for candidate in candidates
+                },
+            )
+        else:
+            candidates = _candidate_values
+        session = self._session(record.session_id)
+        if session.patient_id != record.patient_id:
+            raise ValueError("Agent 运行记录与随访会话患者不一致")
+        answers: dict[str, Any] = dict(session.answers)
+        original = record.input_text.strip()
+        if original:
+            previous = str(answers.get("free-text-report", "")).strip()
+            lines = previous.splitlines() if previous else []
+            if original not in lines:
+                answers["free-text-report"] = "\n".join([*lines, original])
+
+        temporal = result.temporal_context
+        now = resolved_at or utc_now_iso()
+        contexts: list[ConfirmedAnswerContext] = []
+        reports: list[ConfirmedSymptomReport] = []
+        for candidate in candidates:
+            effective = candidate.effective_time
+            if effective is None and temporal is not None:
+                effective = candidate_temporal_resolution(candidate, temporal)
+            terminology_match = (
+                candidate.terminology_match.model_dump(mode="json")
+                if candidate.terminology_match is not None
+                else None
+            )
+            if candidate.link_id.startswith(DYNAMIC_LINK_PREFIX):
+                if candidate.terminology_match is None:
+                    raise ValueError("患者自述症状缺少经过校验的术语匹配")
+                match = candidate.terminology_match
+                reports.append(
+                    ConfirmedSymptomReport(
+                        report_id=(
+                            "symptom-report-"
+                            + uuid5(
+                                NAMESPACE_URL,
+                                f"{record.run_id}|{candidate.candidate_id}",
+                            ).hex
+                        ),
+                        session_id=session.session_id,
+                        concept_id=match.concept_id,
+                        preferred_zh=match.preferred_zh,
+                        coding=match.coding.model_dump(mode="json"),
+                        terminology_match=terminology_match,
+                        source_kind=candidate.origin.value,
+                        source_run_id=record.run_id,
+                        evidence_text=candidate.evidence_text,
+                        evidence_start=candidate.evidence_start,
+                        evidence_end=candidate.evidence_end,
+                        followup_occurrence_id=(
+                            temporal.followup_occurrence_id
+                            if temporal is not None
+                            else f"occurrence-{session.session_id}"
+                        ),
+                        patient_timezone=(
+                            temporal.patient_timezone
+                            if temporal is not None
+                            else self.patient_timezone
+                        ),
+                        reported_at=(
+                            temporal.received_at_local
+                            if temporal is not None
+                            else record.completed_at
+                        ),
+                        effective_start=(
+                            effective.effective_start if effective is not None else None
+                        ),
+                        effective_end=(
+                            effective.effective_end if effective is not None else None
+                        ),
+                        temporal_kind=(
+                            effective.kind.value if effective is not None else None
+                        ),
+                        created_at=now,
+                    )
+                )
+                continue
+            answers[candidate.link_id] = candidate.answer
+            contexts.append(
+                ConfirmedAnswerContext(
+                    answer_context_id=(
+                        "answer-context-"
+                        + uuid5(
+                            NAMESPACE_URL,
+                            f"{record.run_id}|{candidate.candidate_id}|{candidate.link_id}",
+                        ).hex
+                    ),
+                    session_id=session.session_id,
+                    link_id=candidate.link_id,
+                    answer=candidate.answer,
+                    source_run_id=record.run_id,
+                    followup_occurrence_id=(
+                        temporal.followup_occurrence_id
+                        if temporal is not None
+                        else f"occurrence-{session.session_id}"
+                    ),
+                    patient_timezone=(
+                        temporal.patient_timezone
+                        if temporal is not None
+                        else self.patient_timezone
+                    ),
+                    reported_at=(
+                        temporal.received_at_local
+                        if temporal is not None
+                        else record.completed_at
+                    ),
+                    effective_start=(
+                        effective.effective_start if effective is not None else None
+                    ),
+                    effective_end=(
+                        effective.effective_end if effective is not None else None
+                    ),
+                    temporal_kind=(
+                        effective.kind.value if effective is not None else None
+                    ),
+                    resolution_basis=(
+                        effective.basis.value if effective is not None else None
+                    ),
+                    raw_text=record.input_text,
+                    terminology_match=terminology_match,
+                    created_at=now,
+                )
+            )
+        return ConfirmedCandidatePlan(
+            record=record,
+            candidates=candidates,
+            answers=answers,
+            answer_contexts=contexts,
+            symptom_reports=reports,
+            resolved_at=now,
+        )
+
     def reject_candidates(self, run_id: str, candidate_ids: list[str]) -> None:
         record, result = self._stored_result(run_id)
         available = {item.candidate_id: item for item in result.candidates}
@@ -1328,6 +1505,29 @@ class CareAgentService:
                 record,
                 candidate.candidate_id,
                 decision=ContextResolutionDecision.REJECTED,
+            )
+
+    def mark_candidates_unsure(self, run_id: str, candidate_ids: list[str]) -> None:
+        """Record uncertainty without releasing any draft or clinical resource."""
+
+        record, result = self._stored_result(run_id)
+        available = {item.candidate_id: item for item in result.candidates}
+        if not candidate_ids or set(candidate_ids) - set(available):
+            raise ValueError("不确定内容不属于该次安全审核结果")
+        candidates = [available[item_id] for item_id in candidate_ids]
+        self._preflight_action_decisions(
+            record,
+            {
+                item.candidate_id: ContextResolutionDecision.UNSURE
+                for item in candidates
+            },
+        )
+        self._confirmation_audit(record, candidates, decision="unsure")
+        for candidate in candidates:
+            self._close_action(
+                record,
+                candidate.candidate_id,
+                decision=ContextResolutionDecision.UNSURE,
             )
 
     def confirm_original_text(self, run_id: str):
@@ -1497,130 +1697,16 @@ class CareAgentService:
     def _apply_confirmed(
         self, record: AgentRunRecord, candidates: list[SemanticCandidate]
     ):
-        session = self._session(record.session_id)
-        if session.patient_id != record.patient_id:
-            raise ValueError("Agent 运行记录与随访会话患者不一致")
-        answers: dict[str, Any] = dict(session.answers)
-        for candidate in candidates:
-            if not candidate.link_id.startswith(DYNAMIC_LINK_PREFIX):
-                answers[candidate.link_id] = candidate.answer
-        original = record.input_text.strip()
-        if original:
-            previous = str(answers.get("free-text-report", "")).strip()
-            lines = previous.splitlines() if previous else []
-            if original not in lines:
-                answers["free-text-report"] = "\n".join([*lines, original])
-        updated = self.care_engine.save_draft(session.session_id, answers)
-        result = SemanticResult.model_validate(record.output_json)
-        temporal = result.temporal_context
-        for candidate in candidates:
-            effective = candidate.effective_time
-            if effective is None and temporal is not None:
-                effective = candidate_temporal_resolution(candidate, temporal)
-            now = utc_now_iso()
-            terminology_match = (
-                candidate.terminology_match.model_dump(mode="json")
-                if candidate.terminology_match is not None
-                else None
-            )
-            if candidate.link_id.startswith(DYNAMIC_LINK_PREFIX):
-                if candidate.terminology_match is None:
-                    raise ValueError("患者自述症状缺少经过校验的术语匹配")
-                match = candidate.terminology_match
-                self.store.save_confirmed_symptom_report(
-                    ConfirmedSymptomReport(
-                        report_id=(
-                            "symptom-report-"
-                            + uuid5(
-                                NAMESPACE_URL,
-                                f"{record.run_id}|{candidate.candidate_id}",
-                            ).hex
-                        ),
-                        session_id=session.session_id,
-                        concept_id=match.concept_id,
-                        preferred_zh=match.preferred_zh,
-                        coding=match.coding.model_dump(mode="json"),
-                        terminology_match=terminology_match,
-                        source_kind=candidate.origin.value,
-                        source_run_id=record.run_id,
-                        evidence_text=candidate.evidence_text,
-                        evidence_start=candidate.evidence_start,
-                        evidence_end=candidate.evidence_end,
-                        followup_occurrence_id=(
-                            temporal.followup_occurrence_id
-                            if temporal is not None
-                            else f"occurrence-{session.session_id}"
-                        ),
-                        patient_timezone=(
-                            temporal.patient_timezone
-                            if temporal is not None
-                            else self.patient_timezone
-                        ),
-                        reported_at=(
-                            temporal.received_at_local
-                            if temporal is not None
-                            else record.completed_at
-                        ),
-                        effective_start=(
-                            effective.effective_start
-                            if effective is not None
-                            else None
-                        ),
-                        effective_end=(
-                            effective.effective_end if effective is not None else None
-                        ),
-                        temporal_kind=(
-                            effective.kind.value if effective is not None else None
-                        ),
-                        created_at=now,
-                    )
-                )
-                continue
-            self.store.save_confirmed_answer_context(
-                ConfirmedAnswerContext(
-                    answer_context_id=(
-                        "answer-context-"
-                        + uuid5(
-                            NAMESPACE_URL,
-                            f"{record.run_id}|{candidate.candidate_id}|{candidate.link_id}",
-                        ).hex
-                    ),
-                    session_id=session.session_id,
-                    link_id=candidate.link_id,
-                    answer=candidate.answer,
-                    source_run_id=record.run_id,
-                    followup_occurrence_id=(
-                        temporal.followup_occurrence_id
-                        if temporal is not None
-                        else f"occurrence-{session.session_id}"
-                    ),
-                    patient_timezone=(
-                        temporal.patient_timezone
-                        if temporal is not None
-                        else self.patient_timezone
-                    ),
-                    reported_at=(
-                        temporal.received_at_local
-                        if temporal is not None
-                        else record.completed_at
-                    ),
-                    effective_start=(
-                        effective.effective_start if effective is not None else None
-                    ),
-                    effective_end=(
-                        effective.effective_end if effective is not None else None
-                    ),
-                    temporal_kind=(
-                        effective.kind.value if effective is not None else None
-                    ),
-                    resolution_basis=(
-                        effective.basis.value if effective is not None else None
-                    ),
-                    raw_text=record.input_text,
-                    terminology_match=terminology_match,
-                    created_at=now,
-                )
-            )
+        plan = self.prepare_confirmed_candidates(
+            record.run_id,
+            [item.candidate_id for item in candidates],
+            _candidate_values=candidates,
+        )
+        updated = self.care_engine.save_draft(record.session_id, plan.answers)
+        for report in plan.symptom_reports:
+            self.store.save_confirmed_symptom_report(report)
+        for context in plan.answer_contexts:
+            self.store.save_confirmed_answer_context(context)
         return updated
 
     def _close_action(

@@ -1,362 +1,320 @@
 # HANDOFF
 
-> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。本文记录的是 2026-08-13 会话结束时的真实工作区快照，不是长期路线图。
+> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。本文记录的是 2026-08-13 M5-A 收口时的真实状态；不要把它当成长期路线图。
 
-## 1. 当前任务是什么
+## 1. Git 基线与已完成提交
 
-我们正在完成 ContinuCare M5 的“通用知识证据基础设施（Knowledge Evidence Foundation）”子任务。
-
-目标不是做一个 GLP-1 专用知识库，也不是做无边界医学问答或 RAG。目标是提供一个 Pathway-agnostic、静态、版本化、只读、fail-closed 的知识登记层，让未来不同疾病、药物、术后路径和患者教育主题都能说明：
-
-- 为什么采集某个 Questionnaire item 或 Observation；
-- 某个术语、展示或候选设计依据来自哪里；
-- 来源支持什么、明确不支持什么；
-- 内容适用于哪个精确 Pathway 版本和哪些 scope；
-- 当前知识审核处于什么状态；
-- 为什么知识登记不能自动变成临床行为。
-
-必须持续区分四层：
-
-1. Source Document：公开资料或标准；
-2. Knowledge Claim：受控、有限定范围的主张；
-3. Executable Artifact：Questionnaire、mapping、rule、education 等由各自治理控制的工件；
-4. Patient Evidence：患者原话、QuestionnaireResponse、Observation、Timeline、Summary evidence。
-
-Knowledge Evidence 只解释“系统为什么采集或展示”，绝不证明“这个患者发生了什么”，更不授予 artifact 执行、发布或临床批准权限。
-
-GLP1-14D 只是仓库现有资料最完整的第一个 migration fixture。测试里另有一个只存在于临时目录的 synthetic Pathway，用于证明合同和 loader 没有硬编码 GLP。
-
-## 2. 用户本轮最重要的纠正
-
-用户明确反对固定目标编号和固定数量：
-
-> 有多少信息就展现多少。
-
-因此最终实现遵循：
-
-- schema 和 JSON 中没有 `target_number`；
-- renderer 不显示 `target#`、分母或百分比；
-- 不把 20、11、9 写成 loader 约束；
-- 动态派生以下绝对计数：
-  - `unique_artifacts`
-  - `registered_relationships`
-  - `explicit_gaps`
-  - `verified_citation_relationships`
-  - `claim_review_approved_relationships`
-- 同一个 exact artifact 可以同时有 binding 和 gap，`unique_artifacts` 对两者的 artifact key 并集去重，绝不能简单写成 `bindings + gaps`；
-- GLP 当前的 20/11/9/0/0 只是 2026-08-13 数据快照，不是通用合同。
-
-## 3. 已完成的实现
-
-### 3.1 新增通用 Knowledge 包
-
-当前有 14 个尚未跟踪的纯新增路径：
-
-- `continucare/knowledge/__init__.py`
-- `continucare/knowledge/__main__.py`
-- `continucare/knowledge/models.py`
-- `continucare/knowledge/registry.py`
-- `continucare/knowledge/render.py`
-- `continucare/knowledge/resolvers.py`
-- `continucare/knowledge/manifests/__init__.py`
-- `continucare/knowledge/manifests/bundle_index_v1.json`
-- `continucare/knowledge/manifests/sources_v1.json`
-- `continucare/knowledge/manifests/claims_v1.json`
-- `continucare/knowledge/manifests/bindings_glp1_14d_v1.json`
-- `continucare/knowledge/manifests/governance_v1.json`
-- `docs/25_knowledge_evidence_foundation.md`
-- `tests/test_knowledge_registry.py`
-
-核心能力：
-
-- strict Pydantic contracts，`extra="forbid"`；
-- exact compound refs：Source/Claim/Binding/Gap/Pathway 都锁定版本；
-- append-only forward `supersedes`，禁止版本跳跃、分支和断链；
-- typed artifact refs，不用松散字符串；
-- typed citation locator，并拒绝 `N/A`、`unknown`、`whole document`、`TBD` 等 placeholder；
-- clinical scope 使用精确 Pathway version whitelist 和 typed dimensions；
-- universal scope 仅限 terminology/unit/interoperability，仍要求每个 artifact 显式 binding；
-- `WorkflowDesignDecision` 与 sourced claim 分离；缺真实 owner/decision 的内容记录为 gap，不编造历史决策。
-
-### 3.2 真正的深只读
-
-不仅 Pydantic 顶层 `frozen=True`，内部集合也已封死：
-
-- persisted collections 使用 tuple/frozenset；
-- approval policy 使用 `MappingProxyType + frozenset`；
-- registry/view 的公开映射复制后包装为 `MappingProxyType`；
-- `ReviewSummary.axes` 不可修改；
-- 测试证明加载后无法修改 source URL、citation、required approvals、review events、artifact resolution、review summary 或全局 approval policy。
-
-不要退回仅靠 `frozen=True` 的浅冻结；那会允许原地篡改嵌套 list/dict，并让 renderer 消费伪造状态。
-
-### 3.3 原子 bundle loader
-
-`bundle_index_v1.json` 是唯一入口，不扫描目录。每个 payload 固定：
-
-- exact file ID/version；
-- canonical relative path；
-- optional byte size；
-- mandatory raw-byte SHA-256。
-
-loader 顺序是先读 bytes、核对 size/hash，再解析 JSON。任何失败都不返回部分 registry。
-
-Filesystem 路径适配器拒绝：
-
-- absolute path；
-- 空段、`.`、`..`；
-- 反斜杠；
-- symlink；
-- root escape。
-
-Path-backed `TraversableBundleSource` 会委托同一安全 filesystem adapter。普通非 Path 的自定义 Traversable 被视为受信 provider；如未来开放给不受信输入，必须重新冻结 trust boundary。
-
-### 3.4 CURRENT / HISTORICAL 双模式
-
-CURRENT：
-
-- current refs 必须存在、唯一、指向逻辑 head；
-- 只允许 eligible source/claim/binding/open gap；
-- binding 必须闭包到 selected exact claim 和 cited sources；
-- Pathway scope 和 catalog ownership 必须匹配；
-- selected artifact 必须由 resolver 解析；
-- current-related review head 必须通过真实注入的 authority resolver；
-- authority resolver 返回 identity 必须与 asserted actor 精确绑定；
-- local copy 必须先有可信、approved、允许 `local_copy` 的许可决定，然后才允许读取和 hash；
-- manifestation equivalence 必须有可信批准；
-- trusted rejected current-related event 会阻断。
-
-HISTORICAL：
-
-- 保留旧记录、旧 review event 和 audit topology；
-- unresolved/untrusted 显示为 unresolved 或 `unverified_assertion`；
-- 不把历史断言当批准；
-- 绝不读取注册的第三方 local blob，状态是 `not_read_in_historical_mode`。
-
-source `manifestation_of` 图禁止自环和任意环。
-
-### 3.5 审核与许可语义
-
-ReviewEvent 是按 domain 判别的 typed union：clinical、pharmacy、terminology、internal consistency、citation verification、license decision、equivalence。
-
-- JSON 只保存 actor assertion，不允许自报 `authority_resolved=true`；
-- 无真实 identity provider 时，CURRENT 对 current-related review fail closed；
-- built-in bundle 没有 review event，所有审核轴均为 `not_assessed`；
-- pharmacy 是独立 advisory axis，不替代 clinician review；
-- `claim_review_approved_relationships` 只说明知识 claim 的 review aggregate，绝不等于 artifact/binding approval；
-- required approvals 只是“哪些独立治理方需要行动”的要求，不是 approval state；
-- 没有 `approved_for_execution`，没有 `activation_gate`。
-
-### 3.6 Artifact resolver 和只读展示
-
-当前真实 repository resolver 支持：
-
-- Questionnaire item；
-- Observation mapping item；
-- Questionnaire terminology binding；
-- terminology concept；
-- whole PlanDefinition。
-
-预留的 clinical rule、red flag、education、summary refs 在 CURRENT 没有 resolver 时 fail closed，在 HISTORICAL 可显示 unresolved。
-
-CLI：
-
-```bash
-.venv/bin/python -m continucare.knowledge GLP1-14D --version 1.0.0
-.venv/bin/python -m continucare.knowledge GLP1-14D --version 1.0.0 --historical
-```
-
-renderer 显示 exact refs、scope、supports/does_not_support、claim/binding/gap lifecycle、currentness、review axes（含 pharmacy）、source version/URL/review/integrity 和固定安全声明。它不读取患者数据，不推导 runtime eligibility。
-
-## 4. 当前 GLP fixture 的精确事实
-
-当前 built-in bundle：
-
-- 13 source records；
-- 13 个一对一 legacy aliases；
-- 7 个 draft claims；
-- 11 个 bindings；
-- 9 个 open gaps；
-- 20 个动态去重后的 exact artifact targets；
-- 0 verified citation relationships；
-- 0 claim-review-approved relationships；
-- 0 review events；
-- 所有 source 均为 `link_only / not_content_fixed`；
-- 所有 quote 均为 null；
-- GLP manifest 仍为 `clinical_rules=[]`。
-
-20 个 target 的当前分类是：6 Questionnaire items、5 mapping items、5 questionnaire terminology bindings、3 selected terminology concepts、1 whole PlanDefinition。这只是 fixture 当前覆盖事实。
-
-四条 DailyMed legacy 记录只有仓库内已有的 title、URL、retrieval date：
-
-- authority/jurisdiction 明确标记 `not_available_in_repository`；
-- document version 为 null；
-- language 用 `und`；
-- set ID 仅从既有 URL 机械提取，仍是未核验候选；
-- 不得把 DailyMed host 冒充 issuing authority。
-
-FDA AccessData 与 DailyMed WEGOVY 保持独立 source；没有证据证明是同一文档版本，绝不能按标题合并。
-
-当前 manifest pin：
-
-- `sources_v1.json`: `f1402a5e5511e39eaed2f498da0d2c8bf30c9eec946f9d3eedecc47352e9d8a5`, 18037 bytes
-- `claims_v1.json`: `5f47a4d8b2b5b9a747670a30a6a068bb599793f7bb77737a64e3d263516460ef`, 11295 bytes
-- `bindings_glp1_14d_v1.json`: `4be160b8d55bdfaaacc929b02372edd93a61680eb8582d6ab97304097841a14d`, 9528 bytes
-- `governance_v1.json`: `3ed8eb19d49bd9add3e1d6deac638058d591eb1eddfa4f49700a69ece769cdf0`, 8021 bytes
-
-修改任何 payload 后必须同步 index 的 hash/size，并重新跑 pin 测试。
-
-## 5. 验证和审核证据
-
-最后一次 Codex 最终验收：
+工作目录：
 
 ```text
-.venv/bin/python -m pytest -q tests/test_knowledge_registry.py
-71 passed
-
-.venv/bin/python -m pytest -q
-271 passed, 3 skipped
+/Users/zhangziyue/Documents/Codex/continucare-demo
 ```
 
-三个 skip 都是已有条件测试缺少官方 `FHIR_R4_SCHEMA_ZIP`：
+当前分支：
+
+```text
+codex/docs-collaboration-init
+```
+
+upstream 仍为：
+
+```text
+43012df9582a346524b26ba0cdd7a5318e510966
+```
+
+upstream 之后已有两个本地 commit：
+
+1. `8151161d527f717ad47a78cf145a6722e4268ece`
+   `docs: define collaboration workflow and handoff`
+2. `cd9bf456b0793b66fe73cd72862c93316dcb6733`
+   `feat: add pathway-agnostic knowledge evidence foundation`
+
+两者都没有 push。
+
+Knowledge Evidence Foundation 已经正式提交，不再是未跟踪成果。它仍保持 Pathway-agnostic；GLP1-14D 只是 fixture。没有 `target_number`、固定分母或人工目标序号；20/11/9/0/0 只是当前 GLP 数据快照。Knowledge 只解释采集/展示依据，不能授权 Task、ClinicalRule 或其他运行时行为。
+
+本文件更新后，M5-A 将以单独 commit：
+
+```text
+feat: add confirmed manual review task flow
+```
+
+收口。未经用户后续明确授权，不得 push。
+
+## 2. M5-A 目标与完成结论
+
+M5-A 已完成以下最小闭环：
+
+```text
+一键合成随访表达
+→ Layer 3 受控候选
+→ 患者人工确认
+→ 完成 QuestionnaireResponse / final Observation
+→ 创建常规护士人工复核 Task
+```
+
+这不是诊断、风险等级、临床结论、自动分诊或治疗建议。
+
+### 2.1 首页一键入口
+
+- 首页增加“患者确认后创建护士人工复核任务”合成场景；
+- 合成原话固定为 `我今天拉肚子。`，只用于 Demo；
+- 一键入口显式注入 `UnconfiguredModelAdapter(SemanticModelConfig())`，不读取环境中可能配置的真实 provider，也不发网络请求；
+- 一键阶段只创建 CareSession、AgentRun 和分析审计；
+- 不创建 QuestionnaireResponse、Observation、Task、Provenance 或 Alert；
+- Streamlit session state 会把该 AgentRun 接到患者页待确认卡片，不再绕过 Layer 3。
+
+### 2.2 Layer 3 人工确认边界
+
+- 候选仍使用现有严格 candidate/clarification/resolution 合同；
+- Demo 候选是 patient-reported symptom 的受控术语匹配，不是诊断或临床判断；
+- 专用 M5-A 路径必须一次处理该轮完整候选集；服务端和 UI 均有完整集检查；
+- `rejected`、`unsure` 和 `cancelled` 只保留允许的决策/停止审计，不发布临床资源或 Task；
+- `unsure` 之后只有新的明确接受动作才能进入发布事务；
+- 会话完成后不能再取消或追加第二次发布。
+
+### 2.3 纯准备与原子发布
+
+新增纯准备边界：
+
+- `CareAgentService.prepare_confirmed_candidates(...)`：验证并物化答案上下文/患者自述症状，不写库；
+- `CareEngine.prepare_completion(...)`：构建并校验 completed QuestionnaireResponse 和 final Observations，不写库；
+- `ConfirmedReviewService.accept_all(...)`：计算稳定 receipt、组装 Task/Provenance，并调用唯一原子落库方法。
+
+`SQLiteStore.persist_confirmed_review_bundle(...)` 使用同一个 SQLite 连接和显式 `BEGIN IMMEDIATE`，在一个事务中写入：
+
+- confirmed answer contexts / symptom reports；
+- FollowUpMessage；
+- completed QuestionnaireResponse；
+- final Observations 与 observation evidence；
+- CareSession `completed` 转换；
+- conversation action resolutions；
+- 患者确认、问卷完成、Task 创建审计；
+- FHIR Task 与 Provenance。
+
+任何校验失败或事务中故障都会整体回滚。故障注入测试覆盖了 Task/Provenance 已尝试插入后的回滚，证明不会留下部分副作用。
+
+### 2.4 幂等、并发和证据链
+
+- receipt 是患者、会话、精确 Pathway 版本、AgentRun 和完整候选内容的 canonical SHA-256；
+- Task identifier 只保存 64 位 opaque digest，不暴露 raw run/candidate ID；
+- QuestionnaireResponse、Task、Provenance 和患者自述 Observation ID 均由稳定 receipt/response/report 身份派生；
+- 顺序重试返回同一资源；
+- 两线程并发接受测试只产生一套 QR、Observation、Task、Provenance；
+- Provenance target 包含 QuestionnaireResponse、Observation 和 Task；
+- Provenance 明确区分 Patient author 与 deterministic assembler；
+- Task 只引用 completed QR 和 final Observation，不读取 AgentRun/candidate 作为 Layer 4 临床输入。
+
+### 2.5 护士队列与 M6 隔离
+
+手工复核 Task 使用独立 identifier system：
+
+```text
+urn:continucare:patient-confirmed-review
+```
+
+任务固定：
+
+- `priority=routine`；
+- 通用描述“人工复核患者已确认报告”；
+- 不含 severity、risk、threshold、diagnosis、ClinicalRule 或治疗建议；
+- 原话保留在 FollowUpMessage / QuestionnaireResponse，护士页从最终证据读取，不把模型标签当临床原因。
+
+护士页新增独立只读队列：
+
+- 只正向选择 manual-review identifier；
+- 不导入或暴露 `TaskWorkflowService`；
+- 与旧 ClinicalRule/Alert 队列明确分开；
+- 展示患者原话、最终 Observation、`routine` 和 `not_assessed`。
+
+Doctor Workbench 的 Task 读取改为只正向选择：
+
+```text
+urn:continucare:clinical-rule
+```
+
+因此相同 Pathway 下的 M5-A 手工复核 Task 不会进入现有 M6 医生任务视图；已有 M6 接口未修改。
+
+### 2.6 审计与可点击 Demo
+
+审计页增加 M5-A 四步链：
+
+```text
+受控候选 → 患者确认 → 最终证据 → 护士任务
+```
+
+可点击验收路径已通过：
+
+1. 首页点击“一键生成待患者确认的合成候选”；
+2. 确认尚无 QR、Observation 或护士 Task；
+3. 进入患者页，看到 SNOMED CT `62315008` 的未确认候选；
+4. 点击“确认全部并创建护士人工复核任务”；
+5. 患者页显示 completed QR/final Observation，临床评估仍为 `not_assessed`；
+6. 护士页显示独立只读 `requested/routine` Task、患者原话和最终证据；
+7. Alert 队列仍为 0、获批临床规则仍为 0；
+8. 审计页四步链全部完成。
+
+桌面和 390×844 移动端均已验收；干净浏览器会话无相关 console error/warn。
+
+## 3. 冻结安全边界
+
+M5-A 保持以下边界，后续不得悄悄放宽：
+
+- 只使用合成患者；
+- 候选不是诊断、风险等级或临床结论；
+- 必须患者明确确认后才能创建护士人工复核 Task；
+- rejected、cancelled、unsure 或校验失败不得创建 Task 或留下部分临床副作用；
+- 不新增或启用临床阈值、Alert、L0–L4 或 ClinicalRule；
+- GLP1-14D 继续保持 `clinical_rules=[]`；
+- 运行时临床评估继续为 `not_assessed`；
+- 不输出治疗、改药或个体化患者建议；
+- 不接真实飞书/Aily、外部 API、真实患者或生产权限；
+- 不做数据库迁移；
+- 不修改 M6 对外接口；
+- Knowledge Evidence 只能解释采集依据，不能授权任务或规则执行。
+
+## 4. 验证结果
+
+最终验证：
+
+```text
+.venv/bin/python -m pytest -q
+283 passed, 3 skipped
+
+.venv/bin/python -m compileall -q continucare app.py pages
+通过
+
+git diff --check
+通过
+```
+
+三个 skip 都是既有条件测试缺少官方 `FHIR_R4_SCHEMA_ZIP`：
 
 - `tests/test_fhir_conformance.py:114`
 - `tests/test_layer4_rules_tasks.py:575`
 - `tests/test_layer4_summaries.py:428`
 
-不是 Knowledge 回归失败。
+不是 M5-A 回归失败。
 
-CURRENT 和 HISTORICAL CLI 都 exit 0，输出的 coverage 均为：
+新增测试覆盖：
+
+- analyze-only 零临床发布；
+- happy path 完整证据链；
+- 顺序幂等；
+- raw run/candidate ID 不进入 Task/Provenance；
+- rejected/unsure/cancelled 零发布；
+- unsure 后重新明确接受；
+- Task 插入后故障的全事务回滚；
+- 两线程并发仅一套资源；
+- Layer 4 completed/final/patient/derivedFrom admission；
+- manual Task 严格 FHIR、无 rule/severity；
+- 环境中配置 provider 时仍不联网；
+- Doctor Workbench 排除同 Pathway manual-review Task。
+
+## 5. Claude 审查记录
+
+按 `AGENTS.md` 将本切片判断为 Level 4，因为它涉及医疗工作流边界和跨表原子性。
+
+### 5.1 Opus 策略审查
+
+实施前完成一次 Claude Opus 策略/高风险审查。其 blocker 已在冻结方案中处理，包括：
+
+- M6 Doctor Workbench 必须正向筛选 clinical-rule Task；
+- 幂等 receipt 不得直接暴露 raw run/candidate ID；
+- 原子写入必须使用同连接 `BEGIN IMMEDIATE`；
+- Layer 4 使用共享 completed/final admission predicate；
+- Provenance 必须包含 Task，并区分 Patient confirmer 与 software assembler；
+- 必须一次处理完整候选集；
+- Task 不把模型标签当临床原因；
+- Demo 必须显式注入本地 unconfigured adapter；
+- 完成后取消不得改变 Task。
+
+没有遗留 Opus blocker。
+
+### 5.2 Sonnet 最终审查
+
+实现、测试和浏览器验收后完成一次聚焦 Sonnet final review。初次只因普通 `git diff` 不包含 3 个 untracked 新文件而返回 `NEED_CONTEXT`，不是代码 blocker。补充这 3 个完整文件后，同一审核阶段最终结论：
 
 ```text
-unique_artifacts=20
-registered_relationships=11
-explicit_gaps=9
-verified_citation_relationships=0
-claim_review_approved_relationships=0
+CLEAN PASS
 ```
 
-在旧 `AGENTS.md` 的高风险流程下，实际使用 alias `opus`、平台可观察精确模型 `claude-opus-5` 做了两轮隔离执行后审查；无 fallback/降级。两轮结论均为：
+Sonnet 确认：
 
-- 阻断项：无；
-- 冻结验收全部满足；
-- 明确可交付。
+- 服务端双重强制完整候选集；
+- manual/clinical-rule identifier 为精确正向分类；
+- ManualReviewQueue 只读；
+- receipt/Task ID 稳定且不泄露 raw ID；
+- reject/unsure/cancel、故障回滚和并发测试覆盖冻结边界；
+- 无剩余 blocker 或 NEED_CONTEXT。
 
-已经清理本任务创建的隔离 review worktree。不要为了形式重复整仓审查；只有代码变化、验证可疑或高风险语义变化时才按当前 `AGENTS.md` 决定是否调用 Claude。
+采纳的非阻断小建议：护士页复用 `DEMO_PATIENT_ID` 常量；UI 对 `LookupError` 也做友好提示。没有因建议扩大功能范围。
 
-## 6. 当前 Git 与工作区状态
+## 6. 当前剩余限制
 
-会话结束时：
+以下是明确限制，不是 M5-A blocker：
 
-- 工作目录：`/Users/zhangziyue/Documents/Codex/continucare-demo`
-- 分支：`codex/docs-collaboration-init`
-- HEAD：`43012df9582a346524b26ba0cdd7a5318e510966`
-- upstream：`origin/codex/docs-collaboration-init`，同一 HEAD
-- 未执行 add、commit、push、merge、rebase、tag 或 PR 修改
+- 手工护士队列当前只读，不支持护士领取、完成或记录结果；
+- Task 状态保持 `requested`，本切片不启用 Task transition；
+- 没有把手工任务处理结果写入医生简报；
+- 没有真实通知、飞书/Aily、外部 API 或生产身份/权限；
+- 没有真实患者数据，也没有真实 provider 网络调用；
+- 没有临床规则、风险等级、阈值、Alert 或治疗建议；
+- 没有正式官方 FHIR R4 schema archive，因此 3 项条件 schema 测试仍 skip；
+- demo synthetic security metadata 沿用仓库现状，没有只为新资源引入不一致的安全标签；
+- `SQLiteStore._confirmed_review_fault` 是用于证明最终写入后回滚的显式测试 seam，生产默认 no-op；可在未来持久化重构时移除，但不影响当前正确性；
+- Knowledge wheel resource inclusion 和外部来源联网核验仍是 Knowledge 后续事项，与 M5-A 无关。
 
-预期状态：
+## 7. 下一步 M5-B（尚未开始）
 
-- `M AGENTS.md`：用户刚提供的新协作规范，已按附件正文替换；
-- `M HANDOFF.md`：本交接文档；
-- 上述 14 个 Knowledge 路径全部为 `??` 未跟踪文件；
-- 不应有其他改动。
+M5-B 只应在用户明确授权后开始。建议最小目标是：
 
-这些 Knowledge 文件不是临时垃圾，绝对不要 clean、reset、checkout 或删除。它们是本轮主要交付，只是尚未获得 staging/commit 授权。
+```text
+护士对 M5-A 人工复核 Task 进行受控处理
+→ 记录复核结果和审计
+→ 将处理结果作为可追溯事实提供给后续医生简报
+```
 
-## 7. 当前卡在哪里
+开始前必须重新冻结范围和状态机。建议重点确认：
 
-没有代码 blocker，也没有未解决的审核 blocker。
+- 护士可执行的最小 Task transition（例如 received/in-progress/completed）；
+- 每个 transition 的角色、必填 note、幂等和并发规则；
+- completed/rejected/cancelled/failed 的零部分副作用；
+- 护士结果如何引用 Task、QR、Observation 和 Provenance；
+- 哪些结果允许进入医生简报，如何保持事实与临床结论分离；
+- 是否需要新的应用合同但不修改既有 M6 对外接口；
+- 是否继续使用同一原子事务边界；
+- Demo 的回退方式和可点击验收步骤。
 
-当前停点只是会话结束和 Git 决策边界：
+M5-B 仍不得自动引入：
 
-- 实现、测试、文档、两轮交叉审核和 Codex 最终验收均已完成；
-- 改动尚未暂存或提交；
-- wheel 安装包中的 JSON resource inclusion 尚未实际 build/install 验证；文档已明确不声称完成；
-- 外部公开来源和 locator 本轮没有联网核验；所有 built-in claim 仍为 draft/not_assessed；
-- 没有真实 identity provider、没有 licensed local artifact、没有外部 evaluation corpus；
-- legacy pathway/terminology source 字段尚未收敛成新 registry 的生成投影；这是后续迁移，不是本切片 blocker。
+- ClinicalRule、阈值、Alert、L0–L4 或风险分级；
+- 诊断、治疗或改药建议；
+- 真实飞书/Aily、外部 API、真实患者或生产权限；
+- 数据库迁移，除非用户以后单独授权并完成新的高风险方案审查；
+- Knowledge 对 Task/规则执行的授权。
 
-## 8. 下一步计划
+## 8. 接管与回退
 
-新会话接手后：
+新会话接管时先运行：
 
-1. 完整读取新的 `AGENTS.md` 和本文件。
-2. 只读确认：
+```bash
+git branch --show-current
+git rev-parse HEAD
+git rev-parse @{upstream}
+git status --short --untracked-files=all
+```
 
-   ```bash
-   git branch --show-current
-   git rev-parse HEAD
-   git rev-parse @{upstream}
-   git status --short --untracked-files=all
-   ```
+预期在 M5-A commit 成功后：
 
-3. 预期看到 `AGENTS.md`、`HANDOFF.md` 两个 tracked 修改和 14 个 Knowledge untracked 文件；若多出其他文件，先报告，不清理。
-4. 如果用户只要求交付当前切片：先审阅最终 diff/status；只有用户明确授权后才能 stage、commit 或 push。
-5. 若准备发布 wheel：在干净隔离环境实际 build/install wheel，验证 `continucare.knowledge.manifests` 的 5 个 JSON resource 可通过 `importlib.resources` 读取，再跑 CLI 和专项测试。不得在未验证前宣称打包成功。
-6. 若继续扩 Knowledge：优先从明确的新 Pathway/新 artifact binding 需求出发，复用同一 generic loader；不要把 synthetic fixture 加入产品 manifest。
-7. 若回到比赛 M5 主线：基于当前已完成 foundation，再冻结一个小的比赛演示切片；不要在本任务里偷偷加入 M6 飞书/Aily、临床阈值、Alert 或真实患者数据。
+- 工作区干净；
+- 暂存区为空；
+- 分支仍为 `codex/docs-collaboration-init`；
+- 本地分支领先 upstream 3 commits；
+- 未 push。
 
-## 9. 绝对不要再踩的坑
+回退不需要数据库迁移或外部系统操作：回退 M5-A commit 后重置本地 Demo 数据即可；两个较早的协作文档和 Knowledge Foundation commits 不受影响。未经用户授权不得 reset、clean、checkout、revert、push 或开始 M5-B。
 
-### 需求与通用性
+## 9. 一句话接管结论
 
-- 不要把 Knowledge 合同写死为 GLP-1；GLP 只是一份 built-in fixture。
-- 不要恢复 target 编号、固定总数、分母、百分比或“完成度 11/20”。有多少真实记录就动态显示多少。
-- 不要把当前 20/11/9 写进 schema validator；测试里的绝对数只用于发现 fixture 意外漂移。
-- 不要把 `unique_artifacts` 写成 `bindings + gaps`；同一 artifact 可以同时存在 relationship 和 gap。
-- 不要把 `clinical_rules=[]` 说成所有 Pathway 的全局规则；它只是当前 GLP fixture 的回归事实。
-
-### 医疗与治理安全
-
-- 不要让 KnowledgeClaim 自动激活 ClinicalRule。
-- 不要添加 `approved_for_execution` 或 `activation_gate`。
-- 不要把 claim review approved 表述成 artifact、binding、发布或执行批准。
-- 不要把 `not_assessed` 解释为安全、有效或可临床使用。
-- 不要虚构 clinician reviewer、authority、jurisdiction、document version、license 或 exact locator。
-- 不要让 pharmacist review 代替 clinician review；pharmacy 是独立 advisory axis。
-- 不要把 Patient Evidence 类型复用成 Knowledge Citation，也不要向 Knowledge 包加入 patient ID/store/runtime patient data。
-- 不要启用阈值、诊断、治疗、用药建议、红旗流程或临床风险等级。
-
-### 版本与审计
-
-- 不要原地修改旧 record 语义；追加新版本并用 forward exact `supersedes`。
-- 不要把 `superseded_by` 存回旧记录；reverse/head 必须派生。
-- 不要删除历史 binding/review 以让 CURRENT 通过；CURRENT 选择 eligible head 子集，HISTORICAL 保留旧记录。
-- 不要允许 source manifestation 自环或环。
-- 不要退回浅冻结；所有公开嵌套集合和派生状态必须保持不可变。
-
-### 来源、许可与路径
-
-- 不要仅凭标题把 FDA 与 DailyMed 合并成同一 source/version。
-- 不要给 link-only 外部页面填 content hash；它必须是 `not_content_fixed`。
-- 不要在许可核验前保存、读取或引用本地第三方 artifact。
-- CURRENT local copy 必须先有可信 approved license，再读取并核对 bytes hash。
-- HISTORICAL 绝不能自动读取第三方 local blob。
-- 不要弱化 relative-path、symlink 或 root-escape 检查。
-- 不要把新 manifests 放到 `continucare/knowledge/data/`：根 `.gitignore` 的 `data/` 会把它们忽略。当前选择 `continucare/knowledge/manifests/` 是有意的。
-- 不要用 `git add -f` 掩盖资源被 ignore，也不要为了本切片修改 `.gitignore`。
-
-### 测试、依赖与 Git
-
-- 使用项目 `.venv/bin/python`；系统 Python 曾缺项目依赖。
-- 修改 manifest 后必须重新 pin SHA-256/size。
-- 不要只测 happy path；保留 CURRENT fail-closed、HISTORICAL readable、authority、license、path traversal、deep immutability、scope isolation 和 cycle 负测。
-- Knowledge 包不直接依赖 layer4/db/store/care_engine；但当前经 `terminology.catalog -> continucare.agents` 会传递性加载 `continucare.db`。该模块 import 期没有数据库副作用，这是已知非阻断边界；不要误报成运行时写库，也不要宣称完全没有传递 import。
-- `RepositoryArtifactResolver` 默认注入当前唯一的 GLP terminology catalog，但接口支持注入其他 catalogs；不要把这个默认 fixture 误判为 schema 硬编码。
-- 未经用户明确授权，不得 stage、commit、push、merge、rebase、tag、改 PR、切分支或删除文件。
-- 工作区里 14 个 `??` Knowledge 文件都是有效成果，绝对不要 `git clean`。
-
-## 10. 已知非阻断建议
-
-这些不阻塞当前交付，不要擅自扩大范围：
-
-- 发布前验证 wheel resource inclusion；
-- 未来可明确普通非 Path Traversable 的 trusted-provider 边界；
-- 可补 pharmacy `changes_requested/rejected` 在 HISTORICAL aggregate 中保持 advisory 的直接测试和更精确文档；
-- 可评估 HISTORICAL catalog ownership 缺失是否应降级为 unresolved，而非硬结构错误；当前行为是跨模式硬不变量；
-- 可评估 CURRENT 对“选中但未被 binding 引用的 claim”是否也要求 cited-source closure；当前 renderer 只展示 bindings；
-- 未来 source registry 与 legacy pathway/terminology source 应收敛成 aliases/生成投影，但不要在没有新方案时修改旧合同。
-
-## 11. 一句话接管结论
-
-通用 Knowledge Evidence 第一实现切片已经完成并通过 71 项专项、271 项全量测试以及两轮 Opus 审查；现在没有技术阻断，只差用户决定是否将 `AGENTS.md`、`HANDOFF.md` 和 14 个 Knowledge 文件纳入 Git，下一会话首先保护这些未提交成果，绝不能清理或把动态 GLP 快照重新写成固定编号合同。
+M5-A 已完成“合成表达 → Layer 3 受控候选 → 患者确认 → 原子生成最终证据与常规护士人工复核 Task”的可点击闭环；全量测试为 283 passed、3 skipped，Opus blocker 已纳入冻结方案，Sonnet 最终为 CLEAN PASS。当前只需保留已提交结果并等待用户决定是否启动 M5-B，绝不能自行 push 或扩展临床能力。

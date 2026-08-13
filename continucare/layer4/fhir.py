@@ -202,6 +202,137 @@ def build_workflow_task(
     return validate_layer4_fhir_resource(resource, expected_resource_type="Task")
 
 
+def build_patient_confirmed_review_task(
+    *,
+    patient_id: str,
+    receipt_digest: str,
+    questionnaire_response_reference: str,
+    observation_references: Iterable[str],
+    pathway_reference: str,
+    authored_on: str,
+    task_id: str,
+) -> dict[str, Any]:
+    """Build a routine human-review Task without a clinical rule or conclusion."""
+
+    digest = receipt_digest.strip().lower()
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise ValueError("manual review receipt must be an opaque SHA-256 digest")
+    observations = list(observation_references)
+    if not observations:
+        raise ValueError("manual review Task requires final Observation evidence")
+    evidence = [questionnaire_response_reference, *observations]
+    resource: dict[str, Any] = {
+        "resourceType": "Task",
+        "id": task_id,
+        "meta": _meta(version_id="1", last_updated=authored_on),
+        "identifier": [
+            {
+                "system": "urn:continucare:patient-confirmed-review",
+                "value": digest,
+            }
+        ],
+        "status": "requested",
+        "intent": "order",
+        "priority": "routine",
+        "code": {
+            "coding": [
+                {
+                    "system": "urn:continucare:task-code",
+                    "code": "patient-confirmed-review",
+                    "display": "Patient-confirmed report review",
+                }
+            ],
+            "text": "人工复核患者已确认报告",
+        },
+        "description": "人工复核患者已确认报告",
+        "for": _reference(f"Patient/{patient_id}"),
+        "authoredOn": authored_on,
+        "requester": _reference(f"Patient/{patient_id}"),
+        "owner": _reference("PractitionerRole/nurse-review"),
+        "reasonReference": _reference(questionnaire_response_reference),
+        "basedOn": [_reference(pathway_reference)],
+        "input": [
+            {
+                "type": {
+                    "coding": [
+                        {
+                            "system": "urn:continucare:task-input",
+                            "code": "patient-confirmed-evidence",
+                            "display": "Patient-confirmed evidence",
+                        }
+                    ]
+                },
+                "valueReference": _reference(reference),
+            }
+            for reference in evidence
+        ],
+    }
+    return validate_layer4_fhir_resource(resource, expected_resource_type="Task")
+
+
+def build_patient_confirmation_provenance(
+    *,
+    target_references: Iterable[str],
+    entity_source_references: Iterable[str],
+    confirmed_at: str,
+    patient_id: str,
+    provenance_id: str,
+) -> dict[str, Any]:
+    """Record the human confirmation and deterministic software assembly roles."""
+
+    targets = [_reference(item) for item in target_references]
+    if not targets:
+        raise ValueError("patient confirmation Provenance requires targets")
+    resource: dict[str, Any] = {
+        "resourceType": "Provenance",
+        "id": provenance_id,
+        "meta": _meta(version_id="1", last_updated=confirmed_at),
+        "target": targets,
+        "occurredDateTime": confirmed_at,
+        "recorded": confirmed_at,
+        "activity": {
+            "coding": [
+                {
+                    "system": "http://terminology.hl7.org/CodeSystem/v3-DataOperation",
+                    "code": "CREATE",
+                    "display": "create",
+                }
+            ]
+        },
+        "agent": [
+            {
+                "type": {
+                    "coding": [
+                        {
+                            "system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
+                            "code": "author",
+                            "display": "Author",
+                        }
+                    ]
+                },
+                "who": _reference(f"Patient/{patient_id}"),
+            },
+            {
+                "type": {
+                    "coding": [
+                        {
+                            "system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
+                            "code": "assembler",
+                            "display": "Assembler",
+                        }
+                    ]
+                },
+                "who": _reference("Device/continucare-deterministic-assembler"),
+            },
+        ],
+        "entity": [
+            {"role": "source", "what": _reference(item)}
+            for item in entity_source_references
+        ],
+    }
+    return validate_layer4_fhir_resource(resource, expected_resource_type="Provenance")
+
+
 def build_provenance(
     *,
     target_references: Iterable[str],

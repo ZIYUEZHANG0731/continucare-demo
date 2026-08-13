@@ -7,7 +7,10 @@ import streamlit as st
 from continucare.config import get_settings
 from continucare.db import initialize_database, reset_demo
 from continucare.demo_data import SCENARIOS
-from continucare.services.demo_scenarios import load_layer2_scenario
+from continucare.services.demo_scenarios import (
+    load_layer2_scenario,
+    load_manual_review_scenario,
+)
 from continucare.ui import inject_global_styles, render_mode_badges, semantic_model_label
 
 
@@ -102,6 +105,33 @@ for column, (title, message_text) in zip(scenario_columns, SCENARIOS.items()):
         if st.button(f"重置并载入 {title}", key=f"load_{title}", width="stretch"):
             result = load_layer2_scenario(settings.db_path, title)
             st.success(f"{title}已载入：{_scenario_outcome(result)}")
+
+with st.container(border=True):
+    st.markdown("### 新切片：患者确认后创建护士人工复核任务")
+    st.write("合成原话：我今天拉肚子。")
+    st.caption(
+        "一键只生成 Layer 3 受控候选，不生成诊断、风险等级、Alert 或任务；"
+        "患者下一步明确确认后，才会原子创建常规护士人工复核 Task。"
+    )
+    if st.button(
+        "一键生成待患者确认的合成候选",
+        type="primary",
+        width="stretch",
+        key="load_manual_review_candidate",
+    ):
+        interaction = load_manual_review_scenario(settings.db_path)
+        st.session_state[
+            f"semantic::latest_run::{interaction.record.session_id}"
+        ] = interaction.result.run_id
+        st.success(
+            f"已生成 {len(interaction.result.candidates)} 个未确认候选；"
+            "尚无 QuestionnaireResponse、Observation 或护士任务。"
+        )
+        st.page_link(
+            "pages/1_patient_followup.py",
+            label="前往患者端确认 →",
+            icon="💬",
+        )
 
 st.divider()
 if st.button("重置 Demo", type="secondary"):

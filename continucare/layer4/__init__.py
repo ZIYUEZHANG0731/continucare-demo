@@ -47,11 +47,14 @@ from continucare.layer4.contracts import (
 )
 from continucare.layer4.fhir import (
     build_communication,
+    build_patient_confirmation_provenance,
+    build_patient_confirmed_review_task,
     build_provenance,
     build_workflow_task,
     validate_layer4_fhir_resource,
 )
 from continucare.layer4.inputs import Layer4InputReader, Layer4InputSnapshot
+from continucare.layer4.manual_reviews import ManualReviewQueue
 from continucare.layer4.memory import ClinicalMemoryService
 from continucare.layer4.repository import Layer4Repository
 from continucare.layer4.rules import ApprovedRuleEngine
@@ -97,6 +100,7 @@ __all__ = [
     "Layer4InputSnapshot",
     "Layer4Repository",
     "Layer4SummaryDraft",
+    "ManualReviewQueue",
     "Layer4SQLiteStore",
     "MemoryEvent",
     "MetricState",
@@ -130,6 +134,8 @@ __all__ = [
     "WorkbenchRole",
     "NumericTrend",
     "build_communication",
+    "build_patient_confirmation_provenance",
+    "build_patient_confirmed_review_task",
     "build_provenance",
     "build_workflow_task",
     "validate_layer4_fhir_resource",

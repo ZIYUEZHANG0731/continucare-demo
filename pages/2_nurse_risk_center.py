@@ -10,6 +10,7 @@ import streamlit as st
 from continucare.adapters.mock_notifier import MockNotifier
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.config import get_settings
+from continucare.demo_data import DEMO_PATIENT_ID
 from continucare.models import AlertStatus
 from continucare.presentation import (
     alert_next_step,
@@ -18,6 +19,8 @@ from continucare.presentation import (
     owner_text,
 )
 from continucare.services.alerts import AlertService
+from continucare.layer4.manual_reviews import ManualReviewQueue
+from continucare.layer4.storage import Layer4SQLiteStore
 from continucare.ui import inject_global_styles, render_mode_badges
 
 
@@ -77,11 +80,41 @@ st.error("仅使用合成数据 · 这里展示的是医护工作任务，不是
 
 store = SQLiteStore(get_settings().db_path)
 service = AlertService(store, MockNotifier())
+manual_tasks = ManualReviewQueue(
+    Layer4SQLiteStore(get_settings().db_path)
+).list_for_patient(DEMO_PATIENT_ID)
 all_alerts = store.list_alerts()
 active_alerts = [item for item in all_alerts if item.status != AlertStatus.RESOLVED]
 resolved_alerts = [item for item in all_alerts if item.status == AlertStatus.RESOLVED]
 
-st.markdown("## 已获批规则产生的任务")
+st.markdown("## 患者确认触发的人工复核（只读）")
+st.caption("该队列与临床规则/Alert 队列分离；当前页面不能变更 FHIR Task 状态。")
+if not manual_tasks:
+    st.info("尚无患者明确确认后创建的护士人工复核任务。")
+for task in manual_tasks:
+    response_ref = task["reasonReference"]["reference"]
+    response_id = response_ref.split("/", 1)[1]
+    message = store.get_message(response_id)
+    observations = store.list_observations_for_message(response_id)
+    with st.container(border=True):
+        st.markdown("### 人工复核患者已确认报告")
+        st.caption(
+            f"FHIR Task/{task['id']} · 状态 {task['status']} · "
+            "优先级 routine · 临床评估 not_assessed"
+        )
+        st.markdown("**患者原话**")
+        if message:
+            st.markdown(
+                f'<div class="cc-quote">{html.escape(message.message_text)}</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown("**患者确认后形成的标准证据**")
+        for observation in observations:
+            st.markdown(f"- {observation_evidence_text(observation)}")
+        st.info("请人工复核上述原话与标准证据；这里不显示诊断、风险等级或治疗建议。")
+
+st.divider()
+st.markdown("## 已获批规则产生的 Alert 任务（独立队列）")
 active_metric, approved_metric, done_metric = st.columns(3)
 active_metric.metric("待处理任务", len(active_alerts))
 approved_metric.metric("当前获批临床规则", 0)

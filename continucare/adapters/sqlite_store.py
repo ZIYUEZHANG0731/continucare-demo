@@ -11,6 +11,8 @@ from continucare.fhir.r4 import FHIRValidationError, validate_r4_resource
 from continucare.fhir.references import (
     validate_questionnaire_response_against_questionnaire,
 )
+from continucare.layer4.fhir import validate_layer4_fhir_resource
+from continucare.layer4.manual_reviews import is_manual_review_task
 from continucare.models import (
     Alert,
     AlertAction,
@@ -566,6 +568,332 @@ class SQLiteStore:
             )
             if cursor.rowcount != 1:
                 raise ValueError("随访状态已变化，请刷新后重试")
+
+    def persist_confirmed_review_bundle(
+        self,
+        *,
+        session: CareSession,
+        message: FollowUpMessage,
+        questionnaire_response: dict,
+        questionnaire: dict,
+        observations: list[Observation],
+        answer_contexts: list[ConfirmedAnswerContext],
+        symptom_reports: list[ConfirmedSymptomReport],
+        action_ids: list[str],
+        source_run_id: str,
+        resolved_at: str,
+        audit_events: list[AuditEvent],
+        layer4_resources: list[dict],
+    ) -> bool:
+        """Atomically release patient-confirmed evidence and one manual Task."""
+
+        resource = validate_questionnaire_response_against_questionnaire(
+            questionnaire_response, questionnaire
+        )
+        patient_id = resource["subject"]["reference"].removeprefix("Patient/")
+        if patient_id != session.patient_id or message.patient_id != patient_id:
+            raise FHIRValidationError("confirmed review bundle patient mismatch")
+        if message.message_id != resource["id"]:
+            raise FHIRValidationError("message id must match QuestionnaireResponse.id")
+        validated_observations: list[Observation] = []
+        for item in observations:
+            normalized = validate_r4_resource(
+                item.as_fhir(), expected_resource_type="Observation"
+            )
+            validated = Observation(resource=normalized, evidence=item.evidence)
+            if validated.patient_id != patient_id:
+                raise FHIRValidationError("Observation patient must match care session")
+            validated_observations.append(validated)
+        validated_layer4 = [
+            validate_layer4_fhir_resource(item) for item in layer4_resources
+        ]
+        tasks = [item for item in validated_layer4 if item["resourceType"] == "Task"]
+        provenances = [
+            item for item in validated_layer4 if item["resourceType"] == "Provenance"
+        ]
+        if len(tasks) != 1 or len(provenances) != 1:
+            raise ValueError("confirmed review bundle requires one Task and one Provenance")
+        task = tasks[0]
+        if task.get("for", {}).get("reference") != f"Patient/{patient_id}":
+            raise FHIRValidationError("manual review Task patient mismatch")
+        if not is_manual_review_task(task):
+            raise FHIRValidationError("confirmed review bundle requires a manual-review Task")
+        if not action_ids or len(set(action_ids)) != len(action_ids):
+            raise ValueError("confirmed review action ids must be non-empty and unique")
+        if any(
+            item.session_id != session.session_id or item.source_run_id != source_run_id
+            for item in [*answer_contexts, *symptom_reports]
+        ):
+            raise ValueError("confirmed Layer-3 material does not match source run/session")
+        if any(event.patient_id != patient_id for event in audit_events):
+            raise ValueError("confirmed review audit patient mismatch")
+        task_reference = f"Task/{task['id']}"
+        if task_reference not in {
+            item.get("reference") for item in provenances[0].get("target", [])
+        }:
+            raise FHIRValidationError("confirmation Provenance must target the Task")
+
+        def payload(value):
+            return json.dumps(
+                value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            )
+        with connect(self.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT status FROM care_sessions WHERE session_id = ?",
+                (session.session_id,),
+            ).fetchone()
+            if current is None:
+                raise LookupError(f"care session {session.session_id!r} was not found")
+            if current["status"] != CareSessionStatus.IN_PROGRESS.value:
+                existing = connection.execute(
+                    """
+                    SELECT 1 FROM layer4_fhir_resources
+                    WHERE resource_type = 'Task' AND resource_id = ? AND version_id = '1'
+                    """,
+                    (task["id"],),
+                ).fetchone()
+                if (
+                    current["status"] == CareSessionStatus.COMPLETED.value
+                    and existing is not None
+                ):
+                    return False
+                raise ValueError("随访状态已变化，请刷新后重试")
+            source = connection.execute(
+                """
+                SELECT patient_id, session_id FROM agent_runs WHERE run_id = ?
+                """,
+                (source_run_id,),
+            ).fetchone()
+            if (
+                source is None
+                or source["patient_id"] != patient_id
+                or source["session_id"] != session.session_id
+            ):
+                raise ValueError("confirmed review source AgentRun mismatch")
+
+            for context in answer_contexts:
+                connection.execute(
+                    """
+                    UPDATE confirmed_answer_contexts SET status = 'superseded'
+                    WHERE session_id = ? AND link_id = ? AND status = 'active'
+                    """,
+                    (context.session_id, context.link_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO confirmed_answer_contexts (
+                        answer_context_id, session_id, link_id, answer_json,
+                        source_run_id, followup_occurrence_id, patient_timezone,
+                        reported_at, effective_start, effective_end, temporal_kind,
+                        resolution_basis, raw_text, terminology_match_json,
+                        status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        context.answer_context_id,
+                        context.session_id,
+                        context.link_id,
+                        json.dumps(context.answer, ensure_ascii=False),
+                        context.source_run_id,
+                        context.followup_occurrence_id,
+                        context.patient_timezone,
+                        context.reported_at,
+                        context.effective_start,
+                        context.effective_end,
+                        context.temporal_kind,
+                        context.resolution_basis,
+                        context.raw_text,
+                        (
+                            json.dumps(context.terminology_match, ensure_ascii=False)
+                            if context.terminology_match is not None
+                            else None
+                        ),
+                        context.status,
+                        context.created_at,
+                    ),
+                )
+            for report in symptom_reports:
+                connection.execute(
+                    """
+                    INSERT INTO confirmed_symptom_reports (
+                        report_id, session_id, concept_id, preferred_zh, coding_json,
+                        terminology_match_json, source_kind, source_run_id,
+                        evidence_text, evidence_start, evidence_end,
+                        followup_occurrence_id, patient_timezone, reported_at,
+                        effective_start, effective_end, temporal_kind, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        report.report_id,
+                        report.session_id,
+                        report.concept_id,
+                        report.preferred_zh,
+                        json.dumps(report.coding, ensure_ascii=False),
+                        json.dumps(report.terminology_match, ensure_ascii=False),
+                        report.source_kind,
+                        report.source_run_id,
+                        report.evidence_text,
+                        report.evidence_start,
+                        report.evidence_end,
+                        report.followup_occurrence_id,
+                        report.patient_timezone,
+                        report.reported_at,
+                        report.effective_start,
+                        report.effective_end,
+                        report.temporal_kind,
+                        report.status,
+                        report.created_at,
+                    ),
+                )
+
+            connection.execute(
+                """
+                INSERT INTO followup_messages (
+                    message_id, patient_id, message_text, submitted_at,
+                    source, processing_status
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                tuple(message.model_dump().values()),
+            )
+            connection.execute(
+                """
+                INSERT INTO fhir_questionnaire_responses (
+                    resource_id, patient_id, message_id, resource_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    resource["id"],
+                    patient_id,
+                    message.message_id,
+                    payload(resource),
+                    resource["authored"],
+                ),
+            )
+            for item in validated_observations:
+                connection.execute(
+                    """
+                    INSERT INTO fhir_observations (
+                        observation_id, patient_id, questionnaire_response_id,
+                        effective_time, resource_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.observation_id,
+                        item.patient_id,
+                        item.message_id,
+                        item.effective_time,
+                        payload(item.as_fhir()),
+                        item.created_at,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO observation_evidence (
+                        observation_id, confidence_tier, evidence_text,
+                        evidence_start, evidence_end, recorded_at, source_kind,
+                        terminology_match_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.observation_id,
+                        item.confidence_tier.value,
+                        item.evidence_text,
+                        item.evidence_start,
+                        item.evidence_end,
+                        item.created_at,
+                        item.evidence.source_kind,
+                        (
+                            json.dumps(item.evidence.terminology_match, ensure_ascii=False)
+                            if item.evidence.terminology_match is not None
+                            else None
+                        ),
+                    ),
+                )
+            cursor = connection.execute(
+                """
+                UPDATE care_sessions
+                SET answers_json = ?, status = 'completed', updated_at = ?,
+                    questionnaire_response_id = ?, completed_at = ?
+                WHERE session_id = ? AND status = 'in_progress'
+                """,
+                (
+                    json.dumps(session.answers, ensure_ascii=False),
+                    resolved_at,
+                    resource["id"],
+                    resolved_at,
+                    session.session_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("随访状态已变化，请刷新后重试")
+            for action_id in action_ids:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO conversation_action_resolutions (
+                        action_id, source_run_id, session_id, decision, resolved_at
+                    ) VALUES (?, ?, ?, 'accepted', ?)
+                    ON CONFLICT(action_id) DO UPDATE SET
+                        decision = 'accepted', resolved_at = excluded.resolved_at
+                    WHERE conversation_action_resolutions.decision = 'unsure'
+                    """,
+                    (action_id, source_run_id, session.session_id, resolved_at),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("候选决策已完成，不能重复发布")
+            for event in audit_events:
+                connection.execute(
+                    """
+                    INSERT INTO audit_events (
+                        event_id, patient_id, entity_type, entity_id, event_type,
+                        actor_type, details_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.event_id,
+                        event.patient_id,
+                        event.entity_type,
+                        event.entity_id,
+                        event.event_type,
+                        event.actor_type,
+                        json.dumps(event.details_json, ensure_ascii=False),
+                        event.created_at,
+                    ),
+                )
+            for item in validated_layer4:
+                resource_type = item["resourceType"]
+                meta = item["meta"]
+                clinical_time = (
+                    item.get("authoredOn")
+                    if resource_type == "Task"
+                    else item.get("recorded")
+                ) or meta["lastUpdated"]
+                connection.execute(
+                    """
+                    INSERT INTO layer4_fhir_resources (
+                        resource_type, resource_id, version_id, patient_id, status,
+                        clinical_time, resource_json, is_current, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        resource_type,
+                        item["id"],
+                        meta["versionId"],
+                        patient_id,
+                        item.get("status"),
+                        clinical_time,
+                        payload(item),
+                        meta["lastUpdated"],
+                        meta["lastUpdated"],
+                    ),
+                )
+            self._confirmed_review_fault("after_layer4_insert")
+        return True
+
+    def _confirmed_review_fault(self, stage: str) -> None:
+        """Test seam for proving rollback after the final domain write."""
+
+        return None
 
     def save_message(self, message: FollowUpMessage) -> None:
         with connect(self.db_path) as connection:

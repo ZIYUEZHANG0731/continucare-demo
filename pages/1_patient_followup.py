@@ -15,9 +15,17 @@ from continucare.agents.contracts import (
     SemanticStatus,
 )
 from continucare.care_agent import CareAgentService
+from continucare.care_agent.model_api import (
+    SemanticModelConfig,
+    UnconfiguredModelAdapter,
+)
 from continucare.care_engine import CareEngine
 from continucare.config import get_settings
-from continucare.demo_data import DEMO_PATIENT_ID, STRUCTURED_SCENARIOS
+from continucare.demo_data import (
+    DEMO_PATIENT_ID,
+    MANUAL_REVIEW_MESSAGE,
+    STRUCTURED_SCENARIOS,
+)
 from continucare.fhir.questionnaires import (
     flatten_questionnaire_items,
     visible_questionnaire_items,
@@ -27,6 +35,7 @@ from continucare.fhir.terminology import UCUM
 from continucare.presentation import observation_text
 from continucare.models import CareSessionStatus
 from continucare.ui import inject_global_styles, render_mode_badges
+from continucare.services.confirmed_review import ConfirmedReviewService
 
 
 PRESETS = {
@@ -341,8 +350,12 @@ def _render_semantic_result(record, result: SemanticResult) -> None:
 
         confirmed_key = _semantic_state_key("confirmed", result.run_id)
         confirmed = set(st.session_state.get(confirmed_key, []))
+        durable_decisions = store.conversation_action_decisions(session.session_id)
         available = [
-            item for item in result.candidates if item.candidate_id not in confirmed
+            item
+            for item in result.candidates
+            if item.candidate_id not in confirmed
+            and durable_decisions.get(item.candidate_id) not in {"accepted", "rejected"}
         ]
         if available:
             st.markdown("**请确认我整理的内容**")
@@ -371,24 +384,72 @@ def _render_semantic_result(record, result: SemanticResult) -> None:
                         selected.append(candidate.candidate_id)
             confirm_col, modify_col = st.columns([1.4, 1])
             with confirm_col:
+                manual_review_flow = record.input_text == MANUAL_REVIEW_MESSAGE
                 if st.button(
-                    "确认所选记录",
+                    (
+                        "确认全部并创建护士人工复核任务"
+                        if manual_review_flow
+                        else "确认所选记录"
+                    ),
                     type="primary",
                     width="stretch",
                     key=_semantic_state_key("confirm", result.run_id),
                     disabled=not selected,
                 ):
                     try:
-                        updated = agent_service.confirm_candidates(result.run_id, selected)
-                        st.session_state[confirmed_key] = [*confirmed, *selected]
-                        _set_widget_answers(session.session_id, updated.answers)
+                        if manual_review_flow:
+                            if set(selected) != {
+                                item.candidate_id for item in available
+                            }:
+                                raise ValueError("请确认本轮全部候选，或选择拒绝/不确定")
+                            review_service.accept_all(result.run_id, selected)
+                            st.session_state["care_submission_notice"] = (
+                                "患者确认成功：证据资源与常规护士人工复核任务已原子创建；"
+                                "临床评估仍为 not_assessed。"
+                            )
+                        else:
+                            updated = agent_service.confirm_candidates(
+                                result.run_id, selected
+                            )
+                            st.session_state[confirmed_key] = [*confirmed, *selected]
+                            _set_widget_answers(session.session_id, updated.answers)
                         st.rerun()
-                    except ValueError as exc:
+                    except (ValueError, LookupError) as exc:
                         st.warning(str(exc))
             with modify_col:
-                st.caption("如有不准确，请取消勾选，或在下方完整问卷中修改。")
+                if manual_review_flow:
+                    reject, unsure = st.columns(2)
+                    if reject.button(
+                        "拒绝全部",
+                        key=_semantic_state_key("reject", result.run_id),
+                        width="stretch",
+                    ):
+                        agent_service.reject_candidates(
+                            result.run_id,
+                            [item.candidate_id for item in available],
+                        )
+                        st.rerun()
+                    if unsure.button(
+                        "暂不确定",
+                        key=_semantic_state_key("unsure", result.run_id),
+                        width="stretch",
+                    ):
+                        agent_service.mark_candidates_unsure(
+                            result.run_id,
+                            [item.candidate_id for item in available],
+                        )
+                        st.rerun()
+                    st.caption("拒绝或不确定只留决策审计，不创建临床资源或任务。")
+                else:
+                    st.caption("如有不准确，请取消勾选，或在下方完整问卷中修改。")
         elif result.candidates:
-            st.success("这些候选已由您确认，并保存到下方问卷草稿。")
+            if any(
+                durable_decisions.get(item.candidate_id) == "rejected"
+                for item in result.candidates
+            ):
+                st.info("这些候选已被拒绝；没有创建临床资源或护士任务。")
+            else:
+                st.success("这些候选已由您确认，并保存到下方问卷草稿。")
 
         resolved_key = _semantic_state_key("resolved", result.run_id)
         resolved = set(st.session_state.get(resolved_key, []))
@@ -592,7 +653,17 @@ session = engine.start_or_resume(
     patient_timezone=settings.patient_timezone,
 )
 questionnaire = engine.questionnaire_for_session(session)
-agent_service = CareAgentService(store, care_engine=engine)
+agent_service = CareAgentService(
+    store,
+    care_engine=engine,
+    model_adapter=UnconfiguredModelAdapter(SemanticModelConfig()),
+    patient_timezone=settings.patient_timezone,
+)
+review_service = ConfirmedReviewService(
+    store,
+    care_agent=agent_service,
+    care_engine=engine,
+)
 
 notice = st.session_state.pop("care_submission_notice", None)
 if notice:

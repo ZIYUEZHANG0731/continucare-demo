@@ -15,6 +15,8 @@ from continucare.ui import inject_global_styles, render_mode_badges
 STAGES = (
     ("patient_message_submitted", "患者已提交"),
     ("extraction_completed", "证据已形成"),
+    ("questionnaire_response_completed", "患者确认已发布"),
+    ("manual_review_task_created", "人工复核任务已创建"),
     ("alert_created", "任务已创建"),
     ("nurse_alert_action", "护士已处理"),
     ("summary_generated", "简报已生成"),
@@ -40,6 +42,13 @@ def _event_detail(event) -> str:
             f"患者决定：{details.get('decision', '—')}；"
             f"确认字段 {', '.join(details.get('confirmed_link_ids', [])) or '无'}。"
         )
+    if event.event_type == "questionnaire_response_completed":
+        return (
+            f"患者确认后形成 {len(details.get('observation_refs', []))} 条最终 Observation；"
+            "临床评估保持 not_assessed。"
+        )
+    if event.event_type == "manual_review_task_created":
+        return "患者明确确认后创建常规护士人工复核 Task；未使用临床规则或风险分级。"
     if event.event_type == "risk_rule_matched":
         return f"规则命中，工作流优先级为 {details.get('severity', '—')}。"
     if event.event_type == "risk_evaluated":
@@ -84,6 +93,22 @@ store = SQLiteStore(get_settings().db_path)
 events = store.list_audit_events()
 event_types = {event.event_type for event in events}
 completed = sum(event_type in event_types for event_type, _ in STAGES)
+
+manual_review_stages = (
+    ("semantic_analysis_completed", "受控候选"),
+    ("semantic_candidate_patient_decision", "患者确认"),
+    ("questionnaire_response_completed", "最终证据"),
+    ("manual_review_task_created", "护士任务"),
+)
+st.markdown("## 本次人工复核链路")
+manual_columns = st.columns(len(manual_review_stages))
+for column, (event_type, label) in zip(manual_columns, manual_review_stages):
+    with column:
+        if event_type in event_types:
+            st.success(f"✓ {label}")
+        else:
+            st.info(f"○ {label}")
+st.caption("只有患者明确确认后，最终 FHIR 证据与护士人工复核 Task 才会同时出现。")
 
 st.markdown("## 这条随访故事走到哪一步")
 st.progress(completed / len(STAGES), text=f"已完成 {completed}/{len(STAGES)} 个关键阶段")
