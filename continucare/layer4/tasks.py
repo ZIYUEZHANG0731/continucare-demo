@@ -35,6 +35,12 @@ _TERMINAL_STATUSES = frozenset(
 )
 
 
+def is_task_transition_allowed(from_status: str, to_status: str) -> bool:
+    """Pure shared predicate; callers remain responsible for atomic persistence."""
+
+    return to_status in _ALLOWED_TRANSITIONS.get(from_status, frozenset())
+
+
 def _stable_id(prefix: str, *parts: str) -> str:
     payload = "\x1f".join(parts).encode("utf-8")
     return f"{prefix}-{hashlib.sha256(payload).hexdigest()[:24]}"
@@ -86,7 +92,7 @@ class TaskWorkflowService:
             )
         if current_status in _TERMINAL_STATUSES:
             raise ValueError(f"terminal Task status {current_status!r} cannot transition")
-        if to_status not in _ALLOWED_TRANSITIONS.get(current_status, frozenset()):
+        if not is_task_transition_allowed(current_status, to_status):
             raise ValueError(
                 f"Task transition {current_status!r} -> {to_status!r} is not allowed"
             )

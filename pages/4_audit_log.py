@@ -17,6 +17,8 @@ STAGES = (
     ("extraction_completed", "证据已形成"),
     ("questionnaire_response_completed", "患者确认已发布"),
     ("manual_review_task_created", "人工复核任务已创建"),
+    ("manual_review_outcome_recorded", "人工复核结果已记录"),
+    ("manual_review_communication_approved", "沟通草稿已人工批准"),
     ("alert_created", "任务已创建"),
     ("nurse_alert_action", "护士已处理"),
     ("summary_generated", "简报已生成"),
@@ -49,6 +51,21 @@ def _event_detail(event) -> str:
         )
     if event.event_type == "manual_review_task_created":
         return "患者明确确认后创建常规护士人工复核 Task；未使用临床规则或风险分级。"
+    if event.event_type == "manual_review_task_acknowledged":
+        return "合成演示护士确认收到任务；Task 与原始患者证据链保持关联。"
+    if event.event_type == "manual_review_task_started":
+        return "合成演示护士明确接受并开始人工复核；临床评估仍为 not_assessed。"
+    if event.event_type == "manual_review_outcome_recorded":
+        return (
+            f"护士记录受控处理结果“{details.get('outcome_label', '—')}”，"
+            "系统生成同一中性模板的待批准沟通草稿；尚不可发送。"
+        )
+    if event.event_type == "manual_review_communication_approved":
+        return "护士明确批准草稿进入可发送状态；本切片没有调用任何发送能力。"
+    if event.event_type == "manual_review_task_rejected":
+        return "护士拒绝任务并留痕；未创建沟通草稿或发送副作用。"
+    if event.event_type == "manual_review_task_cancelled":
+        return "护士取消任务并留痕；未创建沟通草稿或发送副作用。"
     if event.event_type == "risk_rule_matched":
         return f"规则命中，工作流优先级为 {details.get('severity', '—')}。"
     if event.event_type == "risk_evaluated":
@@ -99,16 +116,24 @@ manual_review_stages = (
     ("semantic_candidate_patient_decision", "患者确认"),
     ("questionnaire_response_completed", "最终证据"),
     ("manual_review_task_created", "护士任务"),
+    ("manual_review_task_acknowledged", "确认收到"),
+    ("manual_review_task_started", "开始复核"),
+    ("manual_review_outcome_recorded", "结果与草稿"),
+    ("manual_review_communication_approved", "人工批准"),
 )
 st.markdown("## 本次人工复核链路")
-manual_columns = st.columns(len(manual_review_stages))
-for column, (event_type, label) in zip(manual_columns, manual_review_stages):
-    with column:
-        if event_type in event_types:
-            st.success(f"✓ {label}")
-        else:
-            st.info(f"○ {label}")
-st.caption("只有患者明确确认后，最终 FHIR 证据与护士人工复核 Task 才会同时出现。")
+for row_start in range(0, len(manual_review_stages), 4):
+    row = manual_review_stages[row_start : row_start + 4]
+    manual_columns = st.columns(len(row))
+    for column, (event_type, label) in zip(manual_columns, row):
+        with column:
+            if event_type in event_types:
+                st.success(f"✓ {label}")
+            else:
+                st.info(f"○ {label}")
+st.caption(
+    "沟通草稿只有在护士明确批准后才进入可发送状态；本切片始终不实际发送。"
+)
 
 st.markdown("## 这条随访故事走到哪一步")
 st.progress(completed / len(STAGES), text=f"已完成 {completed}/{len(STAGES)} 个关键阶段")

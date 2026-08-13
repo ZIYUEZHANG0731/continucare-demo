@@ -9,6 +9,19 @@ from continucare.fhir.r4 import validate_r4_resource
 
 MANUAL_REVIEW_IDENTIFIER_SYSTEM = "urn:continucare:patient-confirmed-review"
 CLINICAL_RULE_IDENTIFIER_SYSTEM = "urn:continucare:clinical-rule"
+MANUAL_REVIEW_COMMUNICATION_IDENTIFIER_SYSTEM = (
+    "urn:continucare:manual-review-communication"
+)
+COMMUNICATION_READINESS_EXTENSION_URL = (
+    "urn:continucare:communication-readiness"
+)
+EVIDENCE_DIGEST_EXTENSION_URL = "urn:continucare:evidence-digest"
+PENDING_APPROVAL = "pending-approval"
+READY_TO_SEND = "ready-to-send"
+
+# M5-B deliberately has no sender.  A future slice must change this flag and
+# still pass is_send_eligible before it can introduce any delivery adapter.
+SEND_ENABLED = False
 
 
 def admit_final_patient_report(
@@ -62,6 +75,43 @@ def is_manual_review_task(resource: dict[str, Any]) -> bool:
 def is_clinical_rule_task(resource: dict[str, Any]) -> bool:
     return resource.get("resourceType") == "Task" and has_identifier_system(
         resource, CLINICAL_RULE_IDENTIFIER_SYSTEM
+    )
+
+
+def is_manual_review_communication(resource: dict[str, Any]) -> bool:
+    return resource.get("resourceType") == "Communication" and has_identifier_system(
+        resource, MANUAL_REVIEW_COMMUNICATION_IDENTIFIER_SYSTEM
+    )
+
+
+def communication_readiness(resource: dict[str, Any]) -> str | None:
+    values = [
+        item.get("valueCode")
+        for item in resource.get("extension", [])
+        if item.get("url") == COMMUNICATION_READINESS_EXTENSION_URL
+    ]
+    if len(values) != 1:
+        return None
+    return values[0]
+
+
+def is_send_eligible(
+    communication: dict[str, Any], *, current_task: dict[str, Any]
+) -> bool:
+    """Single future-facing approval gate; M5-B never invokes a sender."""
+
+    task_reference = f"Task/{current_task.get('id')}/_history/{current_task.get('meta', {}).get('versionId')}"
+    return (
+        SEND_ENABLED
+        and is_manual_review_communication(communication)
+        and is_manual_review_task(current_task)
+        and current_task.get("status") == "completed"
+        and communication.get("status") == "preparation"
+        and communication_readiness(communication) == READY_TO_SEND
+        and "sent" not in communication
+        and "received" not in communication
+        and task_reference
+        in {item.get("reference") for item in communication.get("basedOn", [])}
     )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 
 import pytest
@@ -486,6 +487,18 @@ def test_workbench_excludes_same_pathway_manual_review_task(tmp_path):
         task_id="task-manual-review-workbench",
     )
     scenario.repository.save_fhir_resource(manual, patient_id=PATIENT_ID)
+    completed_manual = deepcopy(manual)
+    completed_manual["status"] = "completed"
+    completed_manual["meta"] = {
+        **completed_manual["meta"],
+        "versionId": "2",
+        "lastUpdated": "2026-08-02T12:06:30+00:00",
+    }
+    completed_manual["executionPeriod"] = {
+        "start": "2026-08-02T12:06:10+00:00",
+        "end": "2026-08-02T12:06:30+00:00",
+    }
+    scenario.repository.save_fhir_resource(completed_manual, patient_id=PATIENT_ID)
 
     view = scenario.workbench.query(
         patient_id=PATIENT_ID,

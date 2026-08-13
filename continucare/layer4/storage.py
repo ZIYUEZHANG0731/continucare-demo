@@ -20,6 +20,14 @@ from continucare.layer4.contracts import (
     TimelineEvent,
 )
 from continucare.layer4.fhir import validate_layer4_fhir_resource
+from continucare.layer4.manual_reviews import (
+    PENDING_APPROVAL,
+    READY_TO_SEND,
+    communication_readiness,
+    is_manual_review_communication,
+    is_manual_review_task,
+)
+from continucare.models import AuditEvent
 
 _CONTRACT_MODELS: dict[str, type[BaseModel]] = {
     "clinical_rule": ClinicalRuleDefinition,
@@ -210,6 +218,244 @@ class Layer4SQLiteStore:
                 ),
             )
         return normalized
+
+    def persist_manual_review_action(
+        self,
+        *,
+        patient_id: str,
+        expected_task: dict[str, Any],
+        resources: list[dict[str, Any]],
+        audit_event: AuditEvent,
+        expected_communication: dict[str, Any] | None = None,
+    ) -> bool:
+        """CAS one manual-review action as an exact, all-or-nothing write set."""
+
+        expected_task = validate_layer4_fhir_resource(
+            expected_task, expected_resource_type="Task"
+        )
+        if not is_manual_review_task(expected_task):
+            raise ValueError("manual review action requires a manual-review Task")
+        if expected_task.get("for", {}).get("reference") != f"Patient/{patient_id}":
+            raise ValueError("manual review action Task patient mismatch")
+        expected_communication_json: str | None = None
+        if expected_communication is not None:
+            expected_communication = validate_layer4_fhir_resource(
+                expected_communication, expected_resource_type="Communication"
+            )
+            if not is_manual_review_communication(expected_communication):
+                raise ValueError("manual review action Communication mismatch")
+            if expected_communication.get("subject", {}).get("reference") != (
+                f"Patient/{patient_id}"
+            ):
+                raise ValueError("manual review Communication patient mismatch")
+            expected_communication_json = _json(expected_communication)
+        if not resources:
+            raise ValueError("manual review action requires resources")
+        normalized = [validate_layer4_fhir_resource(item) for item in resources]
+        identities = [
+            (item["resourceType"], item["id"], item["meta"]["versionId"])
+            for item in normalized
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("manual review action resource identities must be unique")
+        if audit_event.patient_id != patient_id:
+            raise ValueError("manual review action audit patient mismatch")
+
+        non_provenance_refs: set[str] = set()
+        for item in normalized:
+            resource_type = item["resourceType"]
+            if resource_type == "Task":
+                if not is_manual_review_task(item):
+                    raise ValueError("manual review action cannot write another Task class")
+                if item.get("for", {}).get("reference") != f"Patient/{patient_id}":
+                    raise ValueError("manual review Task patient mismatch")
+                non_provenance_refs.add(
+                    f"Task/{item['id']}/_history/{item['meta']['versionId']}"
+                )
+            elif resource_type == "Communication":
+                if not is_manual_review_communication(item):
+                    raise ValueError(
+                        "manual review action cannot write another Communication class"
+                    )
+                if item.get("subject", {}).get("reference") != f"Patient/{patient_id}":
+                    raise ValueError("manual review Communication patient mismatch")
+                if "sent" in item or "received" in item:
+                    raise ValueError("manual review Communication must remain unsent")
+                if communication_readiness(item) not in {
+                    PENDING_APPROVAL,
+                    READY_TO_SEND,
+                }:
+                    raise ValueError("manual review Communication readiness is invalid")
+                non_provenance_refs.add(
+                    f"Communication/{item['id']}/_history/{item['meta']['versionId']}"
+                )
+        provenances = [
+            item for item in normalized if item["resourceType"] == "Provenance"
+        ]
+        if len(provenances) != 1:
+            raise ValueError("manual review action requires exactly one Provenance")
+        provenance_targets = {
+            target.get("reference")
+            for target in provenances[0].get("target", [])
+        }
+        if not non_provenance_refs or not non_provenance_refs.issubset(
+            provenance_targets
+        ):
+            raise ValueError("manual review Provenance must target every action resource")
+
+        resource_payloads = {
+            identity: _json(item) for identity, item in zip(identities, normalized)
+        }
+        expected_task_json = _json(expected_task)
+        audit_details = _json(audit_event.details_json)
+        with connect(self.db_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing_resources: dict[tuple[str, str, str], Any] = {}
+            for identity in identities:
+                row = connection.execute(
+                    """
+                    SELECT resource_json, patient_id FROM layer4_fhir_resources
+                    WHERE resource_type = ? AND resource_id = ? AND version_id = ?
+                    """,
+                    identity,
+                ).fetchone()
+                if row is not None:
+                    existing_resources[identity] = row
+            existing_audit = connection.execute(
+                "SELECT * FROM audit_events WHERE event_id = ?",
+                (audit_event.event_id,),
+            ).fetchone()
+            if existing_resources or existing_audit is not None:
+                exact_resources = len(existing_resources) == len(identities) and all(
+                    row["resource_json"] == resource_payloads[identity]
+                    and row["patient_id"] == patient_id
+                    for identity, row in existing_resources.items()
+                )
+                exact_audit = (
+                    existing_audit is not None
+                    and existing_audit["patient_id"] == audit_event.patient_id
+                    and existing_audit["entity_type"] == audit_event.entity_type
+                    and existing_audit["entity_id"] == audit_event.entity_id
+                    and existing_audit["event_type"] == audit_event.event_type
+                    and existing_audit["actor_type"] == audit_event.actor_type
+                    and _json(json.loads(existing_audit["details_json"]))
+                    == audit_details
+                    and existing_audit["created_at"] == audit_event.created_at
+                )
+                if exact_resources and exact_audit:
+                    return False
+                raise ValueError("manual review action has a conflicting partial replay")
+
+            current_task = connection.execute(
+                """
+                SELECT resource_json FROM layer4_fhir_resources
+                WHERE resource_type = 'Task' AND resource_id = ? AND is_current = 1
+                """,
+                (expected_task["id"],),
+            ).fetchone()
+            if current_task is None or current_task["resource_json"] != expected_task_json:
+                raise ValueError("manual review Task changed; refresh and retry")
+            if expected_communication is not None:
+                current_communication = connection.execute(
+                    """
+                    SELECT resource_json FROM layer4_fhir_resources
+                    WHERE resource_type = 'Communication' AND resource_id = ?
+                      AND is_current = 1
+                    """,
+                    (expected_communication["id"],),
+                ).fetchone()
+                if (
+                    current_communication is None
+                    or current_communication["resource_json"]
+                    != expected_communication_json
+                ):
+                    raise ValueError(
+                        "manual review Communication changed; refresh and retry"
+                    )
+
+            ready = [
+                item
+                for item in normalized
+                if item["resourceType"] == "Communication"
+                and communication_readiness(item) == READY_TO_SEND
+            ]
+            if ready:
+                if expected_task.get("status") != "completed":
+                    raise ValueError("only a completed Task can authorize approval")
+                if (
+                    expected_communication is None
+                    or communication_readiness(expected_communication)
+                    != PENDING_APPROVAL
+                ):
+                    raise ValueError("only a pending draft can be approved")
+                previous_rows = connection.execute(
+                    """
+                    SELECT resource_json FROM layer4_fhir_resources
+                    WHERE resource_type = 'Communication' AND resource_id = ?
+                    """,
+                    (ready[0]["id"],),
+                ).fetchall()
+                if any(
+                    communication_readiness(json.loads(row["resource_json"]))
+                    == READY_TO_SEND
+                    for row in previous_rows
+                ):
+                    raise ValueError("manual review Communication is already approved")
+
+            for item in normalized:
+                resource_type = item["resourceType"]
+                meta = item["meta"]
+                connection.execute(
+                    """
+                    UPDATE layer4_fhir_resources SET is_current = 0
+                    WHERE resource_type = ? AND resource_id = ? AND is_current = 1
+                    """,
+                    (resource_type, item["id"]),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO layer4_fhir_resources (
+                        resource_type, resource_id, version_id, patient_id, status,
+                        clinical_time, resource_json, is_current, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        resource_type,
+                        item["id"],
+                        meta["versionId"],
+                        patient_id,
+                        item.get("status"),
+                        _fhir_clinical_time(item),
+                        _json(item),
+                        meta["lastUpdated"],
+                        meta["lastUpdated"],
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT INTO audit_events (
+                    event_id, patient_id, entity_type, entity_id, event_type,
+                    actor_type, details_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    audit_event.event_id,
+                    audit_event.patient_id,
+                    audit_event.entity_type,
+                    audit_event.entity_id,
+                    audit_event.event_type,
+                    audit_event.actor_type,
+                    audit_details,
+                    audit_event.created_at,
+                ),
+            )
+            self._manual_review_action_fault(audit_event.event_type)
+        return True
+
+    def _manual_review_action_fault(self, event_type: str) -> None:
+        """Test seam for proving rollback after all M5-B domain writes."""
+
+        return None
 
     def get_fhir_resource(
         self,
