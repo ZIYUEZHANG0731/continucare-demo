@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 from continucare.knowledge.ops.models import KnowledgeOpsPolicyError, SourcePolicy
@@ -61,6 +62,37 @@ _TECHNICAL_VALUE_KEYS = frozenset(
         "validation_profile_id",
     }
 )
+AUDITED_SHA256_FIELD_EVIDENCE = MappingProxyType(
+    {
+        # AppendOnlyLedger creates and replays these over canonical entry bytes.
+        "entry_sha256": "AppendOnlyLedger.append/_history_unlocked canonical entry digest",
+        "supersedes_entry_sha256": "AppendOnlyLedger predecessor-chain replay",
+        # Acquisition/connectors create these from exact bytes or canonical metadata.
+        "catalog_sha256": "OfflineFixtureConnector recomputes fixture catalog bytes",
+        "content_sha256": "connector/quarantine recompute exact content bytes",
+        "metadata_sha256": "AcquisitionService canonical SourceCandidate metadata digest",
+        "whole_record_sha256": "EvidenceCandidate binds verified SourceSnapshot content",
+        "whole_response_sha256": "source connector response_digest hashes exact response bytes",
+        # Hash-pinned governance loading and its derived read/review pins.
+        "document_sha256": "SourceRightsEvidence official-document capture digest",
+        "manifest_sha256": "load_ops_bundle recomputes every pinned manifest",
+        "bundle_index_sha256": "KnowledgeOpsBundle.index_sha256 canonical index digest",
+        "governance_index_sha256": "KnowledgeOpsBundle.index_sha256 canonical index digest",
+        "safety_boundary_sha256": "ReviewPacketBuilder canonical SafetyBoundary digest",
+        # Exact ledger/ref bindings copied into immutable review/release objects.
+        "subject_entry_sha256": "ReviewPacket exact LedgerRef binding",
+        "expected_predecessor_sha256": "ReviewEvent append-only predecessor check",
+        # Reviewer/author evidence and attestations have explicit producer/verifier contracts.
+        "provenance_evidence_sha256": "AuthorProvenance evidence producer contract",
+        "verification_evidence_sha256": "ReviewerVerifier identity-evidence contract",
+        "reviewer_verification_evidence_sha256": "ReviewEvent reviewer snapshot binding",
+        "reviewer_identity_assertion_sha256": "canonical reviewer identity assertion digest",
+        "event_claim_sha256": "canonical ReviewEvent claim digest",
+        "attestation_sha256": "ReviewerVerifier attestation producer/verifier contract",
+    }
+)
+AUDITED_SHA256_FIELDS = frozenset(AUDITED_SHA256_FIELD_EVIDENCE)
+_LOWER_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _TECHNICAL_HASH_ID_PATTERNS = {
     "event_id": re.compile(r"^event-[0-9a-f]{20}$"),
     "attestation_id": re.compile(r"^(?:attest|fixture)-[0-9a-f]{32}$"),
@@ -110,8 +142,8 @@ def assert_no_sensitive_data(value: object, *, path: str = "payload") -> None:
                     is not None
                 )
                 or (
-                    normalized_key.endswith("_sha256")
-                    and re.fullmatch(r"[0-9a-f]{64}", item) is not None
+                    normalized_key in AUDITED_SHA256_FIELDS
+                    and _LOWER_SHA256.fullmatch(item) is not None
                 )
             ):
                 continue
