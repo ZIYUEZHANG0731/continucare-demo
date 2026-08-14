@@ -13,8 +13,9 @@ clinical-decision system. Every new record fixes:
 
 Operational `SourcePolicy.live_network_enabled` remains `false`. The existing
 `AcquisitionService` remains synthetic/offline-only. The optional live smoke
-validator is a separate contract checker with no import or call path to the
-ledger, Claim promotion, manifests, product database, pathway, UI, or runtime.
+validator reads the pinned governance bundle to verify exact policy alignment,
+but has no write path to the ledger, Claim promotion, manifests, product
+database, pathway, UI, or runtime.
 
 ## P1a data flow
 
@@ -189,9 +190,10 @@ python -m continucare.knowledge.ops.source_connectors.live_validation
 ```
 
 The command accepts no URLs, queries, output paths, credentials, or patient
-data. It makes at most five fixed metadata requests (one per modeled endpoint),
-uses an automatically removed temporary directory, prints one body-free JSON
-report, and never changes the parent environment.
+data. Live-smoke retries are explicitly disabled, so it makes at most five fixed
+metadata requests (one per modeled endpoint), uses an automatically removed
+temporary directory, prints one body-free JSON report, and never changes the
+parent environment.
 
 ## Remaining production blockers
 

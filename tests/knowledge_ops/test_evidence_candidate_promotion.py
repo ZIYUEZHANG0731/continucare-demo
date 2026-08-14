@@ -303,6 +303,49 @@ def test_synthetic_lineage_cannot_be_laundered_by_successor(tmp_path: Path) -> N
             expected_record_version=2,
         )
 
+    payload["synthetic"] = False
+    with pytest.raises(KnowledgeOpsPolicyError, match="synthetic status"):
+        ledger.append(
+            LedgerCollection.CLAIM,
+            claim_ref.record_id,
+            payload_type="machine_draft_claim_v2",
+            payload=payload,
+            recorded_by="system:payload-laundering-probe",
+            synthetic=True,
+            expected_record_version=2,
+        )
+
+    payload["synthetic"] = True
+    with pytest.raises(KnowledgeOpsPolicyError, match="author provenance"):
+        ledger.append(
+            LedgerCollection.CLAIM,
+            claim_ref.record_id,
+            payload_type="machine_draft_claim_v2",
+            payload=payload,
+            recorded_by="system:author-laundering-probe",
+            synthetic=True,
+            expected_record_version=2,
+        )
+
+
+def test_machine_draft_record_type_cannot_hide_behind_another_payload_type(
+    tmp_path: Path,
+) -> None:
+    ledger = AppendOnlyLedger(tmp_path / "ledger")
+    with pytest.raises(KnowledgeOpsPolicyError, match="requires machine_draft_claim_v2"):
+        ledger.append(
+            LedgerCollection.CLAIM,
+            "dcl-type-confusion",
+            payload_type="other_claim_type",
+            payload={
+                "record_type": "machine_draft_claim",
+                "claim_id": "dcl-type-confusion",
+                "claim_version": 1,
+            },
+            recorded_by="system:type-confusion-probe",
+            synthetic=True,
+        )
+
 
 def test_synthetic_review_uses_same_packet_event_verifier_and_attestation_path(
     tmp_path: Path,

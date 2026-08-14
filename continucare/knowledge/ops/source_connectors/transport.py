@@ -62,10 +62,17 @@ class SecureMetadataTransport:
         clock: Clock = time.monotonic,
         jitter: Jitter = lambda: 0.0,
         timeout_seconds: float = 10.0,
+        maximum_retries: int = _MAX_RETRIES,
     ) -> None:
         assert_valid_egress_permit(permit)
         if timeout_seconds <= 0 or timeout_seconds > 60:
             raise ValueError("transport timeout must be within (0, 60] seconds")
+        if (
+            isinstance(maximum_retries, bool)
+            or not isinstance(maximum_retries, int)
+            or not 0 <= maximum_retries <= _MAX_RETRIES
+        ):
+            raise ValueError("transport retries must be an integer within [0, 2]")
         self._resolver = resolver or _resolve_addresses
         self._tcp_connector = tcp_connector or _connect_tcp
         self._context_factory = context_factory or ssl.create_default_context
@@ -73,6 +80,7 @@ class SecureMetadataTransport:
         self._clock = clock
         self._jitter = jitter
         self._timeout_seconds = timeout_seconds
+        self._maximum_retries = maximum_retries
         self._last_request_at: dict[str, float] = {}
 
     def execute(
@@ -98,7 +106,7 @@ class SecureMetadataTransport:
                     target=target,
                 )
             except ConnectorFailure as exc:
-                if retry_index >= _MAX_RETRIES or not _is_retryable(exc):
+                if retry_index >= self._maximum_retries or not _is_retryable(exc):
                     raise
                 self._sleep_before_retry(exc, retry_index)
                 retry_index += 1

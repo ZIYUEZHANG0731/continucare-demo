@@ -160,7 +160,11 @@ def run_live_validation(
         )
 
     bundle = load_builtin_ops_bundle()
-    transport = SecureMetadataTransport(permit=permit)
+    # The generic transport supports bounded retries for operational contract
+    # tests, but the live smoke budget counts physical requests.  Disabling
+    # retries here fixes the validator at one request per modeled endpoint:
+    # five total, below both the per-source and global P1b limits.
+    transport = SecureMetadataTransport(permit=permit, maximum_retries=0)
     records: list[LiveValidationRecord] = []
     request_count = 0
     with tempfile.TemporaryDirectory(prefix="continucare-knowledge-live-") as directory:

@@ -138,6 +138,7 @@ class AppendOnlyLedger:
             record_id=record_id,
             payload_type=payload_type,
             payload=canonical_payload,
+            synthetic=synthetic,
         )
         timestamp = recorded_at or datetime.now(timezone.utc)
         if timestamp.tzinfo is None:
@@ -375,10 +376,15 @@ def _validate_typed_collection_boundary(
     record_id: str,
     payload_type: str,
     payload: dict[str, object],
+    synthetic: bool,
 ) -> None:
     evidence_type = "evidence_candidate_v2"
     draft_type = "machine_draft_claim_v2"
     record_type = payload.get("record_type")
+    if record_type == "evidence_candidate" and payload_type != evidence_type:
+        raise KnowledgeOpsPolicyError(
+            "EvidenceCandidate record_type requires evidence_candidate_v2"
+        )
     if (
         record_type == "evidence_candidate"
         and collection != LedgerCollection.EVIDENCE_CANDIDATE
@@ -386,10 +392,15 @@ def _validate_typed_collection_boundary(
         raise KnowledgeOpsPolicyError(
             "EvidenceCandidate record may only be stored in EVIDENCE_CANDIDATE"
         )
-    if record_type == "machine_draft_claim" and collection != LedgerCollection.CLAIM:
-        raise KnowledgeOpsPolicyError(
-            "MachineDraftClaim record may only be stored in CLAIM"
-        )
+    if record_type == "machine_draft_claim":
+        if payload_type != draft_type:
+            raise KnowledgeOpsPolicyError(
+                "MachineDraftClaim record_type requires machine_draft_claim_v2"
+            )
+        if collection != LedgerCollection.CLAIM:
+            raise KnowledgeOpsPolicyError(
+                "MachineDraftClaim record may only be stored in CLAIM"
+            )
     if collection == LedgerCollection.EVIDENCE_CANDIDATE:
         if payload_type != evidence_type:
             raise KnowledgeOpsPolicyError(
@@ -420,6 +431,17 @@ def _validate_typed_collection_boundary(
         if not record_id.startswith("dcl-") or payload.get("claim_id") != record_id:
             raise KnowledgeOpsPolicyError(
                 "MachineDraftClaim ledger identity requires the dcl- namespace"
+            )
+
+    if payload_type in {evidence_type, draft_type}:
+        if payload.get("synthetic") is not synthetic:
+            raise KnowledgeOpsPolicyError(
+                "typed payload synthetic status must equal its ledger lineage"
+            )
+        author = payload.get("author_provenance")
+        if not isinstance(author, dict) or author.get("synthetic") is not synthetic:
+            raise KnowledgeOpsPolicyError(
+                "typed payload author provenance must preserve synthetic lineage"
             )
 
 

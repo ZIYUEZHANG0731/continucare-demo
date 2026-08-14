@@ -41,7 +41,7 @@ class EmaMedicineMetadata(StrictModel):
     medicine_status: NonBlank | None = None
     revision_number: NonBlank | None = None
     medicine_url: NonBlank
-    metadata_only: bool = True
+    metadata_only: Literal[True] = True
 
 
 class EmaMetadataBatch(StrictModel):
@@ -49,7 +49,7 @@ class EmaMetadataBatch(StrictModel):
     etag: NonBlank | None = None
     last_modified: NonBlank | None = None
     whole_response_sha256: Sha256
-    contains_document_text: bool = False
+    contains_document_text: Literal[False] = False
 
 
 EMA_MEDICINES_ENDPOINT = EndpointPolicy(

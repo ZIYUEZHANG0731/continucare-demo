@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Annotated, Literal
+
 from pydantic import Field, StringConstraints
-from typing import Annotated
 
 from continucare.knowledge.ops.models import NonBlank, Sha256, StrictModel
 from continucare.knowledge.ops.source_connectors.common import (
@@ -47,7 +48,7 @@ class DailyMedHistoryRecord(StrictModel):
     published_date: NonBlank
     title: NonBlank | None = None
     document_locator: NonBlank
-    metadata_only: bool = True
+    metadata_only: Literal[True] = True
 
 
 class DailyMedMetadataBatch(StrictModel):
@@ -55,7 +56,7 @@ class DailyMedMetadataBatch(StrictModel):
     etag: NonBlank | None = None
     last_modified: NonBlank | None = None
     whole_response_sha256: Sha256
-    contains_label_text: bool = False
+    contains_label_text: Literal[False] = False
 
 
 DAILYMED_HISTORY_ENDPOINT = EndpointPolicy(

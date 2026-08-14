@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints
 
@@ -50,8 +50,8 @@ class PubMedMetadata(StrictModel):
     publication_date: NonBlank | None = None
     source_title: NonBlank | None = None
     record_locator: NonBlank
-    abstract_included: bool = False
-    clinical_conclusion: bool = False
+    abstract_included: Literal[False] = False
+    clinical_conclusion: Literal[False] = False
 
 
 class PubMedMetadataBatch(StrictModel):
@@ -59,7 +59,9 @@ class PubMedMetadataBatch(StrictModel):
     etag: NonBlank | None = None
     last_modified: NonBlank | None = None
     whole_response_sha256: Sha256
-    rights_scope: str = "bibliographic_metadata_only"
+    rights_scope: Literal["bibliographic_metadata_only"] = (
+        "bibliographic_metadata_only"
+    )
 
 
 class PmcOpenAccessLocator(StrictModel):
@@ -67,8 +69,8 @@ class PmcOpenAccessLocator(StrictModel):
     license_label: NonBlank | None = None
     retracted: bool
     locator: NonBlank
-    full_text_included: bool = False
-    license_requires_item_review: bool = True
+    full_text_included: Literal[False] = False
+    license_requires_item_review: Literal[True] = True
 
 
 class PmcOpenAccessBatch(StrictModel):
@@ -76,7 +78,9 @@ class PmcOpenAccessBatch(StrictModel):
     etag: NonBlank | None = None
     last_modified: NonBlank | None = None
     whole_response_sha256: Sha256
-    rights_scope: str = "per_article_license_locator_only"
+    rights_scope: Literal["per_article_license_locator_only"] = (
+        "per_article_license_locator_only"
+    )
 
 
 PUBMED_ESUMMARY_ENDPOINT = EndpointPolicy(

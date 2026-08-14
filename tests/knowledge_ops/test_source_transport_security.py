@@ -247,6 +247,44 @@ def test_selected_5xx_retries_are_bounded_and_injected() -> None:
     assert sleeps == [0.25, 0.5]
 
 
+def test_timeout_retries_are_bounded_and_can_be_disabled() -> None:
+    calls: list[str] = []
+    sleeps: list[float] = []
+
+    def timeout_connect(address: str, _port: int, _timeout: float):
+        calls.append(address)
+        raise socket.timeout("synthetic timeout")
+
+    transport = SecureMetadataTransport(
+        permit=_permit(),
+        resolver=_resolver(PUBLIC_IP),
+        tcp_connector=timeout_connect,
+        sleeper=sleeps.append,
+        clock=lambda: 100.0,
+        maximum_retries=0,
+    )
+    with pytest.raises(ConnectorFailure) as raised:
+        transport.execute(_request(), _endpoint())
+    assert raised.value.code == ConnectorErrorCode.TIMEOUT
+    assert calls == [PUBLIC_IP]
+    assert sleeps == []
+
+
+def test_chunked_body_is_subject_to_the_same_streaming_hard_cap() -> None:
+    chunked_body = b"4\r\n1234\r\n2\r\n56\r\n0\r\n\r\n"
+    transport, _context, _sockets, _raw = _transport(
+        [
+            _wire_response(
+                body=chunked_body,
+                headers={"Transfer-Encoding": "chunked"},
+            )
+        ]
+    )
+    with pytest.raises(ConnectorFailure) as raised:
+        transport.execute(_request(), _endpoint(maximum_bytes=5))
+    assert raised.value.code == ConnectorErrorCode.RESPONSE_TOO_LARGE
+
+
 def test_long_retry_after_does_not_wait_or_retry() -> None:
     sleeps: list[float] = []
     transport, _context, _sockets, raw = _transport(

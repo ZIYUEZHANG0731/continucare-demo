@@ -203,8 +203,9 @@ def test_explicit_live_validator_uses_fixed_targets_and_body_free_report(
     class FakeLiveTransport:
         identity_binding_proven = True
 
-        def __init__(self, *, permit) -> None:
+        def __init__(self, *, permit, maximum_retries: int) -> None:
             assert permit is not None
+            assert maximum_retries == 0
 
         def execute(self, request, endpoint):
             assert request.endpoint_id == endpoint.endpoint_id
