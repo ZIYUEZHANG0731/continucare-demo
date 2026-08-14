@@ -35,6 +35,15 @@ from continucare.knowledge.ops.manifests import (
     load_builtin_ops_bundle,
     load_ops_bundle,
 )
+from continucare.knowledge.ops.evidence import (
+    EvidenceCandidate,
+    EvidenceCandidatePromotionService,
+    EvidenceCandidateService,
+    EvidenceDerivationProvenance,
+    EvidenceLimitationCode,
+    EvidenceLocator,
+    MachineDraftClaim,
+)
 from continucare.knowledge.ops.models import (
     KNOWLEDGE_OPS_CONTRACT_VERSION,
     AuthorProvenance,
@@ -126,6 +135,12 @@ __all__ = [
     "ClinicalContextScope",
     "CoverageValidationProfile",
     "DirectoryBundleSource",
+    "EvidenceCandidate",
+    "EvidenceCandidatePromotionService",
+    "EvidenceCandidateService",
+    "EvidenceDerivationProvenance",
+    "EvidenceLimitationCode",
+    "EvidenceLocator",
     "GovernanceGate",
     "GovernanceManifestEvidence",
     "GateDecision",
@@ -150,6 +165,7 @@ __all__ = [
     "LedgerEntry",
     "LedgerRef",
     "LicensePosture",
+    "MachineDraftClaim",
     "PolicyDecision",
     "PromotionDecision",
     "PromotionDecisionProvider",

@@ -154,6 +154,10 @@ class SourcePromotionService:
     ) -> LedgerRef:
         candidate_entry = self._ledger.get(candidate_ref)
         snapshot_entry = self._ledger.get(snapshot_ref)
+        if candidate_entry.payload_type == "evidence_candidate_v2":
+            raise KnowledgeOpsPolicyError(
+                "EvidenceCandidate cannot be promoted as a SourceCandidate"
+            )
         if candidate_entry.collection != LedgerCollection.CANDIDATE.value:
             raise KnowledgeOpsPolicyError("promotion subject must be a SourceCandidate")
         if snapshot_entry.collection != LedgerCollection.SNAPSHOT.value:

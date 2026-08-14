@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from continucare.knowledge.ops.models import (
     KnowledgeOpsIntegrityError,
+    KnowledgeOpsPolicyError,
     NonBlank,
     SafeId,
     Sha256,
@@ -30,6 +31,7 @@ class LedgerCollection(StrEnum):
     SNAPSHOT = "snapshot"
     CHANGE_SET = "change_set"
     CANDIDATE = "candidate"
+    EVIDENCE_CANDIDATE = "evidence_candidate"
     GAP = "gap"
     REVIEW_PACKET = "review_packet"
     REVIEW_EVENT = "review_event"
@@ -123,6 +125,7 @@ class AppendOnlyLedger:
         recorded_by: str,
         recorded_at: datetime | None = None,
         synthetic: bool = False,
+        expected_record_version: int | None = None,
     ) -> LedgerEntry:
         collection_value = LedgerCollection(collection)
         if not _safe_id(record_id):
@@ -130,6 +133,12 @@ class AppendOnlyLedger:
         if not _safe_id(payload_type):
             raise ValueError("payload_type is not a safe ledger identifier")
         canonical_payload = _json_payload(payload)
+        _validate_typed_collection_boundary(
+            collection=collection_value,
+            record_id=record_id,
+            payload_type=payload_type,
+            payload=canonical_payload,
+        )
         timestamp = recorded_at or datetime.now(timezone.utc)
         if timestamp.tzinfo is None:
             raise ValueError("recorded_at must include a timezone")
@@ -147,7 +156,16 @@ class AppendOnlyLedger:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             history = self._history_unlocked(collection_value, record_id)
             predecessor = history[-1] if history else None
+            if predecessor is not None and predecessor.synthetic and not synthetic:
+                raise KnowledgeOpsPolicyError(
+                    "synthetic ledger lineage cannot be changed to non-synthetic"
+                )
             version = 1 if predecessor is None else predecessor.record_version + 1
+            if expected_record_version is not None and version != expected_record_version:
+                raise KnowledgeOpsIntegrityError(
+                    "ledger record version changed before append"
+                )
+            _validate_typed_record_version(payload_type, canonical_payload, version)
             base = {
                 "collection": collection_value.value,
                 "record_id": record_id,
@@ -349,6 +367,63 @@ def _json_payload(payload: BaseModel | Mapping[str, object]) -> dict[str, object
     if not isinstance(normalized, dict):
         raise ValueError("ledger payload must be a JSON object")
     return normalized
+
+
+def _validate_typed_collection_boundary(
+    *,
+    collection: LedgerCollection,
+    record_id: str,
+    payload_type: str,
+    payload: dict[str, object],
+) -> None:
+    evidence_type = "evidence_candidate_v2"
+    draft_type = "machine_draft_claim_v2"
+    if collection == LedgerCollection.EVIDENCE_CANDIDATE:
+        if payload_type != evidence_type:
+            raise KnowledgeOpsPolicyError(
+                "EVIDENCE_CANDIDATE collection requires evidence_candidate_v2"
+            )
+        if payload.get("record_type") != "evidence_candidate":
+            raise KnowledgeOpsPolicyError(
+                "EvidenceCandidate record_type must be evidence_candidate"
+            )
+        if not record_id.startswith("evc-") or payload.get("candidate_id") != record_id:
+            raise KnowledgeOpsPolicyError(
+                "EvidenceCandidate ledger identity requires the evc- namespace"
+            )
+    elif payload_type == evidence_type:
+        raise KnowledgeOpsPolicyError(
+            "evidence_candidate_v2 may only be stored in EVIDENCE_CANDIDATE"
+        )
+
+    if payload_type == draft_type:
+        if collection != LedgerCollection.CLAIM:
+            raise KnowledgeOpsPolicyError(
+                "machine_draft_claim_v2 may only be stored in CLAIM"
+            )
+        if payload.get("record_type") != "machine_draft_claim":
+            raise KnowledgeOpsPolicyError(
+                "MachineDraftClaim record_type must be machine_draft_claim"
+            )
+        if not record_id.startswith("dcl-") or payload.get("claim_id") != record_id:
+            raise KnowledgeOpsPolicyError(
+                "MachineDraftClaim ledger identity requires the dcl- namespace"
+            )
+
+
+def _validate_typed_record_version(
+    payload_type: str,
+    payload: dict[str, object],
+    ledger_version: int,
+) -> None:
+    field = {
+        "evidence_candidate_v2": "candidate_version",
+        "machine_draft_claim_v2": "claim_version",
+    }.get(payload_type)
+    if field is not None and payload.get(field) != ledger_version:
+        raise KnowledgeOpsPolicyError(
+            f"{payload_type} {field} must equal its ledger record version"
+        )
 
 
 def _canonical_bytes(value: Mapping[str, object]) -> bytes:

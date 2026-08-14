@@ -684,6 +684,10 @@ class ReviewPacketBuilder:
         if expected_gate is None or expected_gate != GovernanceGate(gate):
             raise KnowledgeOpsPolicyError("Review subject is incompatible with gate")
         subject_entry = self._ledger.get(subject_ref)
+        if subject_entry.payload_type == "evidence_candidate_v2":
+            raise KnowledgeOpsPolicyError(
+                "EvidenceCandidate must be promoted to a typed draft Claim before Claim review"
+            )
         if subject_entry.collection != expected_collection.value:
             raise KnowledgeOpsPolicyError("Review subject collection is incompatible")
         if self._ledger.head(subject_ref.collection, subject_ref.record_id).ref != subject_ref:
@@ -1240,6 +1244,10 @@ def _resolve_packet_material(
         raise KnowledgeOpsPolicyError("Review Packet omits a gate-required Source operation")
 
     subject_entry = ledger.get(packet.subject.object_ref)
+    if subject_entry.payload_type == "evidence_candidate_v2":
+        raise KnowledgeOpsPolicyError(
+            "EvidenceCandidate cannot be used as a Claim review subject"
+        )
     assert_no_sensitive_data(subject_entry.payload)
     current_author_provenance = _subject_author_provenance(
         gate=GovernanceGate(packet.gate),
