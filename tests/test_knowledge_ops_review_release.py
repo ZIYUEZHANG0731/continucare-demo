@@ -1920,6 +1920,7 @@ def test_builtin_release_intent_contains_no_fake_approval_or_artifact():
 
 def test_release_contract_rejects_runtime_authority_and_clinical_rules():
     bundle = load_builtin_ops_bundle()
+    authored_at = datetime.now(timezone.utc)
     payload = {
         "release_candidate_id": "invalid-runtime-release",
         "intended_uses": ["informational_display"],
@@ -1929,17 +1930,26 @@ def test_release_contract_rejects_runtime_authority_and_clinical_rules():
         "governance_manifests": _manifest_evidence(bundle),
         "artifacts": [],
         "blocking_gap_refs": [],
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "created_by": "system:test",
+        "created_at": authored_at.isoformat(),
+        "created_by": "runtime-safety-author",
+        "author_provenance": {
+            "author_identity_id": "runtime-safety-author",
+            "author_principal_id": "runtime-safety-author-principal",
+            "authored_at": authored_at.isoformat(),
+            "provenance_reference": "urn:continucare:test:runtime-safety-author",
+            "synthetic": False,
+        },
         "synthetic": False,
         "runtime_authority": "clinical",
     }
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as runtime_error:
         KnowledgeReleaseCandidate.model_validate(payload)
+    assert "runtime_authority" in str(runtime_error.value)
     payload["runtime_authority"] = "none"
     payload["clinical_rule_refs"] = [None]
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError) as clinical_rule_error:
         KnowledgeReleaseCandidate.model_validate(payload)
+    assert "clinical_rule_refs" in str(clinical_rule_error.value)
 
 
 def test_readiness_report_cannot_claim_ready_with_blockers():
