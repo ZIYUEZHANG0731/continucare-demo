@@ -1,6 +1,74 @@
 # HANDOFF
 
-> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。最新活动状态是 2026-08-14 UI 方向已从 A+ 收敛为 A++「原话接力」暂定执行稿；用户曾要求暂停实施并先完成完整 Markdown 规格，现已明确授权在本次 UI-0A 文档收口 commit 并普通 push 后，按独立切片开始 UI 实施。下一个代码切片是 UI-1，必须从本次文档提交 push 后的新精确基线开始；当前尚未实施任何 UI 代码。运行时权威基线仍是随后记录的 M1–M5 Baseline Repair。若 UI 状态描述冲突，以本页最前面的 `UI-0A` 交接和其链接的 A++ 规格为准；若运行时能力描述冲突，以 `0. M1–M5 Baseline Repair 当前交接` 为准。
+> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。**最新权威状态：2026-08-14，A++ UI-1 至 UI-6 已完成并通过 Full Validation。** 最终测试代码基线是 `cad99d98f5cc13947d6075d62a628e6fc410d873`；完整证据见 [`docs/ui_a_plus_plus_full_validation_report_2026-08-14.md`](docs/ui_a_plus_plus_full_validation_report_2026-08-14.md)。后续不得再按本文件旧历史中“UI-1 尚未开始”或“A++ 尚未实施”的描述执行。旧节保留仅为历史；如 UI 状态冲突，以本节 `UI-6` 为准，运行时安全边界仍以 M1–M5 Baseline Repair 及后续已完成切片为准。
+
+## UI-6. A++ UI Full Validation 最新权威交接（2026-08-14，已完成）
+
+### UI-6.1 结论与精确基线
+
+- UI-1 至 UI-6 已完成；Full Validation 结论为 **PASS，无未解决 UI blocker**；
+- 最终测试代码基线：`cad99d98f5cc13947d6075d62a628e6fc410d873`，`fix(ui): resolve full-validation regressions`；
+- 该代码 commit 已普通 push，父基线是 UI-5 `1ef0cefb9d8d387a2744c7f164cd79a04cdb59e1`；
+- 完整报告：[`docs/ui_a_plus_plus_full_validation_report_2026-08-14.md`](docs/ui_a_plus_plus_full_validation_report_2026-08-14.md)；
+- A++ 是当前已验收 UI 基线，但仍可在未来真实用户测试后继续优化；任何后续修改需要用户单独授权；
+- 当前仍是 Streamlit 合成产品原型，不是已发布原生 App、临床试点或生产系统。
+
+### UI-6.2 六页与验收范围
+
+以下六页均已完成：
+
+1. 合成演示导览 `/`；
+2. 我的随访 `/patient_followup`；
+3. 护士工作台 `/nurse_risk_center`；
+4. 复诊速览 `/doctor_summary`；
+5. 记录追溯 `/audit_log`；
+6. Knowledge 资料库 `/knowledge_evidence`。
+
+验收已覆盖：
+
+- 真实 UI 正向路径从 0/9 到 `story_complete`；
+- candidate ready/unsure/rejected、Task 四种异常终态、stale/integrity/generation conflict、DoctorReview 三种决定和 Knowledge 边界；
+- 全部合法状态自动投影，以及 15 个可自然持久化/缺失状态的 Browser 首页、当前角色页和审计页矩阵；
+- 六页 `1280×720` 桌面与 `390×844` 移动端；
+- page identity、DOM、overlay、console、水平溢出、触控目标、ARIA、焦点样式、对比度和 reduced-motion CSS；
+- 两张 accepted A++ concept 与最终截图的 fidelity 对照；
+- 中文、临床边界、Mock/未发送说明和数据库只读不变性。
+
+### UI-6.3 本轮最小修复
+
+验收发现并修复两个明确 UI 问题：
+
+1. 护士、医生、审计和 Knowledge 的自定义披露入口缺少稳定 `aria-expanded` / `aria-controls`；现使用同源原生状态链接、明确 ARIA、44px 高度、焦点样式和可恢复 query state；
+2. 医生桌面窄来源栏三项横排导致中文逐字换行；现仅该来源栏改为纵向排列。
+
+没有修改 service、FHIR 合同、数据库 schema、Knowledge manifest、terminology、配置或依赖。
+
+### UI-6.4 最终验证
+
+```text
+UI targeted: 228 passed
+关键业务回归: 35 passed
+全量: 534 passed, 3 skipped
+compileall: 通过
+git diff --check: 通过
+```
+
+三个 skip 仍仅因没有配置官方 `FHIR_R4_SCHEMA_ZIP`，没有新增 skip。
+
+标准 happy path 最终保持：QuestionnaireResponse 1、Observation 1、Task 历史版本 5、Communication 历史版本 2、Summary 历史版本 2、AuditEvent 12、Alert 0、approved ClinicalRule 0、sent/received Communication 0、`SEND_ENABLED=False`、`story_complete` / 9/9。
+
+### UI-6.5 安全、数据与工具边界
+
+- 无真实患者数据、无模型调用、无真实发送、无真实外部系统写入、无部署；
+- 工作区 `data/continucare.db` 在验收前后保持 SHA-256 `0d0b35a97d96faee19015d8917b6b5e42a65ff40a2dd99dca967d5b02e6ef585`、size `311296`、mtime `1786644509`，且无 journal/WAL/SHM；
+- `docs/ui_product_design_brief_2026-08-13.md` 仍是受保护未跟踪输入，SHA-256 `e9e03bde1051f43ec8dbca2695716a70588b448e47b37e434015934121be03a6`，不得自动暂存或修改；
+- 当前 UI 继续使用主分支既有离线 Knowledge bundle；`codex/knowledge-v2-alias-readiness` tip `0110c319a58e2de7baa92e83788a56113bc62a0c` 已 push 但未合入，后续 merge/cherry-pick 需单独授权；
+- 本轮使用 frontend testing/debugging skill 与 in-app Browser；没有使用 ImageGen，没有调用 Claude、Sonnet、Opus 或任何子 Agent；
+- IAB 合成键盘事件不能作为真实键盘/屏幕阅读器结果；已验证原生语义、可聚焦性、ARIA、焦点 CSS 和真实点击状态。未运行 VoiceOver/NVDA，也未做 OS 级 reduced-motion 模拟；这些限制已在报告明确记录。
+
+### UI-6.6 后续动作
+
+A++ UI 当前没有待执行的默认代码切片。任何进一步 UI 优化、Knowledge v2/ops 合入、真实集成、部署、生产化或临床能力工作，都必须由用户另行明确授权。下面 `UI-0A`、`UI-0` 及其他旧“下一步”只保留历史，不得覆盖本节。
 
 ## UI-0A. A++ 暂定执行规格当前交接（2026-08-14，文档收口；UI-1 已获后续授权）
 
