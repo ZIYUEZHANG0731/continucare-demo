@@ -1,215 +1,317 @@
-"""Read-only, offline symptom-centered Knowledge Evidence view."""
+"""A++ independent, read-only Knowledge library backed by the offline bundle."""
 
 from __future__ import annotations
 
-import json
+import html
 
 import streamlit as st
 from streamlit.errors import StreamlitPageNotFoundError
 
-from continucare.knowledge import LoadMode, load_builtin_bundle
-from continucare.knowledge.models import SourcedClinicalClaim, artifact_key
-from continucare.ui import inject_global_styles, render_integration_status
+from continucare.knowledge import KnowledgeBundleError, LoadMode, load_builtin_bundle
+from continucare.ui import (
+    KnowledgeLibraryProjection,
+    KnowledgeSourceProjection,
+    KnowledgeTopicProjection,
+    inject_global_styles,
+    project_knowledge_library,
+)
 
 
-def _json(value) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
+KNOWLEDGE_BOUNDARIES = (
+    "不是诊断。",
+    "不是风险等级。",
+    "不授权运行时动作。",
+    "不包含真实患者数据。",
+    "浏览不会写数据库、调用模型或创建临床资源。",
+)
 
 
-def _source_url(source) -> str:
-    return str(source.canonical_url or source.access_urls[0].url)
-
-
-def _home_link(label: str) -> None:
-    """Use native multipage navigation, with an AppTest-only fallback."""
-
+def _home_link(label: str = "返回合成演示导览") -> None:
     try:
-        st.page_link("app.py", label=label)
+        st.page_link("app.py", label=label, width="stretch")
     except (StreamlitPageNotFoundError, KeyError):
         st.markdown(f"[{label}](/)")
 
 
+def _source_link(source: KnowledgeSourceProjection) -> str:
+    if not source.url:
+        return ""
+    return (
+        f'<a class="cc-knowledge-source-link" href="{html.escape(source.url, quote=True)}" '
+        'target="_blank" rel="noopener noreferrer">打开官方来源</a>'
+    )
+
+
+def _render_source(source: KnowledgeSourceProjection) -> None:
+    locators = "".join(
+        f"<pre>{html.escape(item)}</pre>" for item in source.locators
+    ) or "<p>Locator 未登记</p>"
+    st.markdown(
+        f"""
+        <article class="cc-knowledge-source">
+          <h3>{html.escape(source.title)}</h3>
+          <dl>
+            <div><dt>发布机构</dt><dd>{html.escape(source.issuing_authority)}</dd></div>
+            <div><dt>文档版本</dt><dd>{html.escape(source.document_version)}</dd></div>
+            <div><dt>Access</dt><dd><code>{html.escape(source.access_mode)}</code></dd></div>
+            <div><dt>Integrity</dt><dd><code>{html.escape(source.integrity)}</code></dd></div>
+            <div><dt>License</dt><dd>{html.escape(source.license_terms)}</dd></div>
+          </dl>
+          <div class="cc-knowledge-locator"><strong>Locator</strong>{locators}</div>
+          {_source_link(source)}
+        </article>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_topic_selector(projection: KnowledgeLibraryProjection) -> str | None:
+    if not projection.topics:
+        return None
+    topic_map = {item.topic_id: item for item in projection.topics}
+    options = tuple(topic_map)
+    selected = projection.selected_topic_id
+    index = options.index(selected) if selected in options else 0
+    return st.radio(
+        "四个内置主题",
+        options,
+        index=index,
+        format_func=lambda item: topic_map[item].name or "名称未解析",
+        horizontal=True,
+        key="cc_knowledge_topic",
+        help="主题来自稳定的离线 registry 顺序，不读取患者上下文，也不表示排名。",
+    )
+
+
+def _render_claims(topic: KnowledgeTopicProjection) -> None:
+    if not topic.catalog_resolved:
+        st.markdown(
+            '<section class="cc-knowledge-unresolved" role="status">'
+            '<h2>当前主题的资料目录名称未解析</h2>'
+            '<p>页面不会补造中文名、编码或适用范围；精确状态保留在来源与版本中。</p>'
+            '</section>',
+            unsafe_allow_html=True,
+        )
+    if not topic.claims:
+        st.markdown(
+            '<section class="cc-knowledge-no-claim"><h2>当前主题没有已登记的支持声明</h2>'
+            '<p>可以查看来源，或切换其他主题。本页不会据此生成患者判断。</p></section>',
+            unsafe_allow_html=True,
+        )
+        return
+    statements = "".join(
+        f"<p>{html.escape(item.statement)}</p>" for item in topic.claims
+    )
+    supports = "".join(f"<li>{html.escape(item)}</li>" for item in topic.supports)
+    limitations = "".join(
+        f"<li>{html.escape(item)}</li>" for item in topic.does_not_support
+    )
+    st.markdown(
+        f"""
+        <section class="cc-knowledge-rationale">
+          <h2>为什么记录</h2>
+          <div>{statements}</div>
+        </section>
+        <section class="cc-knowledge-scope" aria-label="支持与不支持范围">
+          <div class="cc-knowledge-supports">
+            <h2>支持什么</h2>
+            <ul>{supports}</ul>
+          </div>
+          <div class="cc-knowledge-limitations">
+            <h2>不支持什么</h2>
+            <ul>{limitations}</ul>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_coverage(topic: KnowledgeTopicProjection) -> None:
+    if topic.gaps:
+        reasons = "".join(f"<li>{html.escape(item.reason)}</li>" for item in topic.gaps)
+        detail = f"<ul>{reasons}</ul>"
+        tone = "gap"
+    else:
+        detail = "<p>这不表示资料完整、临床充分或已经验证。</p>"
+        tone = "none"
+    st.markdown(
+        f"""
+        <section class="cc-knowledge-coverage cc-knowledge-coverage--{tone}">
+          <h2>CoverageGap</h2>
+          <strong>{html.escape(topic.coverage_message)}</strong>
+          {detail}
+        </section>
+        <p class="cc-knowledge-unassessed">未评估边界：这些资料没有用于判断任何一位患者，也不表示来源存在就适用于当前患者。</p>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_technical(topic: KnowledgeTopicProjection) -> None:
+    with st.expander("目录、Claim 与 Binding 技术字段"):
+        if topic.catalog_resolved:
+            st.markdown(
+                f"Catalog code：`{topic.catalog_system or '未登记'} | "
+                f"{topic.catalog_code or '未登记'} | {topic.catalog_version or '未登记'}`"
+            )
+        else:
+            st.warning(f"catalog unresolved：{topic.catalog_detail}")
+        for claim in topic.claims:
+            st.markdown(f"**Claim `{claim.claim_ref}`**")
+            st.write(
+                f"Lifecycle：`{claim.lifecycle}` · Review aggregate："
+                f"`{claim.review_aggregate}`"
+            )
+            st.code(claim.scope_json, language="json")
+        if not topic.bindings:
+            st.info("当前主题没有 exact Binding。")
+        for binding in topic.bindings:
+            st.markdown(f"**Binding `{binding.binding_ref}`**")
+            st.write(
+                f"Pathway scope：`{binding.pathway_scope}` · "
+                f"Purpose：`{binding.purpose}`"
+            )
+            st.code(binding.artifact_json, language="json")
+        st.markdown(
+            "**Binding 固定边界：** `informational_only` · `runtime_authority=none` · "
+            "不授权 Task、Observation、Summary 或 ClinicalRule。"
+        )
+        for gap in topic.gaps:
+            st.markdown(
+                f"CoverageGap `{gap.gap_ref}` · `{gap.gap_kind}` · "
+                f"`{gap.lifecycle}` · `{gap.pathway_scope}`"
+            )
+    with st.expander("查看精确 manifest JSON"):
+        st.code(topic.manifest_json, language="json")
+
+
+def _render_historical(selected_topic_id: str | None) -> None:
+    st.markdown("### CURRENT / HISTORICAL")
+    st.caption(
+        "CURRENT 是当前离线选择；HISTORICAL 中失效或未解析记录只用于资料审计，"
+        "不代表当前可用，也不参与患者判断。"
+    )
+    try:
+        historical = project_knowledge_library(
+            load_builtin_bundle(mode=LoadMode.HISTORICAL),
+            selected_topic_id=selected_topic_id,
+        )
+    except KnowledgeBundleError:
+        st.info("历史资料暂时无法读取；当前资料页仍保持只读且不影响患者故事。")
+        return
+    rows = "".join(
+        "<li>"
+        f"<strong>{html.escape(item.name or '名称未解析')}</strong>"
+        f"<span>{html.escape(item.mode)} · v{item.record_version} · "
+        f"{'已精确解析' if item.catalog_resolved else '未解析，仅供审计'}</span>"
+        "</li>"
+        for item in historical.topics
+    )
+    st.markdown(
+        f'<ul class="cc-knowledge-history">{rows}</ul>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_sources(
+    projection: KnowledgeLibraryProjection,
+    topic: KnowledgeTopicProjection,
+) -> None:
+    st.markdown(
+        '<section class="cc-knowledge-details-head"><h2>来源与版本</h2>'
+        '<p>链接只在您明确点击后打开；页面加载不会访问官方来源 URL。</p></section>',
+        unsafe_allow_html=True,
+    )
+    if not topic.sources:
+        st.info("当前主题没有已绑定的官方来源；这不改变页面的只读边界。")
+    for source in topic.sources:
+        _render_source(source)
+    _render_technical(topic)
+    _render_historical(projection.selected_topic_id)
+    st.markdown("### 未绑定的 link-only 来源")
+    st.caption(
+        "以下来源没有绑定到当前四个主题或 Pathway；来源存在不等于适用于当前患者，"
+        "也不形成临床判断。"
+    )
+    for source in projection.unbound_sources:
+        _render_source(source)
+
+
 st.set_page_config(
-    page_title="症状知识证据 · ContinuCare",
-    page_icon="📚",
+    page_title="Knowledge 资料库 · ContinuCare",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 inject_global_styles(st)
-
-st.title("症状中心 Knowledge Evidence")
-st.error("只读离线视图 · 不读取患者数据 · 不授权任何临床运行时行为")
-_home_link("← 返回完整比赛 Demo 导览")
-st.caption(
-    "四个条目只是当前比赛 fixture snapshot，不是常见症状排名、固定分母、"
-    "target_number、覆盖率目标或完整症状库。"
+st.markdown(
+    '<div class="cc-knowledge-shell" aria-hidden="true"></div>',
+    unsafe_allow_html=True,
 )
-render_integration_status(st)
+st.title("Knowledge 资料库")
+st.markdown('<p class="cc-knowledge-subtitle">症状采集参考</p>', unsafe_allow_html=True)
 
-mode_label = st.radio(
-    "注册表视图",
-    ("CURRENT", "HISTORICAL"),
-    horizontal=True,
-    help="HISTORICAL 会保留失效或未解析记录用于审计，不代表当前可用。",
-)
-mode = LoadMode.CURRENT if mode_label == "CURRENT" else LoadMode.HISTORICAL
-registry = load_builtin_bundle(mode=mode)
-views = registry.symptom_views()
-
-st.markdown("## 当前 fixture")
-summary_columns = st.columns(4)
-for column, view in zip(summary_columns, views):
-    with column:
-        with st.container(border=True):
-            resolution = view.catalog_resolution
-            if resolution.resolved:
-                concept = resolution.concept
-                assert concept is not None
-                st.markdown(f"### {concept.preferred_zh}")
-                st.code(concept.coding.code, language=None)
-                st.caption(concept.coding.display or "display 未登记")
-            else:
-                st.markdown(f"### {view.record.symptom_index_id}")
-                st.warning("精确 catalog term 未解析")
-            st.caption(
-                f"{view.record.symptom_index_id}@{view.record.record_version} · "
-                f"{mode_label}"
-            )
-
-options = {view.record.symptom_index_id: view for view in views}
-selected_id = st.selectbox("查看一个症状的精确证据关系", tuple(options))
-view = options[selected_id]
-record = view.record
-resolution = view.catalog_resolution
-
-st.markdown("## 精确 terminology catalog 解析")
-with st.container(border=True):
-    st.write(
-        "Catalog ref："
-        f"`{record.catalog_term.catalog_id} | {record.catalog_term.catalog_version} | "
-        f"{record.catalog_term.concept_id}`"
+try:
+    current_registry = load_builtin_bundle(mode=LoadMode.CURRENT)
+    projection = project_knowledge_library(current_registry)
+except KnowledgeBundleError:
+    st.markdown(
+        '<section class="cc-knowledge-load-error" role="alert">'
+        '<h2>资料库暂时无法读取</h2>'
+        '<p>这不会影响患者故事或完成状态；页面没有回退读取患者数据库，也没有请求网络。</p>'
+        '</section>',
+        unsafe_allow_html=True,
     )
-    st.write(f"索引：`{record.symptom_index_id}@{record.record_version}` · {mode_label}")
-    if resolution.resolved:
-        concept = resolution.concept
-        assert concept is not None
-        st.success("exact catalog term 已解析；名称与编码来自该 catalog 版本。")
-        left, right = st.columns(2)
-        with left:
-            st.write(f"标准名称：**{concept.preferred_zh}**")
-            st.write(f"Code system：`{concept.coding.system}`")
-        with right:
-            st.write(f"Code：`{concept.coding.code}`")
-            st.write(f"Version：`{concept.coding.version or 'not_available'}`")
-    else:
-        st.warning(f"HISTORICAL unresolved：{resolution.detail}")
+    st.markdown(
+        '<p class="cc-knowledge-fixed-boundary">' + " ".join(KNOWLEDGE_BOUNDARIES) + "</p>",
+        unsafe_allow_html=True,
+    )
+    _home_link()
+    st.stop()
 
-st.markdown("## Claim 与精确适用范围")
-st.caption("scope 与 Claim 同屏显示；不同 Pathway/version 的声明不会合并。")
-if not view.claims:
-    st.info("没有登记 Claim。")
-for claim in view.claims:
-    summary = view.review_summaries[claim.ref.key()]
-    with st.container(border=True):
-        st.markdown(f"### `{claim.claim_id}@{claim.claim_version}`")
-        st.write(claim.statement)
-        st.write(f"Lifecycle：`{claim.lifecycle}` · Review aggregate：`{summary.aggregate}`")
-        supports_col, limits_col = st.columns(2)
-        with supports_col:
-            st.success("支持范围\n\n" + "\n\n".join(f"- {item}" for item in claim.supports))
-        with limits_col:
-            st.warning(
-                "不支持范围\n\n"
-                + "\n\n".join(f"- {item}" for item in claim.does_not_support)
-            )
-        st.markdown("**Visible exact scope**")
-        st.code(_json(claim.applicable_scope.model_dump(mode="json")), language="json")
-        if isinstance(claim, SourcedClinicalClaim):
-            source_map = {item.ref.key(): item for item in view.sources}
-            for citation in claim.citations:
-                source = source_map[citation.source.key()]
-                st.markdown(f"**Source：{source.title}**")
-                st.write(
-                    f"机构：{source.issuing_authority or 'not_available'} · "
-                    f"文档版本：`{source.document_version or 'not_available'}` · "
-                    f"Source ref：`{source.source_id}@{source.record_version}`"
-                )
-                st.write(f"Locator：`{_json(citation.locator.model_dump(mode='json'))}`")
-                st.write(
-                    f"Access：`{source.access.mode}` · "
-                    f"Integrity：`{view.source_content_status[source.ref.key()]}` · "
-                    f"License：`{source.license_terms_uri or 'not_registered'}`"
-                )
-                st.markdown(f"[打开官方来源]({_source_url(source)})")
-
-st.markdown("## Binding 与 Pathway 隔离")
-if not view.bindings:
-    st.info("没有 exact Binding；Knowledge 不会据此创建 runtime artifact。")
-for binding in view.bindings:
-    with st.container(border=True):
-        st.write(f"Binding：`{binding.binding_id}@{binding.binding_version}`")
-        st.write(
-            f"Pathway scope：`{binding.pathway.pathway_code} | "
-            f"{binding.pathway.pathway_version}`"
-        )
-        st.write(f"Artifact：`{' | '.join(artifact_key(binding.artifact))}`")
-        st.caption("informational_only · runtime_authority=none")
-
-st.markdown("## Unresolved CoverageGap")
-if not view.gaps:
-    st.info("没有登记 gap。")
-for gap in view.gaps:
-    with st.container(border=True):
-        st.markdown(f"**`{gap.gap_id}@{gap.gap_version}`**")
-        st.write(gap.reason)
-        st.caption(
-            f"{gap.gap_kind} · {gap.pathway.pathway_code} | "
-            f"{gap.pathway.pathway_version} · lifecycle={gap.lifecycle}"
-        )
-
-st.markdown("## 未绑定的官方 link-only 候选来源")
-st.caption(
-    "以下来源没有绑定到四个症状、GLP1 Questionnaire 或 Observation；"
-    "它们的存在不形成临床适用性。"
+st.markdown(
+    f"""
+    <section class="cc-knowledge-notices" aria-label="资料库独立性说明">
+      <strong>{html.escape(projection.independence_notice)}</strong>
+      <p>{html.escape(projection.readonly_notice)}</p>
+    </section>
+    <p class="cc-knowledge-topic-note">四个主题来自当前离线资料顺序；不是排名、覆盖率目标、固定分母或完整症状库。</p>
+    """,
+    unsafe_allow_html=True,
 )
-unbound_sources = tuple(
-    item
-    for item in registry.sources
-    if item.registered_by == "Organization/continucare-m5k-link-only-registration"
-)
-for source in unbound_sources:
-    with st.container(border=True):
-        st.markdown(f"### {source.title}")
-        st.write(
-            f"Source ref：`{source.source_id}@{source.record_version}` · "
-            f"Access：`{source.access.mode}` · Integrity："
-            f"`{registry.source_content_status[source.ref.key()]}`"
-        )
-        st.write(
-            f"机构：{source.issuing_authority or 'not_available'} · "
-            f"版本：`{source.document_version or 'not_available'}` · "
-            f"License/terms：`{source.license_terms_uri or 'not_registered'}`"
-        )
-        if source.source_id == "hpo-v2026-06-23":
-            st.info(
-                "HPO 仅作为表型/症状概念组织候选；疾病—表型关联不是患者诊断依据，"
-                "且本切片没有 HPO→SNOMED mapping 或 runtime 变更。"
-            )
-        if source.source_id == "nci-pro-ctcae-official-site":
-            st.warning(
-                "PRO-CTCAE 面向肿瘤临床研究，是 clinician CTCAE 的 companion；"
-                "不是诊断、预后或治疗工具。本切片未绑定 GLP1、未内置题目/选项/翻译，"
-                "也未验证 study registration 或 agreement 状态。"
-            )
-        st.markdown(f"[打开官方入口]({_source_url(source)})")
 
-st.markdown("## 安全声明")
-st.warning(
-    "本页不是诊断，不是风险等级；不授权 Task、Summary、Observation 或 ClinicalRule；"
-    "不包含真实患者数据。浏览不会写数据库、发起模型调用或创建任何临床资源。"
+selected_topic_id = _render_topic_selector(projection)
+projection = project_knowledge_library(
+    current_registry,
+    selected_topic_id=selected_topic_id,
 )
-st.caption(
-    "synthetic expressions：未新增。现有 runtime aliases 不被复制为 Knowledge 证据；"
-    "患者表达来源与验证缺口已作为 CoverageGap 显示。"
+topic = projection.selected_topic
+
+if topic is None:
+    st.markdown(
+        '<section class="cc-knowledge-no-claim"><h2>当前没有可显示的内置主题</h2>'
+        '<p>资料库保持只读；这不影响患者故事或完成状态。</p></section>',
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        f'<header class="cc-knowledge-topic-head"><h2>{html.escape(topic.name or "名称未解析")}</h2>'
+        '<p>以下内容来自精确离线资料关系，不携带患者上下文。</p></header>',
+        unsafe_allow_html=True,
+    )
+    _render_claims(topic)
+    _render_coverage(topic)
+    details_open = bool(st.session_state.get("cc_knowledge_details"))
+    key = "cc_knowledge_details_active" if details_open else "cc_knowledge_details"
+    if st.button("收起来源与版本" if details_open else "查看来源与版本", key=key, width="stretch"):
+        st.session_state["cc_knowledge_details"] = not details_open
+        st.rerun()
+    if details_open:
+        _render_sources(projection, topic)
+
+st.markdown(
+    '<p class="cc-knowledge-fixed-boundary">' + " ".join(KNOWLEDGE_BOUNDARIES) + "</p>",
+    unsafe_allow_html=True,
 )
-_home_link("返回首页确认故事进度 →")
+with st.container(key="cc_knowledge_home_link"):
+    _home_link()

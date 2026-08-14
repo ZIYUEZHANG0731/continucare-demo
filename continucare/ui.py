@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import html
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -260,6 +261,619 @@ class DoctorVisitBriefProjection:
     show_knowledge_link: bool
     produced: tuple[str, ...]
     not_produced: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AuditActionProjection:
+    """One persisted AuditEvent translated for progressive disclosure."""
+
+    sequence: int
+    participant: str
+    action: str
+    time: str
+    effect: str
+    before_state: str | None
+    after_state: str | None
+    event_type: str
+    event_id: str
+    entity_type: str
+    entity_id: str
+    resource_type: str
+    resource_version: str | None
+    provenance_refs: tuple[str, ...]
+    details_json: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class AuditTrailProjection:
+    """Read-only audit explanation derived only from persisted workflow facts."""
+
+    state: str
+    tone: str
+    title: str
+    reason: str
+    explanation: str
+    produced: tuple[str, ...]
+    not_produced: tuple[str, ...]
+    actions: tuple[AuditActionProjection, ...]
+    resource_relations: tuple[str, ...]
+    show_guide_link: bool
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeSourceProjection:
+    """Offline source metadata; the URL is never fetched by the projection."""
+
+    source_ref: str
+    title: str
+    issuing_authority: str
+    document_version: str
+    locators: tuple[str, ...]
+    access_mode: str
+    integrity: str
+    license_terms: str
+    url: str
+    registry_status: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeClaimProjection:
+    """One exact registered Claim and its review/scope metadata."""
+
+    claim_ref: str
+    statement: str
+    supports: tuple[str, ...]
+    does_not_support: tuple[str, ...]
+    lifecycle: str
+    review_aggregate: str
+    scope_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeBindingProjection:
+    """One exact informational-only Binding."""
+
+    binding_ref: str
+    pathway_scope: str
+    purpose: str
+    artifact_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeGapProjection:
+    """One exact CoverageGap record."""
+
+    gap_ref: str
+    reason: str
+    gap_kind: str
+    lifecycle: str
+    pathway_scope: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeTopicProjection:
+    """One catalog-resolved topic without patient or runtime context."""
+
+    topic_id: str
+    record_version: int
+    mode: str
+    name: str | None
+    catalog_resolved: bool
+    catalog_detail: str
+    catalog_system: str | None
+    catalog_code: str | None
+    catalog_version: str | None
+    claims: tuple[KnowledgeClaimProjection, ...]
+    supports: tuple[str, ...]
+    does_not_support: tuple[str, ...]
+    gaps: tuple[KnowledgeGapProjection, ...]
+    coverage_message: str
+    sources: tuple[KnowledgeSourceProjection, ...]
+    bindings: tuple[KnowledgeBindingProjection, ...]
+    manifest_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeLibraryProjection:
+    """Independent read-only library projection from one offline registry."""
+
+    mode: str
+    topics: tuple[KnowledgeTopicProjection, ...]
+    selected_topic_id: str | None
+    selected_topic: KnowledgeTopicProjection | None
+    unbound_sources: tuple[KnowledgeSourceProjection, ...]
+    independence_notice: str
+    readonly_notice: str
+
+
+_AUDIT_EVENT_ORDER = {
+    "demo_reset": 0,
+    "patient_message_submitted": 10,
+    "care_session_started": 20,
+    "semantic_analysis_completed": 30,
+    "semantic_candidate_patient_decision": 40,
+    "questionnaire_response_completed": 50,
+    "manual_review_task_created": 60,
+    "manual_review_task_acknowledged": 70,
+    "manual_review_task_started": 80,
+    "manual_review_outcome_recorded": 90,
+    "manual_review_brief_generated": 100,
+    "doctor_reviewed_summary": 110,
+    "manual_review_communication_approved": 120,
+    "manual_review_task_rejected": 130,
+    "manual_review_task_cancelled": 130,
+    "notification_mock_sent": 140,
+    "summary_notification_mock_sent": 140,
+}
+
+
+def _progress_stage(progress: Any) -> str:
+    value = getattr(getattr(progress, "stage", None), "value", None)
+    if value is not None:
+        return str(value)
+    return str(getattr(progress, "stage", ""))
+
+
+def _audit_task_reason(task: dict[str, Any] | None) -> str | None:
+    if not task:
+        return None
+    notes = task.get("note", ())
+    if isinstance(notes, list):
+        for item in reversed(notes):
+            if isinstance(item, dict) and str(item.get("text") or "").strip():
+                return str(item["text"]).strip()
+    status_reason = task.get("statusReason")
+    if isinstance(status_reason, dict):
+        text = str(status_reason.get("text") or "").strip()
+        if text:
+            return text
+        coding = status_reason.get("coding", ())
+        if isinstance(coding, list):
+            for item in coding:
+                if not isinstance(item, dict):
+                    continue
+                value = str(item.get("display") or item.get("code") or "").strip()
+                if value:
+                    return value
+    return None
+
+
+def _audit_action_language(event: Any) -> tuple[str, str, str, str | None, str | None]:
+    event_type = str(getattr(event, "event_type", ""))
+    details = getattr(event, "details_json", {}) or {}
+    actor = str(getattr(event, "actor_type", ""))
+    participants = {
+        "synthetic_patient": "患者",
+        "patient": "患者",
+        "synthetic_nurse_demo_user": "护士",
+        "nurse_demo_user": "护士",
+        "nurse": "护士",
+        "doctor_demo_user": "医生",
+        "doctor": "医生",
+        "mock_notifier": "模拟服务",
+        "demo_operator": "演示者",
+        "controlled_care_agent": "系统",
+        "deterministic_care_engine": "系统",
+        "deterministic_workflow": "系统",
+        "local_mock_extractor": "系统",
+        "local_template_generator": "系统",
+    }
+    participant = participants.get(actor, "记录者")
+    if event_type == "demo_reset":
+        return "演示者", "准备新的合成演示记录", "替换本地合成演示数据后开始这一轮。", None, "本轮已准备"
+    if event_type == "patient_message_submitted":
+        return "患者", "提交原话", "患者原话已保存在本轮记录中。", None, "原话已记录"
+    if event_type == "care_session_started":
+        return participant, "开始本轮随访记录", "建立本轮记录边界。", None, "本轮已开始"
+    if event_type == "semantic_analysis_completed":
+        return "系统", "生成待确认记录", "形成等待患者决定的记录；没有形成临床判断。", "原话已记录", "等待患者确认"
+    if event_type == "semantic_candidate_patient_decision":
+        decision = str(details.get("decision") or "")
+        action = {
+            "accepted": "选择确认",
+            "accepted_for_manual_review": "选择确认",
+            "unsure": "选择不确定",
+            "rejected": "选择拒绝",
+        }.get(decision, "记录患者决定")
+        after = {
+            "accepted": "患者已确认",
+            "accepted_for_manual_review": "患者已确认",
+            "unsure": "仍待患者明确决定",
+            "rejected": "本轮已停止",
+        }.get(decision, "决定已记录")
+        return "患者", action, "只保存患者真实作出的决定。", "等待患者确认", after
+    if event_type == "questionnaire_response_completed":
+        return "系统", "保存患者确认记录", "确认记录及其最终来源已经保存。", "等待患者确认", "患者确认已保存"
+    if event_type == "manual_review_task_created":
+        return "系统", "创建例行记录核对", "把已确认记录交给护士核对；不是风险警报。", "患者确认已保存", "等待护士接手"
+    if event_type == "manual_review_task_acknowledged":
+        return "护士", "接手记录核对", "护士成为当前记录核对的处理者。", "等待护士接手", "护士已接手"
+    if event_type == "manual_review_task_started":
+        return "护士", "开始核对", "记录核对进入处理中。", "护士已接手", "正在核对"
+    if event_type == "manual_review_outcome_recorded":
+        return "护士", "记录核对结果", "保存受控核对结果，并形成未发送的沟通文字。", "正在核对", "沟通文字待核对"
+    if event_type == "manual_review_communication_approved":
+        return "护士", "核对沟通文字", "只确认文字进入后续演示流程；没有真实发送。", "沟通文字待核对", "沟通文字已核对"
+    if event_type == "manual_review_brief_generated":
+        return "系统", "按当前来源生成复诊速览", "从当时的持久化来源生成一个不可变版本。", None, "复诊速览已生成"
+    if event_type == "doctor_reviewed_summary":
+        return "医生", "记录速览措辞决定", "只记录文字表达决定；不形成临床评估。", "复诊速览已生成", "措辞决定已记录"
+    if event_type == "manual_review_task_rejected":
+        return "护士", "停止记录核对：未接受", "保留拒绝动作，停止后续业务动作。", "等待核对", "流程已停止"
+    if event_type == "manual_review_task_cancelled":
+        return "护士", "停止记录核对：已取消", "保留取消动作，停止后续业务动作。", None, "流程已停止"
+    if event_type in {"notification_mock_sent", "summary_notification_mock_sent"}:
+        return "模拟服务", "模拟（未真实发送 / 未写入）", "只留下 Mock 流程记录，没有外部发送或写入。", None, "模拟动作已记录"
+    return participant, "记录了一项流程动作", "这项真实事件未配置第一层业务名称；完整技术名保留在技术详情。", None, None
+
+
+def _audit_resource_version(details: dict[str, Any]) -> str | None:
+    for key in (
+        "task_version",
+        "summary_version",
+        "result_summary_version",
+        "resource_version",
+    ):
+        value = details.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    for key in ("task_ref", "communication_ref", "summary_ref"):
+        value = str(details.get(key) or "")
+        if "/_history/" in value:
+            return value.rsplit("/_history/", 1)[1]
+        if ":version:" in value:
+            return value.rsplit(":version:", 1)[1]
+    return None
+
+
+def _audit_provenance_refs(event: Any, provenances: tuple[dict[str, Any], ...]) -> tuple[str, ...]:
+    details = getattr(event, "details_json", {}) or {}
+    entity_id = str(getattr(event, "entity_id", ""))
+    refs = []
+    direct = str(details.get("provenance_id") or "").strip()
+    if direct:
+        refs.append(f"Provenance/{direct}")
+    for item in provenances:
+        provenance_id = str(item.get("id") or "").strip()
+        targets = [
+            str(target.get("reference") or "")
+            for target in item.get("target", ())
+            if isinstance(target, dict)
+        ]
+        if provenance_id and entity_id and any(entity_id in target for target in targets):
+            refs.append(f"Provenance/{provenance_id}")
+    return tuple(dict.fromkeys(refs))
+
+
+def _audit_display_time(value: Any) -> str:
+    raw = str(value or "").strip()
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return "时间未记录"
+
+
+def _audit_sort_time(value: Any) -> float:
+    raw = str(value or "").strip()
+    try:
+        instant = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if instant.tzinfo is None:
+            instant = instant.replace(tzinfo=timezone.utc)
+        return instant.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return float("inf")
+
+
+def _audit_products(progress: Any, *, has_events: bool) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    produced = []
+    if getattr(progress, "generation", None) or getattr(progress, "candidate_count", 0):
+        produced.extend(("患者原话", "待确认记录"))
+    if getattr(progress, "candidate_decisions", {}):
+        produced.append("患者决定记录")
+    if getattr(progress, "questionnaire_response_count", 0) or getattr(progress, "observation_count", 0):
+        produced.append("患者确认记录")
+    if getattr(progress, "manual_task_count", 0):
+        produced.append("例行护士核对 Task 与处理历史")
+    if getattr(progress, "communication_count", 0):
+        produced.append(
+            "未发送的沟通文字及人工核对记录"
+            if getattr(progress, "communication_readiness", None) == "ready-to-send"
+            else "未发送的沟通文字"
+        )
+    if getattr(progress, "manual_brief_count", 0):
+        produced.append("按当前来源生成的复诊速览")
+    if has_events or getattr(progress, "audit_count", 0):
+        produced.append("本地追溯记录")
+
+    not_produced = []
+    if not (getattr(progress, "questionnaire_response_count", 0) or getattr(progress, "observation_count", 0)):
+        not_produced.append("患者确认记录")
+    if not getattr(progress, "manual_task_count", 0):
+        not_produced.append("例行护士核对 Task")
+    if not getattr(progress, "communication_count", 0):
+        not_produced.append("沟通文字")
+    if not getattr(progress, "manual_brief_count", 0):
+        not_produced.append("复诊速览")
+    not_produced.extend(("临床评估", "诊断或风险分级", "治疗建议"))
+    if not getattr(progress, "alert_count", 0):
+        not_produced.append("真实 Alert")
+    not_produced.extend(("真实消息发送", "EMR 写回或真实外部集成"))
+    return tuple(dict.fromkeys(produced)), tuple(dict.fromkeys(not_produced))
+
+
+def project_audit_trail(
+    progress: Any,
+    *,
+    events: tuple[Any, ...] = (),
+    tasks: tuple[dict[str, Any], ...] = (),
+    provenances: tuple[dict[str, Any], ...] = (),
+) -> AuditTrailProjection:
+    """Translate already-read durable facts without mutating business state."""
+
+    stage = _progress_stage(progress)
+    ordered_events = sorted(
+        enumerate(events),
+        key=lambda pair: (
+            _audit_sort_time(getattr(pair[1], "created_at", None)),
+            _AUDIT_EVENT_ORDER.get(str(getattr(pair[1], "event_type", "")), 999),
+            pair[0],
+        ),
+    )
+    actions = []
+    for sequence, (_, event) in enumerate(ordered_events, start=1):
+        participant, action, effect, before, after = _audit_action_language(event)
+        details = dict(getattr(event, "details_json", {}) or {})
+        entity_type = str(getattr(event, "entity_type", "") or "未记录")
+        actions.append(
+            AuditActionProjection(
+                sequence=sequence,
+                participant=participant,
+                action=action,
+                time=_audit_display_time(getattr(event, "created_at", None)),
+                effect=effect,
+                before_state=before,
+                after_state=after,
+                event_type=str(getattr(event, "event_type", "") or "未记录"),
+                event_id=str(getattr(event, "event_id", "") or "未记录"),
+                entity_type=entity_type,
+                entity_id=str(getattr(event, "entity_id", "") or "未记录"),
+                resource_type=entity_type,
+                resource_version=_audit_resource_version(details),
+                provenance_refs=_audit_provenance_refs(event, provenances),
+                details_json=details,
+            )
+        )
+
+    progress_task_id = str(getattr(progress, "task_id", None) or "")
+    current_task = next(
+        (
+            item
+            for item in tasks
+            if str(item.get("id") or "") == progress_task_id
+        ),
+        None,
+    )
+    if current_task is None and not progress_task_id and len(tasks) == 1:
+        current_task = tasks[0]
+    expected_status = _NURSE_STAGE_TASK_STATUS.get(stage)
+    task_mismatch = bool(
+        expected_status
+        and (
+            current_task is None
+            or str(current_task.get("status") or "") != expected_status
+        )
+    )
+    produced, not_produced = _audit_products(progress, has_events=bool(events))
+
+    human_relations = []
+    if getattr(progress, "generation", None) or getattr(progress, "candidate_count", 0):
+        human_relations.append("患者原话 → 待确认记录")
+    if getattr(progress, "questionnaire_response_count", 0) or getattr(progress, "observation_count", 0):
+        human_relations.append("患者决定 → 患者确认记录")
+    if getattr(progress, "manual_task_count", 0):
+        human_relations.append("患者确认记录 → 例行护士核对")
+    if getattr(progress, "communication_count", 0):
+        human_relations.append("护士核对结果 → 未发送的沟通文字")
+    if getattr(progress, "manual_brief_count", 0):
+        human_relations.append("当前来源 → 复诊速览版本")
+
+    if getattr(progress, "integrity_issue", None) or stage not in _NURSE_KNOWN_STAGES or task_mismatch:
+        reason = (
+            "记录完整性检查未通过"
+            if getattr(progress, "integrity_issue", None)
+            else "当前 Task 状态与记录链不一致"
+            if task_mismatch
+            else "当前状态无法安全解释"
+        )
+        return AuditTrailProjection(
+            state="integrity_issue",
+            tone="error",
+            title="记录错误：这一轮记录无法安全解释",
+            reason=reason,
+            explanation="已有历史记录仍会保留；页面保持只读，后续业务动作已经停止。",
+            produced=produced,
+            not_produced=not_produced,
+            actions=tuple(actions),
+            resource_relations=tuple(human_relations),
+            show_guide_link=True,
+        )
+
+    states = {
+        "not_started": ("neutral", "这一轮还没有留下流程记录", "这次合成演示还没有开始", "没有补造默认时间线；查看本页不会创建记录。"),
+        "candidate_ready": ("active", "目前等待患者确认", "待确认记录已经形成，仍需患者明确决定", "尚未形成患者确认记录或护士任务。"),
+        "candidate_unsure": ("active", "目前等待患者明确决定", "患者选择了“不太确定”", "患者仍可在患者页确认或拒绝；尚未形成患者确认记录或护士任务。"),
+        "candidate_rejected": ("stopped", "本轮已结束：患者没有确认这段记录", "患者选择了“不是这个意思”", "患者原话和决定记录会保留；本轮不能立即重新表述。"),
+        "patient_confirmed": ("active", "患者已确认，等待记录核对", "患者确认记录已经保存", "临床评估仍未进行。"),
+        "task_requested": ("active", "目前等待护士接手", "例行记录核对已经创建", "这不是风险警报；页面查看不会接手任务。"),
+        "nurse_received": ("active", "护士已接手，等待开始核对", "护士已经记录接手动作", "当前只核对记录，不判断风险。"),
+        "nurse_in_progress": ("active", "护士正在核对", "记录核对已经开始", "尚未形成临床评估、治疗建议或真实发送。"),
+        "communication_pending": ("active", "沟通文字仍待人工核对", "护士核对结果已经记录", "沟通文字未发送；复诊速览尚未按当前来源生成。"),
+        "doctor_brief_pending": ("active", "沟通文字仍待人工核对", "复诊速览已基于当前待核对文字生成", "待核对不等于发送或临床结论。"),
+        "communication_ready": ("active", "复诊速览需要按当前来源刷新", "沟通文字已经人工核对", "文字没有真实发送；旧速览继续保留但不能冒充当前版本。"),
+        "doctor_brief_ready": ("active", "复诊速览已按当前来源生成", "当前来源已有对应速览版本", "这仍不代表临床评估或真实发送。"),
+        "story_complete": ("complete", "演示记录链已走完", "合成演示 9/9 完成", "9/9 只代表合成本地持久化接力完成，不代表临床成功。"),
+        "task_rejected": ("stopped", "流程已停止：护士未接受这项核对", _audit_task_reason(current_task) or "未记录", "已有记录继续保留；没有继续产生后续沟通文字或复诊速览。"),
+        "task_cancelled": ("stopped", "流程已停止：这项核对已取消", _audit_task_reason(current_task) or "未记录", "取消前的记录继续保留；后续业务动作已经停止。"),
+        "task_failed": ("error", "任务没有完成，后续流程已停止", _audit_task_reason(current_task) or "未记录", "失败前的历史记录继续保留；页面不提供重试业务动作。"),
+        "task_entered_in_error": ("error", "记录错误：任务已标记为不应存在", _audit_task_reason(current_task) or "未记录", "已有历史记录会保留并标明状态；这项任务不再被当作有效业务记录，后续业务动作已经停止。"),
+    }
+    tone, title, reason, explanation = states[stage]
+    return AuditTrailProjection(
+        state=stage,
+        tone=tone,
+        title=title,
+        reason=reason,
+        explanation=explanation,
+        produced=produced,
+        not_produced=not_produced,
+        actions=tuple(actions),
+        resource_relations=tuple(human_relations),
+        show_guide_link=True,
+    )
+
+
+def _knowledge_json(value: Any) -> str:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
+
+
+def _knowledge_source_url(source: Any) -> str:
+    canonical = getattr(source, "canonical_url", None)
+    if canonical:
+        return str(canonical)
+    urls = tuple(getattr(source, "access_urls", ()))
+    return str(getattr(urls[0], "url", "")) if urls else ""
+
+
+def _knowledge_source_projection(
+    source: Any,
+    *,
+    integrity: str,
+    locators: tuple[str, ...] = (),
+) -> KnowledgeSourceProjection:
+    access = getattr(source, "access", None)
+    license_uri = getattr(source, "license_terms_uri", None)
+    status = getattr(getattr(source, "registry_status", None), "value", None)
+    return KnowledgeSourceProjection(
+        source_ref=f"{getattr(source, 'source_id', 'unresolved')}@{getattr(source, 'record_version', '—')}",
+        title=str(getattr(source, "title", "来源标题未登记")),
+        issuing_authority=str(getattr(source, "issuing_authority", None) or "发布机构未登记"),
+        document_version=str(getattr(source, "document_version", None) or "文档版本未登记"),
+        locators=locators,
+        access_mode=str(getattr(access, "mode", "未登记")),
+        integrity=integrity,
+        license_terms=str(license_uri or "许可条款未登记"),
+        url=_knowledge_source_url(source),
+        registry_status=str(status or getattr(source, "registry_status", "未登记")),
+    )
+
+
+def _knowledge_topic_projection(view: Any) -> KnowledgeTopicProjection:
+    record = view.record
+    resolution = view.catalog_resolution
+    concept = resolution.concept if resolution.resolved else None
+    claims = []
+    source_locators: dict[tuple[str, int], list[str]] = {}
+    for claim in view.claims:
+        ref = claim.ref.key()
+        review = view.review_summaries[ref]
+        claims.append(
+            KnowledgeClaimProjection(
+                claim_ref=f"{claim.claim_id}@{claim.claim_version}",
+                statement=str(claim.statement),
+                supports=tuple(str(item) for item in claim.supports),
+                does_not_support=tuple(str(item) for item in claim.does_not_support),
+                lifecycle=str(getattr(claim.lifecycle, "value", claim.lifecycle)),
+                review_aggregate=str(getattr(review.aggregate, "value", review.aggregate)),
+                scope_json=_knowledge_json(claim.applicable_scope),
+            )
+        )
+        for citation in getattr(claim, "citations", ()):
+            source_locators.setdefault(citation.source.key(), []).append(
+                _knowledge_json(citation.locator)
+            )
+    sources = tuple(
+        _knowledge_source_projection(
+            source,
+            integrity=str(view.source_content_status[source.ref.key()]),
+            locators=tuple(source_locators.get(source.ref.key(), ())),
+        )
+        for source in view.sources
+    )
+    bindings = tuple(
+        KnowledgeBindingProjection(
+            binding_ref=f"{item.binding_id}@{item.binding_version}",
+            pathway_scope=f"{item.pathway.pathway_code} | {item.pathway.pathway_version}",
+            purpose=str(getattr(item.binding_purpose, "value", item.binding_purpose)),
+            artifact_json=_knowledge_json(item.artifact),
+        )
+        for item in view.bindings
+    )
+    gaps = tuple(
+        KnowledgeGapProjection(
+            gap_ref=f"{item.gap_id}@{item.gap_version}",
+            reason=str(item.reason),
+            gap_kind=str(getattr(item.gap_kind, "value", item.gap_kind)),
+            lifecycle=str(item.lifecycle),
+            pathway_scope=f"{item.pathway.pathway_code} | {item.pathway.pathway_version}",
+        )
+        for item in view.gaps
+    )
+    coding = getattr(concept, "coding", None)
+    return KnowledgeTopicProjection(
+        topic_id=str(record.symptom_index_id),
+        record_version=int(record.record_version),
+        mode=str(getattr(view.mode, "value", view.mode)).upper(),
+        name=str(concept.preferred_zh) if concept is not None else None,
+        catalog_resolved=bool(resolution.resolved),
+        catalog_detail=str(resolution.detail),
+        catalog_system=str(getattr(coding, "system", "")) or None,
+        catalog_code=str(getattr(coding, "code", "")) or None,
+        catalog_version=str(getattr(coding, "version", "")) or None,
+        claims=tuple(claims),
+        supports=tuple(item for claim in claims for item in claim.supports),
+        does_not_support=tuple(item for claim in claims for item in claim.does_not_support),
+        gaps=gaps,
+        coverage_message=(
+            "仍有未解决的资料缺口" if gaps else "当前未登记覆盖缺口"
+        ),
+        sources=sources,
+        bindings=bindings,
+        manifest_json=_knowledge_json(record),
+    )
+
+
+def project_knowledge_library(
+    registry: Any,
+    *,
+    selected_topic_id: str | None = None,
+) -> KnowledgeLibraryProjection:
+    """Project an already-loaded offline registry without patient context."""
+
+    topics = tuple(_knowledge_topic_projection(view) for view in registry.symptom_views())
+    available = {item.topic_id: item for item in topics}
+    selected = selected_topic_id if selected_topic_id in available else None
+    if selected is None and topics:
+        selected = topics[0].topic_id
+    unbound = tuple(
+        _knowledge_source_projection(
+            source,
+            integrity=str(registry.source_content_status[source.ref.key()]),
+        )
+        for source in registry.sources
+        if source.registered_by == "Organization/continucare-m5k-link-only-registration"
+    )
+    mode = str(getattr(registry.mode, "value", registry.mode)).upper()
+    return KnowledgeLibraryProjection(
+        mode=mode,
+        topics=topics,
+        selected_topic_id=selected,
+        selected_topic=available.get(selected),
+        unbound_sources=unbound,
+        independence_notice="这里只说明采集依据，没有对这位患者做过评估。",
+        readonly_notice="本页只读，不读取患者故事，不创建记录，不参与本轮完成判定。",
+    )
 
 
 def _nurse_task_note(task: dict) -> str | None:
@@ -2417,6 +3031,248 @@ def inject_global_styles(st) -> None:
         }
         .cc-doctor-knowledge h2 {margin:0 0 .15rem; font-size:1rem;}
         .cc-doctor-knowledge p {margin:0; color:var(--cc-muted); font-size:.88rem; line-height:1.5;}
+        .cc-audit-shell {display:none;}
+        .stApp:has(.cc-audit-shell) [data-testid="stSidebar"],
+        .stApp:has(.cc-audit-shell) [data-testid="stHeader"] {display:none !important;}
+        .stApp:has(.cc-audit-shell) [data-testid="stAppViewContainer"] {margin-left:0 !important;}
+        .stApp:has(.cc-audit-shell) .block-container {
+            max-width:1180px; padding:.45rem 1.25rem 3rem;
+        }
+        .stApp:has(.cc-audit-shell) h1 {
+            margin:0; padding:.1rem 0 .45rem; border-bottom:1px solid var(--cc-text);
+            color:var(--cc-text); font-size:1.9rem; line-height:1.25; font-weight:720;
+            letter-spacing:-.025em;
+        }
+        .cc-audit-boundary {
+            margin:.35rem 0 .7rem; padding:.4rem 0; border-bottom:1px solid var(--cc-border);
+            color:var(--cc-text); font-size:.94rem; line-height:1.55;
+        }
+        .st-key-cc_audit_page [data-testid="stVerticalBlock"] {gap:.65rem;}
+        .cc-audit-conclusion {
+            margin:0; padding:.8rem 1rem; border:1px solid var(--cc-accent);
+            border-left:4px solid var(--cc-accent); background:var(--cc-bg); color:var(--cc-text);
+        }
+        .cc-audit-conclusion--stopped {border-color:var(--cc-caution); background:var(--cc-caution-bg);}
+        .cc-audit-conclusion--error {border-color:var(--cc-danger); background:var(--cc-danger-bg);}
+        .cc-audit-label {
+            margin:0 0 .12rem !important; color:var(--cc-muted) !important;
+            font-size:.82rem !important; font-weight:650; line-height:1.4 !important;
+        }
+        .cc-audit-conclusion h2 {
+            margin:0 0 .45rem; color:var(--cc-text); font-size:1.45rem; line-height:1.35;
+        }
+        .cc-audit-conclusion--stopped h2 {color:#7A3E00;}
+        .cc-audit-conclusion--error h2 {color:var(--cc-danger);}
+        .cc-audit-conclusion > p:last-child {margin:.45rem 0 0; line-height:1.6;}
+        .cc-audit-reason {
+            display:grid; grid-template-columns:8rem minmax(0, 1fr); gap:.8rem;
+            padding:.48rem 0; border-top:1px solid var(--cc-border);
+            border-bottom:1px solid var(--cc-border); line-height:1.5;
+        }
+        .cc-audit-reason span {color:var(--cc-muted); font-weight:600;}
+        .cc-audit-reason strong {font-weight:650; overflow-wrap:anywhere;}
+        .cc-audit-products {
+            display:grid; grid-template-columns:1fr 1fr; gap:1.5rem;
+            margin:.15rem 0; padding:.75rem 0; border-bottom:1px solid var(--cc-border);
+        }
+        .cc-audit-products h2 {
+            margin:0 0 .35rem; padding-bottom:.35rem; border-bottom:1px solid var(--cc-border);
+            color:var(--cc-text); font-size:1.05rem; line-height:1.4;
+        }
+        .cc-audit-products ul {margin:0; padding-left:1.1rem; color:var(--cc-text); line-height:1.65;}
+        .stApp:has(.cc-audit-shell) h2 {
+            color:var(--cc-text); font-size:1.15rem; line-height:1.4;
+        }
+        .cc-audit-empty {
+            margin:0; padding:.8rem 0; border-top:1px solid var(--cc-border);
+            border-bottom:1px solid var(--cc-border); color:var(--cc-muted); line-height:1.6;
+        }
+        .cc-audit-table-wrap {width:100%; overflow:visible;}
+        .cc-audit-table {width:100%; border-collapse:collapse; color:var(--cc-text); table-layout:fixed;}
+        .cc-audit-table th, .cc-audit-table td {
+            padding:.52rem .55rem; border-bottom:1px solid var(--cc-border);
+            text-align:left; vertical-align:top; line-height:1.5; overflow-wrap:anywhere;
+        }
+        .cc-audit-table th {color:var(--cc-muted); font-size:.84rem; font-weight:650;}
+        .cc-audit-table th:first-child, .cc-audit-table td:first-child {width:4rem;}
+        .cc-audit-table th:nth-child(2), .cc-audit-table td:nth-child(2) {width:7rem;}
+        .cc-audit-table th:last-child, .cc-audit-table td:last-child {width:12.5rem;}
+        .cc-audit-disclosure-intro {margin:.35rem 0 0; color:var(--cc-muted); font-size:.88rem; line-height:1.5;}
+        .stApp:has(.cc-audit-shell) [class*="st-key-cc_audit_disclosure"] button {
+            width:100%; min-height:44px !important; height:auto !important;
+            padding:.5rem .65rem !important; border:1px solid var(--cc-accent) !important;
+            border-radius:5px !important; background:var(--cc-bg) !important;
+            color:var(--cc-accent-strong) !important; font-size:.94rem !important;
+            line-height:1.35 !important; font-weight:630 !important; box-shadow:none !important;
+        }
+        .stApp:has(.cc-audit-shell) [class*="st-key-cc_audit_disclosure_active"] button {
+            border-color:var(--cc-accent-strong) !important;
+            background:var(--cc-surface-subtle) !important; font-weight:720 !important;
+        }
+        .cc-audit-disclosure {
+            margin:.4rem 0; padding:.75rem 0; border-top:1px solid var(--cc-accent);
+            border-bottom:1px solid var(--cc-border); color:var(--cc-text);
+        }
+        .cc-audit-disclosure h2 {margin:0 0 .35rem; color:var(--cc-accent-strong) !important;}
+        .cc-audit-disclosure p {margin:.2rem 0; line-height:1.6;}
+        .cc-audit-effects, .cc-audit-relations {margin:.55rem 0 0; padding:0; list-style:none;}
+        .cc-audit-effects li {
+            display:grid; grid-template-columns:minmax(13rem, .42fr) minmax(0, 1fr);
+            gap:.15rem 1rem; padding:.5rem 0; border-bottom:1px solid var(--cc-border);
+        }
+        .cc-audit-effects span {line-height:1.55;}
+        .cc-audit-effects small {grid-column:2; color:var(--cc-muted); line-height:1.45;}
+        .cc-audit-relations li {padding:.52rem 0; border-bottom:1px solid var(--cc-border); line-height:1.55;}
+        .cc-audit-technical {margin:.5rem 0; border-top:1px solid var(--cc-border);}
+        .cc-audit-technical div {
+            display:grid; grid-template-columns:8.5rem minmax(0, 1fr); gap:.8rem;
+            padding:.45rem 0; border-bottom:1px solid var(--cc-border);
+        }
+        .cc-audit-technical dt {color:var(--cc-muted); font-weight:620;}
+        .cc-audit-technical dd {margin:0; min-width:0; overflow-wrap:anywhere;}
+        .cc-audit-fixed-boundary {
+            margin:1rem 0 .3rem; padding:.65rem 0; border-top:1px solid var(--cc-text);
+            border-bottom:1px solid var(--cc-border); color:var(--cc-text); line-height:1.6;
+        }
+        .st-key-cc_audit_guide_link a {
+            min-height:44px; display:flex; align-items:center; border:0 !important;
+            border-bottom:1px solid var(--cc-border) !important; border-radius:0 !important;
+            background:transparent !important; color:var(--cc-accent-strong) !important;
+            font-size:.96rem !important; font-weight:620 !important; text-decoration:none !important;
+        }
+        .st-key-cc_audit_guide_link a * {color:var(--cc-accent-strong) !important;}
+        .cc-knowledge-shell {display:none;}
+        .stApp:has(.cc-knowledge-shell) [data-testid="stSidebar"],
+        .stApp:has(.cc-knowledge-shell) [data-testid="stHeader"] {display:none !important;}
+        .stApp:has(.cc-knowledge-shell) [data-testid="stAppViewContainer"] {margin-left:0 !important;}
+        .stApp:has(.cc-knowledge-shell) .block-container {
+            max-width:960px; padding:.45rem 1.25rem 3rem;
+        }
+        .stApp:has(.cc-knowledge-shell) h1 {
+            margin:0; padding:.1rem 0 .15rem; color:var(--cc-text);
+            font-size:1.9rem; line-height:1.25; font-weight:720; letter-spacing:-.025em;
+        }
+        .cc-knowledge-subtitle {
+            margin:0 0 .55rem; padding-bottom:.5rem; border-bottom:1px solid var(--cc-text);
+            color:var(--cc-accent-strong); font-size:1.08rem; line-height:1.5; font-weight:620;
+        }
+        .cc-knowledge-notices {
+            margin:.15rem 0 .35rem; padding:.7rem .85rem; border-left:4px solid #4B5F76;
+            background:var(--cc-surface-subtle); color:var(--cc-text);
+        }
+        .cc-knowledge-notices strong {display:block; font-size:1.05rem; line-height:1.5;}
+        .cc-knowledge-notices p {margin:.2rem 0 0; color:var(--cc-text); line-height:1.55;}
+        .cc-knowledge-topic-note {margin:.15rem 0 .55rem; color:var(--cc-muted); font-size:.88rem; line-height:1.5;}
+        .stApp:has(.cc-knowledge-shell) .st-key-cc_knowledge_topic [role="radiogroup"] {
+            display:grid !important; grid-template-columns:repeat(4, minmax(0, 1fr));
+            gap:.55rem !important;
+        }
+        .stApp:has(.cc-knowledge-shell) .st-key-cc_knowledge_topic [role="radiogroup"] label {
+            min-height:48px; margin:0 !important; padding:.55rem .65rem !important;
+            border:1px solid #738397; border-radius:5px; background:var(--cc-bg);
+            color:var(--cc-text); align-items:center; font-size:.96rem; line-height:1.35;
+            font-weight:620;
+        }
+        .stApp:has(.cc-knowledge-shell) .st-key-cc_knowledge_topic [role="radiogroup"] label:has(input:checked) {
+            border-color:var(--cc-accent); background:var(--cc-surface-subtle);
+            color:var(--cc-accent-strong); font-weight:720;
+        }
+        .cc-knowledge-topic-head {
+            display:flex; align-items:baseline; justify-content:space-between; gap:1rem;
+            margin:.7rem 0 .2rem; padding:.55rem 0; border-top:1px solid var(--cc-border);
+            border-bottom:1px solid var(--cc-border);
+        }
+        .cc-knowledge-topic-head h2 {margin:0; color:var(--cc-text); font-size:1.45rem; line-height:1.35;}
+        .cc-knowledge-topic-head p {margin:0; color:var(--cc-muted); font-size:.88rem; line-height:1.45;}
+        .cc-knowledge-rationale {margin:.55rem 0; padding:.35rem 0 .55rem;}
+        .cc-knowledge-rationale h2,
+        .cc-knowledge-scope h2,
+        .cc-knowledge-coverage h2,
+        .cc-knowledge-details-head h2 {
+            margin:0 0 .3rem; color:var(--cc-text); font-size:1.05rem; line-height:1.4;
+        }
+        .cc-knowledge-rationale p {margin:.25rem 0; color:var(--cc-text); line-height:1.65;}
+        .cc-knowledge-scope {display:grid; grid-template-columns:1fr 1fr; gap:1.25rem; margin:.45rem 0;}
+        .cc-knowledge-supports, .cc-knowledge-limitations {padding:.7rem .8rem; border:1px solid var(--cc-border);}
+        .cc-knowledge-supports {border-left:4px solid #4B5F76; background:var(--cc-surface-subtle);}
+        .cc-knowledge-limitations {border-left:4px solid var(--cc-caution); background:var(--cc-caution-bg);}
+        .cc-knowledge-scope ul {margin:0; padding-left:1.1rem; color:var(--cc-text); line-height:1.65;}
+        .cc-knowledge-coverage {
+            margin:.7rem 0 .35rem; padding:.65rem .8rem; border-left:4px solid var(--cc-caution);
+            background:var(--cc-caution-bg); color:var(--cc-text);
+        }
+        .cc-knowledge-coverage--none {border-left-color:#4B5F76; background:var(--cc-surface-subtle);}
+        .cc-knowledge-coverage strong {display:block; line-height:1.5;}
+        .cc-knowledge-coverage p {margin:.2rem 0 0; line-height:1.55;}
+        .cc-knowledge-coverage ul {margin:.25rem 0 0; padding-left:1.1rem; line-height:1.6;}
+        .cc-knowledge-unassessed {
+            margin:.2rem 0 .7rem; padding:.45rem 0; border-bottom:1px solid var(--cc-border);
+            color:var(--cc-text); font-size:.92rem; line-height:1.55;
+        }
+        .cc-knowledge-unresolved, .cc-knowledge-no-claim, .cc-knowledge-load-error {
+            margin:.55rem 0; padding:.7rem .8rem; border-left:4px solid var(--cc-caution);
+            background:var(--cc-caution-bg); color:var(--cc-text);
+        }
+        .cc-knowledge-load-error {border-left-color:var(--cc-danger); background:var(--cc-danger-bg);}
+        .cc-knowledge-unresolved h2, .cc-knowledge-no-claim h2, .cc-knowledge-load-error h2 {
+            margin:0 0 .2rem; font-size:1.08rem; line-height:1.4;
+        }
+        .cc-knowledge-unresolved p, .cc-knowledge-no-claim p, .cc-knowledge-load-error p {
+            margin:0; line-height:1.55;
+        }
+        .stApp:has(.cc-knowledge-shell) [class*="st-key-cc_knowledge_details"] button {
+            width:100%; min-height:46px !important; height:auto !important;
+            border:1px solid #4B5F76 !important; border-radius:5px !important;
+            background:var(--cc-bg) !important; color:#31445A !important;
+            font-size:.96rem !important; line-height:1.35 !important; font-weight:650 !important;
+            box-shadow:none !important;
+        }
+        .stApp:has(.cc-knowledge-shell) .st-key-cc_knowledge_details_active button {
+            background:var(--cc-surface-subtle) !important; font-weight:720 !important;
+        }
+        .cc-knowledge-details-head {
+            margin:.7rem 0 .45rem; padding:.65rem 0 .35rem; border-top:1px solid #4B5F76;
+        }
+        .cc-knowledge-details-head p {margin:0; color:var(--cc-muted); line-height:1.5;}
+        .cc-knowledge-source {
+            margin:.55rem 0; padding:.7rem .8rem; border:1px solid #AAB5C2;
+            border-left:4px solid #4B5F76; background:#FBFCFD; color:var(--cc-text);
+        }
+        .cc-knowledge-source h3 {margin:0 0 .4rem; color:#273B52; font-size:1.02rem; line-height:1.4;}
+        .cc-knowledge-source dl {margin:0;}
+        .cc-knowledge-source dl div {
+            display:grid; grid-template-columns:7.5rem minmax(0, 1fr); gap:.7rem;
+            padding:.28rem 0; border-bottom:1px solid #DDE3E9;
+        }
+        .cc-knowledge-source dt {color:var(--cc-muted); font-weight:620;}
+        .cc-knowledge-source dd {margin:0; overflow-wrap:anywhere;}
+        .cc-knowledge-locator {margin:.45rem 0; color:var(--cc-text);}
+        .cc-knowledge-locator strong {display:block; margin-bottom:.2rem;}
+        .cc-knowledge-locator pre {
+            margin:.25rem 0; padding:.45rem .55rem; white-space:pre-wrap; overflow-wrap:anywhere;
+            border:1px solid #DDE3E9; background:#fff; color:var(--cc-text); font-size:.78rem;
+        }
+        .cc-knowledge-source-link {
+            min-height:44px; display:inline-flex; align-items:center; color:#31445A;
+            font-weight:650; text-decoration:underline; text-underline-offset:3px;
+        }
+        .cc-knowledge-history {list-style:none; margin:.4rem 0; padding:0;}
+        .cc-knowledge-history li {
+            display:flex; justify-content:space-between; gap:1rem; padding:.45rem 0;
+            border-bottom:1px solid var(--cc-border); line-height:1.5;
+        }
+        .cc-knowledge-history span {color:var(--cc-muted); text-align:right;}
+        .cc-knowledge-fixed-boundary {
+            margin:1rem 0 .3rem; padding:.7rem 0; border-top:1px solid var(--cc-text);
+            border-bottom:1px solid var(--cc-border); color:var(--cc-text); line-height:1.65;
+        }
+        .st-key-cc_knowledge_home_link a {
+            min-height:44px; display:flex; align-items:center; border:0 !important;
+            border-bottom:1px solid var(--cc-border) !important; border-radius:0 !important;
+            background:transparent !important; color:#31445A !important;
+            font-size:.96rem !important; font-weight:620 !important; text-decoration:none !important;
+        }
+        .st-key-cc_knowledge_home_link a * {color:#31445A !important;}
         :where(a, button, input, select, textarea, [tabindex]):focus-visible {
             outline:3px solid color-mix(in srgb, var(--cc-accent) 45%, white) !important;
             outline-offset:3px !important;
@@ -2546,6 +3402,50 @@ def inject_global_styles(st) -> None:
             .stApp:has(.cc-doctor-shell) [class*="st-key-cc_doctor_decisions_"]
             [role="radiogroup"] {grid-template-columns:1fr; gap:.45rem !important;}
             .cc-doctor-outcomes {grid-template-columns:1fr; gap:.65rem;}
+            .stApp:has(.cc-audit-shell) .block-container,
+            .stApp:has(.cc-knowledge-shell) .block-container {padding:.35rem 1rem 2.5rem;}
+            .stApp:has(.cc-audit-shell) h1,
+            .stApp:has(.cc-knowledge-shell) h1 {
+                padding:.1rem 0 .35rem; font-size:1.65rem !important; line-height:1.25 !important;
+            }
+            .cc-audit-boundary {font-size:.86rem; line-height:1.48;}
+            .cc-audit-conclusion {padding:.65rem .75rem;}
+            .cc-audit-conclusion h2 {font-size:1.2rem !important;}
+            .cc-audit-reason {grid-template-columns:1fr; gap:.1rem;}
+            .cc-audit-products {grid-template-columns:1fr; gap:.8rem;}
+            .cc-audit-table thead {display:none;}
+            .cc-audit-table, .cc-audit-table tbody, .cc-audit-table tr, .cc-audit-table td {
+                display:block; width:100% !important;
+            }
+            .cc-audit-table tr {padding:.45rem 0; border-bottom:1px solid var(--cc-border);}
+            .cc-audit-table td {
+                display:grid; grid-template-columns:5rem minmax(0, 1fr); gap:.5rem;
+                padding:.18rem 0; border:0; line-height:1.45;
+            }
+            .cc-audit-table td::before {
+                content:attr(data-label); color:var(--cc-muted); font-size:.82rem; font-weight:620;
+            }
+            .stApp:has(.cc-audit-shell) [data-testid="stHorizontalBlock"] {
+                flex-direction:column; gap:.4rem;
+            }
+            .stApp:has(.cc-audit-shell) [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+                width:100% !important; flex:1 1 auto !important; min-width:0 !important;
+            }
+            .cc-audit-effects li {grid-template-columns:1fr; gap:.1rem;}
+            .cc-audit-effects small {grid-column:1;}
+            .cc-audit-technical div {grid-template-columns:1fr; gap:.08rem;}
+            .cc-knowledge-subtitle {font-size:1rem;}
+            .cc-knowledge-notices {padding:.6rem .7rem;}
+            .stApp:has(.cc-knowledge-shell) .st-key-cc_knowledge_topic [role="radiogroup"] {
+                grid-template-columns:repeat(2, minmax(0, 1fr)); gap:.45rem !important;
+            }
+            .cc-knowledge-topic-head {display:block;}
+            .cc-knowledge-topic-head h2 {font-size:1.25rem !important;}
+            .cc-knowledge-topic-head p {margin-top:.2rem;}
+            .cc-knowledge-scope {grid-template-columns:1fr; gap:.65rem;}
+            .cc-knowledge-source dl div {grid-template-columns:1fr; gap:.08rem;}
+            .cc-knowledge-history li {display:block;}
+            .cc-knowledge-history span {display:block; margin-top:.1rem; text-align:left;}
         }
         </style>
         """,

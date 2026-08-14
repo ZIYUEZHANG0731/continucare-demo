@@ -584,20 +584,23 @@ def test_knowledge_page_renders_all_four_fixture_details_offline():
     ).run()
 
     assert not app.exception
-    assert app.title[0].value == "症状中心 Knowledge Evidence"
-    expected_claims = {
-        "diarrhea": "glp1-diarrhea-collection-rationale@1",
-        "nausea": "glp1-nausea-collection-rationale@1",
-        "vomiting": "glp1-vomiting-collection-rationale@1",
-        "abdominal-pain": "glp1-abdominal-pain-collection-rationale@1",
+    assert app.title[0].value == "Knowledge 资料库"
+    expected_topics = {
+        "diarrhea": "腹泻",
+        "nausea": "恶心",
+        "vomiting": "呕吐",
+        "abdominal-pain": "腹痛",
     }
-    for symptom_id, claim_label in expected_claims.items():
-        app.selectbox[0].set_value(symptom_id).run()
+    for symptom_id, topic_name in expected_topics.items():
+        app.radio[0].set_value(symptom_id).run()
         assert not app.exception
-        assert claim_label in "\n".join(item.value for item in app.markdown)
-    app.radio[0].set_value("HISTORICAL").run()
+        rendered = "\n".join(item.value for item in app.markdown)
+        assert topic_name in rendered
+        assert "支持什么" in rendered
+        assert "不支持什么" in rendered
+    app.button[0].click().run()
     assert not app.exception
-    assert any("HISTORICAL" in item.value for item in app.markdown)
+    assert any("CURRENT / HISTORICAL" in item.value for item in app.markdown)
 
 
 def test_payload_hash_is_checked_before_json_parsing(tmp_path):
