@@ -379,6 +379,12 @@ def _validate_content_contract(
             ConnectorErrorCode.UNSUPPORTED_ENCODING,
             detail="compressed or transformed responses are not accepted",
         )
+    transfer_encoding = headers.get("transfer-encoding")
+    if transfer_encoding is not None and transfer_encoding.lower() != "chunked":
+        raise ConnectorFailure(
+            ConnectorErrorCode.UNSUPPORTED_ENCODING,
+            detail="only identity bodies or standard chunked framing are accepted",
+        )
     raw_content_type = headers.get("content-type")
     if raw_content_type is None:
         raise ConnectorFailure(

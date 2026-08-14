@@ -258,6 +258,10 @@ class EvidenceCandidateService:
         head = self._ledger.head(LedgerCollection.EVIDENCE_CANDIDATE, candidate_id)
         next_version = 1 if head is None else head.record_version + 1
         timestamp = recorded_at or datetime.now(timezone.utc)
+        if timestamp.tzinfo is None or author_provenance.authored_at > timestamp:
+            raise KnowledgeOpsPolicyError(
+                "EvidenceCandidate timestamp must follow timezone-aware author provenance"
+            )
         candidate = EvidenceCandidate(
             candidate_id=candidate_id,
             candidate_version=next_version,

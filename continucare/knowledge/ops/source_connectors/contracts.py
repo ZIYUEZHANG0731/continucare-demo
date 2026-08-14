@@ -174,6 +174,11 @@ def validate_controlled_request(
             ConnectorErrorCode.PATH_NOT_ALLOWED,
             detail="request path is outside the exact endpoint rule",
         )
+    if "%" in parsed.path or "%" in parsed.query:
+        raise ConnectorFailure(
+            ConnectorErrorCode.UNSAFE_QUERY,
+            detail="typed endpoint requests never use percent encoding",
+        )
     try:
         pairs = tuple(parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True))
     except ValueError as exc:

@@ -233,7 +233,7 @@ def test_evidence_candidate_collection_type_record_type_and_id_are_all_enforced(
         EvidenceCandidate.model_validate({**candidate, "record_type": "claim"})
     with pytest.raises(ValidationError):
         EvidenceCandidate.model_validate({**candidate, "candidate_id": "dcl-wrong-namespace"})
-    with pytest.raises(KnowledgeOpsPolicyError, match="requires evidence_candidate_v2"):
+    with pytest.raises(KnowledgeOpsPolicyError, match="only be stored in CLAIM"):
         ledger.append(
             LedgerCollection.EVIDENCE_CANDIDATE,
             "evc-wrong-payload",

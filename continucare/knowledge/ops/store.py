@@ -378,6 +378,18 @@ def _validate_typed_collection_boundary(
 ) -> None:
     evidence_type = "evidence_candidate_v2"
     draft_type = "machine_draft_claim_v2"
+    record_type = payload.get("record_type")
+    if (
+        record_type == "evidence_candidate"
+        and collection != LedgerCollection.EVIDENCE_CANDIDATE
+    ):
+        raise KnowledgeOpsPolicyError(
+            "EvidenceCandidate record may only be stored in EVIDENCE_CANDIDATE"
+        )
+    if record_type == "machine_draft_claim" and collection != LedgerCollection.CLAIM:
+        raise KnowledgeOpsPolicyError(
+            "MachineDraftClaim record may only be stored in CLAIM"
+        )
     if collection == LedgerCollection.EVIDENCE_CANDIDATE:
         if payload_type != evidence_type:
             raise KnowledgeOpsPolicyError(

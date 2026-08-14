@@ -6,8 +6,6 @@ import json
 import re
 import xml.parsers.expat
 from dataclasses import dataclass, field
-from typing import Any
-
 from pydantic import Field
 
 from continucare.knowledge.ops.models import StrictModel

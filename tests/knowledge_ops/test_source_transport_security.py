@@ -266,6 +266,7 @@ def test_long_retry_after_does_not_wait_or_retry() -> None:
         ({}, b"123456", ConnectorErrorCode.RESPONSE_TOO_LARGE),
         ({"Content-Length": "1"}, b"123456", ConnectorErrorCode.RESPONSE_TOO_LARGE),
         ({"Content-Encoding": "gzip"}, b"{}", ConnectorErrorCode.UNSUPPORTED_ENCODING),
+        ({"Transfer-Encoding": "gzip"}, b"{}", ConnectorErrorCode.UNSUPPORTED_ENCODING),
         ({"Content-Type": "text/html"}, b"{}", ConnectorErrorCode.UNSUPPORTED_MIME),
         ({"Content-Type": "application/json; charset=iso-8859-1"}, b"{}", ConnectorErrorCode.UNSUPPORTED_CHARSET),
     ],

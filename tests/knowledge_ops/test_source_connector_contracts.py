@@ -127,6 +127,22 @@ def test_query_values_are_revalidated_at_transport_boundary() -> None:
     assert raised.value.code == ConnectorErrorCode.UNSAFE_QUERY
 
 
+@pytest.mark.parametrize("encoded_id", ["%31%32%33", "%2531%2532%2533"])
+def test_percent_encoded_official_ids_are_rejected_before_capture(encoded_id: str) -> None:
+    request = ControlledRequest(
+        endpoint_id=PUBMED_ESUMMARY_ENDPOINT.endpoint_id,
+        url=(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+            f"?db=pubmed&id={encoded_id}&retmode=json&tool=continucare_knowledge"
+        ),
+        query_identity="pmid-123",
+        accept="application/json",
+    )
+    with pytest.raises(ConnectorFailure) as raised:
+        validate_controlled_request(request, PUBMED_ESUMMARY_ENDPOINT)
+    assert raised.value.code == ConnectorErrorCode.UNSAFE_QUERY
+
+
 def test_daily_med_connector_parses_metadata_without_label_text() -> None:
     body = json.dumps(
         {
