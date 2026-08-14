@@ -717,13 +717,165 @@ class ReadinessGapRegistryManifest(EnvelopeBase):
         return self
 
 
+CORE_SYMPTOM_REUSED_BENCHMARK_KEYS = (
+    "nausea",
+    "vomiting",
+    "diarrhea",
+    "abdominal-pain",
+    "constipation",
+    "decreased-appetite",
+    "fatigue",
+    "dizziness",
+    "dyspnea",
+)
+
+
+class AliasAuditReason(StrEnum):
+    PREFERRED_DISPLAY_ONLY = (
+        "v1_preferred_display_label_not_formal_patient_expression_review"
+    )
+    COLLOQUIAL_UNREVIEWED = "colloquial_expression_requires_formal_terminology_review"
+    BROAD_OR_AMBIGUOUS = "broad_or_ambiguous_expression_requires_semantic_scope_review"
+    STOOL_DESCRIPTION = "stool_description_requires_semantic_equivalence_review"
+    FUNCTIONAL_DESCRIPTION = "functional_expression_requires_semantic_equivalence_review"
+    DIZZINESS_SUBTYPE = "dizziness_expression_requires_subtype_disambiguation"
+    DYSPNEA_BOUNDARY = "dyspnea_expression_cannot_imply_red_flag_or_emergency"
+
+
+class CoreSymptomAliasAuditEntry(StrictModel):
+    source_alias_index: int = Field(ge=0)
+    alias_zh: NonBlank
+    source_role: Literal[
+        "v1_preferred_display_label",
+        "inherited_v1_alias",
+    ]
+    disposition: Literal[
+        "display_label_only_pending_formal_terminology_review",
+        "withheld_pending_formal_terminology_review",
+    ]
+    boundary_reason: AliasAuditReason
+    display_label: bool
+    matchable: Literal[False] = False
+    semantic_equivalence_status: Literal["not_established"] = "not_established"
+    formal_terminology_review_completed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def validate_disposition(self) -> "CoreSymptomAliasAuditEntry":
+        if self.source_role == "v1_preferred_display_label":
+            if (
+                self.disposition
+                != "display_label_only_pending_formal_terminology_review"
+                or self.boundary_reason != AliasAuditReason.PREFERRED_DISPLAY_ONLY.value
+                or not self.display_label
+            ):
+                raise ValueError(
+                    "v1 preferred alias may only be an unreviewed display label"
+                )
+        elif (
+            self.disposition != "withheld_pending_formal_terminology_review"
+            or self.boundary_reason == AliasAuditReason.PREFERRED_DISPLAY_ONLY.value
+            or self.display_label
+        ):
+            raise ValueError(
+                "non-preferred inherited alias must remain withheld and non-display"
+            )
+        return self
+
+
+class CoreSymptomAliasConceptAudit(StrictModel):
+    benchmark_id: SafeId
+    benchmark_key: SafeId
+    existing_concept_ref: SafeId
+    preferred_zh: NonBlank
+    benchmark_label_en: NonBlank
+    english_label_disposition: Literal[
+        "benchmark_display_only_pending_formal_translation_review"
+    ] = "benchmark_display_only_pending_formal_translation_review"
+    formal_translation_review_completed: Literal[False] = False
+    aliases: tuple[CoreSymptomAliasAuditEntry, ...] = Field(min_length=1)
+    approved_match_aliases: tuple[NonBlank, ...] = Field(
+        default_factory=tuple,
+        max_length=0,
+    )
+    terminology_review_status: Literal["pending_formal_terminology_review"] = (
+        "pending_formal_terminology_review"
+    )
+
+    @model_validator(mode="after")
+    def validate_alias_partition(self) -> "CoreSymptomAliasConceptAudit":
+        if self.benchmark_id != f"core-symptom-{self.benchmark_key}":
+            raise ValueError("alias audit benchmark ID differs from its stable key")
+        if tuple(item.source_alias_index for item in self.aliases) != tuple(
+            range(len(self.aliases))
+        ):
+            raise ValueError("alias audit source indices must be ordered and contiguous")
+        if len({item.alias_zh for item in self.aliases}) != len(self.aliases):
+            raise ValueError("alias audit values must be unique within a concept")
+        preferred = tuple(
+            item
+            for item in self.aliases
+            if item.source_role == "v1_preferred_display_label"
+        )
+        if len(preferred) != 1 or preferred[0].alias_zh != self.preferred_zh:
+            raise ValueError("alias audit requires exactly one matching display label")
+        if any(
+            item.disposition != "withheld_pending_formal_terminology_review"
+            for item in self.aliases
+            if item.source_role == "inherited_v1_alias"
+        ):
+            raise ValueError("every non-preferred inherited alias must remain withheld")
+        return self
+
+
+class CoreSymptomAliasAudit(StrictModel):
+    audit_id: Literal["core-symptom-alias-technical-boundary-audit"]
+    audit_version: Literal[1]
+    audit_kind: Literal["technical_boundary_audit"] = "technical_boundary_audit"
+    catalog_id: Literal["continucare-core-symptom-catalog"]
+    catalog_version: Literal["2.0.0"]
+    catalog_sha256: Sha256
+    source_catalog_id: Literal["continucare-glp1-patient-reported-symptoms"]
+    source_catalog_version: Literal["1.0.0"]
+    source_catalog_sha256: Sha256
+    concept_audits: tuple[CoreSymptomAliasConceptAudit, ...] = Field(
+        min_length=9,
+        max_length=9,
+    )
+    terminology_review_status: Literal["pending_formal_terminology_review"] = (
+        "pending_formal_terminology_review"
+    )
+    formal_terminologist_review_completed: Literal[False] = False
+    clinical_patient_expression_validation_completed: Literal[False] = False
+    technical_audit_only: Literal[True] = True
+    contains_patient_data: Literal[False] = False
+    release_ready: Literal[False] = False
+    knowledge_effect: Literal["informational_only"] = "informational_only"
+    runtime_authority: Literal["none"] = "none"
+
+    @model_validator(mode="after")
+    def validate_complete_reused_set(self) -> "CoreSymptomAliasAudit":
+        keys = tuple(item.benchmark_key for item in self.concept_audits)
+        refs = tuple(item.existing_concept_ref for item in self.concept_audits)
+        if keys != CORE_SYMPTOM_REUSED_BENCHMARK_KEYS or refs != keys:
+            raise ValueError(
+                "alias audit must contain the exact ordered nine reused concepts"
+            )
+        return self
+
+
+class CoreSymptomAliasAuditManifest(EnvelopeBase):
+    file_kind: Literal["core_symptom_alias_audit"] = "core_symptom_alias_audit"
+    audit: CoreSymptomAliasAudit
+
+
 PayloadEnvelope = Annotated[
     SafetyBoundaryManifest
     | SourcePolicyManifest
     | CoverageProfileManifest
     | ReviewPolicyManifest
     | ReleaseIntentManifest
-    | ReadinessGapRegistryManifest,
+    | ReadinessGapRegistryManifest
+    | CoreSymptomAliasAuditManifest,
     Field(discriminator="file_kind"),
 ]
 

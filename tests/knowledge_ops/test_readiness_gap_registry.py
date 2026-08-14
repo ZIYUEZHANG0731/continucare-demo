@@ -69,9 +69,9 @@ def test_legacy_bundle_indexes_load_with_no_backfilled_readiness_gaps() -> None:
         assert read_model.governance_readiness.consumer_integration_ready is False
 
 
-def test_builtin_bundle_loads_exact_frozen_12_open_readiness_gaps() -> None:
+def test_builtin_bundle_v4_loads_exact_frozen_12_open_readiness_gaps() -> None:
     bundle = load_builtin_ops_bundle()
-    assert bundle.index.bundle_version == 3
+    assert bundle.index.bundle_version == 4
     assert len(bundle.readiness_gaps) == 12
     assert {item.gap_id for item in bundle.readiness_gaps} == EXPECTED_GAP_IDS
     assert {item.lifecycle for item in bundle.readiness_gaps} == {"open"}

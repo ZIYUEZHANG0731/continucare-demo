@@ -85,7 +85,7 @@ read_model = load_builtin_ops_read_model()
 GuardedHttpConnector()
 DailyMedConnector()
 report = run_live_validation(external_egress_enabled=False, environ={})
-assert bundle.index.bundle_version == 3
+assert bundle.index.bundle_version == 4
 assert read_model.boundary.runtime_authority == "none"
 assert report.request_count == 0
 assert {item.status for item in report.records} == {"not_attempted"}

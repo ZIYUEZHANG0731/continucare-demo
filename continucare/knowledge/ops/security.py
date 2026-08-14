@@ -76,6 +76,9 @@ AUDITED_SHA256_FIELD_EVIDENCE = MappingProxyType(
         "whole_record_sha256": "EvidenceCandidate binds verified SourceSnapshot content",
         "whole_response_sha256": "source connector response_digest hashes exact response bytes",
         # Hash-pinned governance loading and its derived read/review pins.
+        "source_catalog_sha256": (
+            "alias audit loader recomputes exact v1 terminology catalog bytes"
+        ),
         "document_sha256": "SourceRightsEvidence official-document capture digest",
         "manifest_sha256": "load_ops_bundle recomputes every pinned manifest",
         "bundle_index_sha256": "KnowledgeOpsBundle.index_sha256 canonical index digest",

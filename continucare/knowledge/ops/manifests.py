@@ -14,6 +14,9 @@ from typing import Protocol
 from pydantic import TypeAdapter, ValidationError
 
 from continucare.knowledge.ops.models import (
+    CORE_SYMPTOM_REUSED_BENCHMARK_KEYS,
+    CoreSymptomAliasAudit,
+    CoreSymptomAliasAuditManifest,
     CoverageProfileManifest,
     CoverageValidationProfile,
     FileRef,
@@ -43,7 +46,7 @@ from continucare.knowledge.ops.models import (
 
 
 LEGACY_INDEX_PATH = "bundle_index_v2.json"
-BUILTIN_INDEX_PATH = "bundle_index_v2_3.json"
+BUILTIN_INDEX_PATH = "bundle_index_v2_4.json"
 _PAYLOAD_ADAPTER = TypeAdapter(PayloadEnvelope)
 _P1_READINESS_SOURCE_POLICY_REFS = frozenset(
     {
@@ -110,6 +113,7 @@ class KnowledgeOpsBundle:
     release_intent: KnowledgeReleaseIntent
     manifest_digests: Mapping[tuple[str, int], str]
     readiness_gaps: tuple[ReadinessGap, ...] = ()
+    core_symptom_alias_audit: CoreSymptomAliasAudit | None = None
 
     def source_policy(self, policy_id: str, policy_version: int = 1) -> SourcePolicy:
         for policy in self.source_policies:
@@ -219,6 +223,11 @@ def load_ops_bundle(
         for item in current_envelopes
         if isinstance(item, ReadinessGapRegistryManifest)
     ]
+    alias_audit_files = [
+        item
+        for item in current_envelopes
+        if isinstance(item, CoreSymptomAliasAuditManifest)
+    ]
     if not all(
         len(items) == 1
         for items in (
@@ -241,6 +250,15 @@ def load_ops_bundle(
     elif readiness_files:
         raise KnowledgeOpsManifestError(
             "legacy Knowledge Ops bundles cannot claim a readiness Gap registry"
+        )
+    if index.bundle_version >= 4:
+        if len(alias_audit_files) != 1:
+            raise KnowledgeOpsManifestError(
+                "Knowledge Ops bundle v4+ requires exactly one Core Symptom alias audit"
+            )
+    elif alias_audit_files:
+        raise KnowledgeOpsManifestError(
+            "legacy Knowledge Ops bundles cannot claim a Core Symptom alias audit"
         )
 
     source_policies = _materialize_source_policies(
@@ -275,6 +293,9 @@ def load_ops_bundle(
         raise KnowledgeOpsManifestError("source policy registry cannot be empty")
     readiness_gaps = () if not readiness_files else readiness_files[0].gaps
     _validate_readiness_gaps(readiness_gaps, source_policies)
+    alias_audit = None if not alias_audit_files else alias_audit_files[0].audit
+    if alias_audit is not None:
+        _validate_core_symptom_alias_audit(alias_audit)
 
     return KnowledgeOpsBundle(
         index=index,
@@ -285,6 +306,7 @@ def load_ops_bundle(
         release_intent=release_files[0].intent,
         manifest_digests=MappingProxyType(digests),
         readiness_gaps=readiness_gaps,
+        core_symptom_alias_audit=alias_audit,
     )
 
 
@@ -449,3 +471,83 @@ def _validate_readiness_gaps(
         raise KnowledgeOpsManifestError(
             "catalog readiness Gap differs from the current reused concept refs"
         )
+
+
+def _validate_core_symptom_alias_audit(audit: CoreSymptomAliasAudit) -> None:
+    """Bind the technical audit to exact catalog bytes and their full alias sets."""
+
+    from continucare.terminology.catalog import DATA_FILE, load_glp1_symptom_catalog
+    from continucare.terminology.core_catalog import (
+        CORE_CATALOG_V2_FILE,
+        load_core_symptom_catalog_v2,
+    )
+
+    source_bytes = DATA_FILE.read_bytes()
+    catalog_bytes = CORE_CATALOG_V2_FILE.read_bytes()
+    if hashlib.sha256(source_bytes).hexdigest() != audit.source_catalog_sha256:
+        raise KnowledgeOpsManifestError(
+            "Core Symptom alias audit source catalog SHA-256 mismatch"
+        )
+    if hashlib.sha256(catalog_bytes).hexdigest() != audit.catalog_sha256:
+        raise KnowledgeOpsManifestError(
+            "Core Symptom alias audit v2 catalog SHA-256 mismatch"
+        )
+
+    source_catalog = load_glp1_symptom_catalog()
+    catalog = load_core_symptom_catalog_v2()
+    if (
+        source_catalog.catalog_id != audit.source_catalog_id
+        or source_catalog.version != audit.source_catalog_version
+        or catalog.catalog_id != audit.catalog_id
+        or catalog.catalog_version != audit.catalog_version
+    ):
+        raise KnowledgeOpsManifestError(
+            "Core Symptom alias audit catalog identity or version mismatch"
+        )
+
+    reused_records = tuple(
+        item for item in catalog.records if item.concept_status == "reused_concept"
+    )
+    if tuple(item.benchmark_key for item in reused_records) != (
+        CORE_SYMPTOM_REUSED_BENCHMARK_KEYS
+    ):
+        raise KnowledgeOpsManifestError(
+            "Core Symptom alias audit reused concept set differs from v2 catalog"
+        )
+    if len(reused_records) != len(audit.concept_audits):
+        raise KnowledgeOpsManifestError(
+            "Core Symptom alias audit concept count differs from v2 catalog"
+        )
+
+    for record, concept_audit in zip(
+        reused_records,
+        audit.concept_audits,
+        strict=True,
+    ):
+        if (
+            record.benchmark_id != concept_audit.benchmark_id
+            or record.benchmark_key != concept_audit.benchmark_key
+            or record.existing_concept_ref != concept_audit.existing_concept_ref
+            or record.preferred_zh != concept_audit.preferred_zh
+            or record.preferred_en != concept_audit.benchmark_label_en
+        ):
+            raise KnowledgeOpsManifestError(
+                "Core Symptom alias audit differs from its exact v2 record"
+            )
+        source_concept = source_catalog.concept(concept_audit.existing_concept_ref)
+        if (
+            source_concept.preferred_zh != concept_audit.preferred_zh
+            or tuple(source_concept.aliases_zh)
+            != tuple(item.alias_zh for item in concept_audit.aliases)
+        ):
+            raise KnowledgeOpsManifestError(
+                "Core Symptom alias audit does not cover the exact v1 alias sequence"
+            )
+        expected_roles = (
+            "v1_preferred_display_label",
+            *("inherited_v1_alias" for _ in source_concept.aliases_zh[1:]),
+        )
+        if tuple(item.source_role for item in concept_audit.aliases) != expected_roles:
+            raise KnowledgeOpsManifestError(
+                "Core Symptom alias audit preferred/inherited partition differs"
+            )
