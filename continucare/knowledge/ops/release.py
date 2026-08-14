@@ -645,7 +645,7 @@ class ReleaseReadinessService:
                     )
                 )
                 continue
-            except ValidationError:
+            except (ValidationError, ValueError):
                 blockers.append(
                     _blocker(
                         ReadinessBlockerCode.INVALID_GAP_REFERENCE,

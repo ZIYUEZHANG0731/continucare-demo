@@ -1686,6 +1686,29 @@ def test_release_readiness_blocks_synthetic_reviews_sources_and_open_gaps(tmp_pa
     assert report.runtime_authority == "none"
 
 
+def test_release_readiness_classifies_wrong_gap_payload_type_as_invalid(tmp_path):
+    _, _, ledger, _, readiness, candidate_ref, _ = _synthetic_release_context(
+        tmp_path
+    )
+    invalid_gap_ref = ledger.append(
+        LedgerCollection.GAP,
+        "wrong-gap-payload-type",
+        payload_type="unexpected_gap_payload",
+        payload={"synthetic": True},
+        recorded_by="system:invalid-gap-fixture",
+        synthetic=True,
+    ).ref
+
+    report_ref = readiness.assess(candidate_ref)
+    report = ReleaseReadinessReport.model_validate(ledger.get(report_ref).payload)
+
+    assert any(
+        blocker.code == "invalid_gap_reference"
+        and blocker.subject_ref == invalid_gap_ref
+        for blocker in report.blockers
+    )
+
+
 def test_finalize_records_blocked_report_but_never_creates_release(tmp_path):
     _, _, ledger, _, readiness, candidate_ref, _ = _synthetic_release_context(tmp_path)
 
