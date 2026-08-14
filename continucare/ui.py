@@ -6,6 +6,7 @@ import html
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 from urllib.parse import urlparse
 
 
@@ -67,6 +68,28 @@ NURSE_RESULT_BOUNDARY = (
 NURSE_STOP_CONSEQUENCE = (
     "这会停止后续业务动作；不会生成新的沟通文字或医生速览。"
     "已有记录仍会保留供追溯。"
+)
+
+
+DOCTOR_ROLE_BOUNDARY = (
+    "尚未提供临床评估。以下内容只整理已确认记录与护理动作。"
+)
+
+
+DOCTOR_DECISION_BOUNDARY = (
+    "以上只调整速览的文字表达，不等于临床评估。"
+)
+
+
+DOCTOR_REJECT_BOUNDARY = (
+    "不采用只影响这段速览文字，不改变患者确认的记录。"
+)
+
+
+DOCTOR_DECISION_ACTIONS = (
+    ("accept", "保留这版速览"),
+    ("modify", "调整速览措辞"),
+    ("reject", "不采用这版速览"),
 )
 
 
@@ -184,6 +207,59 @@ class NurseWorkbenchProjection:
     pending_tasks: tuple[NurseTaskProjection, ...]
     completed_tasks: tuple[NurseTaskProjection, ...]
     selected_task_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorFactProjection:
+    """One first-viewport fact whose wording is derived from persisted facts."""
+
+    label: str
+    value: str
+    source_key: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorWordingItemProjection:
+    """One existing Summary item exposed as a constrained wording choice."""
+
+    item_id: str
+    section: str
+    label: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorVisitBriefProjection:
+    """Pure doctor-facing projection; it never owns or mutates workflow state."""
+
+    state: str
+    tone: str
+    notice_title: str | None
+    notice_detail: str | None
+    facts: tuple[DoctorFactProjection, ...]
+    summary_text: str | None
+    wording_items: tuple[DoctorWordingItemProjection, ...]
+    summary_id: str | None
+    summary_version: str | None
+    patient_quote: str | None
+    nursing_detail: str | None
+    previous_summary_text: str | None
+    source_actions: tuple[tuple[str, str], ...]
+    source_notice: str | None
+    primary_action: str | None
+    primary_label: str | None
+    primary_task_id: str | None
+    show_decisions: bool
+    decision_actions: tuple[tuple[str, str], ...]
+    decision_boundary: str
+    reject_boundary: str
+    recorded_decision: str | None
+    decision_note: str | None
+    show_nurse_link: bool
+    show_audit_link: bool
+    show_knowledge_link: bool
+    produced: tuple[str, ...]
+    not_produced: tuple[str, ...]
 
 
 def _nurse_task_note(task: dict) -> str | None:
@@ -552,6 +628,523 @@ def project_nurse_workbench(
         pending_tasks=pending,
         completed_tasks=completed,
         selected_task_id=selected,
+    )
+
+
+def _summary_item_references(item: Any) -> tuple[str, ...]:
+    references = []
+    for evidence in getattr(item, "evidence_refs", ()):
+        resource = getattr(evidence, "resource", None)
+        reference = getattr(resource, "reference", None)
+        if isinstance(reference, str) and reference:
+            references.append(reference)
+    return tuple(references)
+
+
+def _decision_value(review_or_decision: Any) -> str | None:
+    decision = getattr(review_or_decision, "decision", review_or_decision)
+    value = getattr(decision, "value", decision)
+    return str(value) if value is not None else None
+
+
+def _clean_doctor_clause(value: str) -> str:
+    return value.strip().rstrip("。；; ")
+
+
+def project_doctor_summary_wording(
+    summary: Any,
+    *,
+    confirmed_statement: str | None,
+    review: Any | None = None,
+    review_source_summary: Any | None = None,
+) -> tuple[DoctorWordingItemProjection, ...]:
+    """Project two restrained clauses from an exact persisted brief version.
+
+    The generated M5-C Summary is intentionally technical.  This projection
+    exposes only the patient-confirmed statement and the completed nursing
+    action in natural Chinese.  A stored MODIFY decision may replace the text
+    of one of those same Summary items; its section and evidence stay owned by
+    the immutable Summary contract.
+    """
+
+    if summary is None or getattr(summary, "summary_kind", None) != "manual_review_brief":
+        return ()
+    statement = _clean_doctor_clause(confirmed_statement or "")
+    if not statement:
+        return ()
+    items = tuple(getattr(summary, "items", ()))
+    patient_item = next(
+        (
+            item
+            for item in items
+            if getattr(item, "section", None) == "overview"
+            and any(
+                reference.startswith("QuestionnaireResponse/")
+                for reference in _summary_item_references(item)
+            )
+        ),
+        None,
+    )
+    task_item = next(
+        (
+            item
+            for item in items
+            if getattr(item, "section", None) == "tasks_and_actions"
+            and any(
+                reference.startswith("Task/")
+                for reference in _summary_item_references(item)
+            )
+        ),
+        None,
+    )
+    if patient_item is None or task_item is None:
+        return ()
+
+    projected_text = {
+        getattr(patient_item, "item_id"): f"患者表示{statement}",
+        getattr(task_item, "item_id"): "护士已完成记录核对",
+    }
+    if _decision_value(review) == "modify" and review_source_summary is not None:
+        source_items = {
+            getattr(item, "item_id", ""): item
+            for item in getattr(review_source_summary, "items", ())
+        }
+        for item in (patient_item, task_item):
+            item_id = getattr(item, "item_id")
+            source_item = source_items.get(item_id)
+            current_text = str(getattr(item, "text", "")).strip()
+            if (
+                source_item is not None
+                and current_text
+                and current_text != str(getattr(source_item, "text", "")).strip()
+            ):
+                projected_text[item_id] = current_text
+
+    return (
+        DoctorWordingItemProjection(
+            item_id=getattr(patient_item, "item_id"),
+            section=getattr(patient_item, "section"),
+            label="患者表述",
+            text=projected_text[getattr(patient_item, "item_id")],
+        ),
+        DoctorWordingItemProjection(
+            item_id=getattr(task_item, "item_id"),
+            section=getattr(task_item, "section"),
+            label="护理动作",
+            text=projected_text[getattr(task_item, "item_id")],
+        ),
+    )
+
+
+def doctor_summary_text(
+    wording_items: tuple[DoctorWordingItemProjection, ...],
+) -> str | None:
+    clauses = [_clean_doctor_clause(item.text) for item in wording_items]
+    if not clauses or any(not item for item in clauses):
+        return None
+    return f"{'；'.join(clauses)}。尚未提供临床评估。"
+
+
+def build_doctor_modified_items(
+    summary: Any,
+    *,
+    item_id: str,
+    replacement: str,
+    allowed_item_ids: tuple[str, ...],
+) -> tuple[Any, ...]:
+    """Change exactly one allowed Summary item's text and preserve its contract."""
+
+    text = replacement.strip()
+    if not text:
+        raise ValueError("调整后的措辞不能为空")
+    if len(text) > 3000:
+        raise ValueError("调整后的措辞过长")
+    if item_id not in allowed_item_ids:
+        raise ValueError("只能调整当前速览中已有的可见条目")
+    source_items = tuple(getattr(summary, "items", ()))
+    matches = [item for item in source_items if getattr(item, "item_id", None) == item_id]
+    if len(matches) != 1:
+        raise ValueError("待调整条目不属于当前速览")
+    if str(getattr(matches[0], "text", "")).strip() == text:
+        raise ValueError("调整后的措辞必须发生变化")
+
+    result = []
+    for item in source_items:
+        if getattr(item, "item_id", None) != item_id:
+            result.append(item)
+            continue
+        payload = item.model_dump(mode="python")
+        payload["text"] = text
+        result.append(type(item).model_validate(payload))
+    return tuple(result)
+
+
+def _doctor_task_action(task: dict[str, Any] | None) -> str:
+    status = str((task or {}).get("status") or "")
+    return {
+        "requested": "等待护士接手记录核对",
+        "received": "护士已接手记录核对",
+        "accepted": "护士正在核对记录",
+        "in-progress": "护士正在核对记录",
+        "completed": "护士已完成记录核对",
+        "rejected": "护士未接受这项记录核对",
+        "cancelled": "这项记录核对已取消",
+        "failed": "这项记录核对没有完成",
+        "entered-in-error": "这项记录核对已标记为记录错误",
+    }.get(status, "尚未开始护理记录核对")
+
+
+def project_doctor_visit_brief(
+    progress: Any,
+    *,
+    tasks: tuple[dict[str, Any], ...] = (),
+    summary: Any | None = None,
+    confirmed_statement: str | None = None,
+    original_quote: str | None = None,
+    nursing_detail: str | None = None,
+    stale: bool = False,
+    review: Any | None = None,
+    review_source_summary: Any | None = None,
+    previous_summary_text: str | None = None,
+    source_error: str | None = None,
+    trace_degraded: bool = False,
+    unresolved_references: tuple[str, ...] = (),
+    trace_truncated: bool = False,
+) -> DoctorVisitBriefProjection:
+    """Translate persisted doctor-brief facts without creating a second state."""
+
+    stage = getattr(getattr(progress, "stage", None), "value", None)
+    if stage is None:
+        stage = str(getattr(progress, "stage", ""))
+    generation = getattr(progress, "generation", None)
+    integrity_issue = bool(getattr(progress, "integrity_issue", None))
+    task_id = str(getattr(progress, "task_id", None) or "")
+    task = next((item for item in tasks if str(item.get("id") or "") == task_id), None)
+    if task is None and not task_id and len(tasks) == 1:
+        task = tasks[0]
+        task_id = str(task.get("id") or "")
+    expected_task_status = _NURSE_STAGE_TASK_STATUS.get(stage)
+    task_mismatch = bool(
+        expected_task_status
+        and (
+            task is None
+            or str(task.get("status") or "") != expected_task_status
+        )
+    )
+    unknown_stage = stage not in _NURSE_KNOWN_STAGES
+    statement = _clean_doctor_clause(confirmed_statement or "") or None
+    quote = original_quote.strip() if original_quote and original_quote.strip() else None
+    has_patient_fact = stage not in {"not_started", "candidate_ready", "candidate_unsure", "candidate_rejected"}
+    source_missing = bool(has_patient_fact and (not statement or not quote))
+
+    patient_value = statement if has_patient_fact and statement else "尚未形成患者确认记录"
+    facts = (
+        DoctorFactProjection(
+            label="患者确认的表述",
+            value=patient_value,
+            source_key="patient" if quote and has_patient_fact else None,
+        ),
+        DoctorFactProjection(
+            label="护理动作",
+            value=_doctor_task_action(task),
+            source_key="nursing" if task is not None else None,
+        ),
+        DoctorFactProjection(
+            label="当前边界",
+            value="尚未提供临床评估",
+            source_key=None,
+        ),
+    )
+    source_actions = tuple(
+        item
+        for item in (
+            ("patient", "查看患者原话") if quote else None,
+            ("nursing", "查看护理动作详情") if task is not None else None,
+            ("previous", "查看上一版措辞") if summary is not None else None,
+            ("audit", "查看完整接力记录") if generation else None,
+        )
+        if item is not None
+    )
+    source_notice_parts = []
+    if trace_degraded:
+        source_notice_parts.append("部分来源暂时无法读取")
+    if unresolved_references:
+        source_notice_parts.append("存在尚未解析的来源")
+    if trace_truncated:
+        source_notice_parts.append("技术来源达到展开上限")
+    source_notice = "；".join(source_notice_parts) + "。" if source_notice_parts else None
+
+    common = {
+        "facts": facts,
+        "summary_id": getattr(summary, "summary_id", None),
+        "summary_version": getattr(summary, "version", None),
+        "patient_quote": quote,
+        "nursing_detail": nursing_detail,
+        "previous_summary_text": previous_summary_text,
+        "source_actions": source_actions,
+        "source_notice": source_notice,
+        "primary_task_id": task_id or None,
+        "decision_boundary": DOCTOR_DECISION_BOUNDARY,
+        "reject_boundary": DOCTOR_REJECT_BOUNDARY,
+        "show_audit_link": bool(generation),
+        "show_knowledge_link": True,
+    }
+
+    def failed(detail: str) -> DoctorVisitBriefProjection:
+        return DoctorVisitBriefProjection(
+            state="error",
+            tone="error",
+            notice_title="这一轮记录暂时无法安全读取",
+            notice_detail=detail,
+            summary_text=None,
+            wording_items=(),
+            primary_action=None,
+            primary_label=None,
+            show_decisions=False,
+            decision_actions=(),
+            recorded_decision=None,
+            decision_note=None,
+            show_nurse_link=False,
+            produced=(),
+            not_produced=("新的复诊速览", "新的措辞决定"),
+            **common,
+        )
+
+    if integrity_issue or unknown_stage or task_mismatch or source_error or source_missing:
+        return failed(
+            "当前步骤没有完成安全读取；原记录仍会保留，系统没有继续生成速览或保存措辞决定。"
+            "请刷新，或前往记录追溯查看停止位置。"
+        )
+
+    if stage == "not_started" or not generation:
+        return DoctorVisitBriefProjection(
+            state="empty",
+            tone="neutral",
+            notice_title="还没有可生成速览的已完成记录核对。",
+            notice_detail="这次合成演示还没有开始。请返回导览准备患者待确认内容。",
+            summary_text=None,
+            wording_items=(),
+            primary_action=None,
+            primary_label=None,
+            show_decisions=False,
+            decision_actions=(),
+            recorded_decision=None,
+            decision_note=None,
+            show_nurse_link=False,
+            produced=(),
+            not_produced=("患者确认记录", "已完成的记录核对", "复诊速览"),
+            **common,
+        )
+
+    terminal_specs = {
+        "task_rejected": (
+            "流程已停止：护士未接受这项核对",
+            "患者确认和任务历史继续保留；没有产生后续沟通文字或医生速览。",
+            "stopped",
+        ),
+        "task_cancelled": (
+            "流程已停止：这项核对已取消",
+            "取消前记录继续保留；没有继续后续业务动作。",
+            "stopped",
+        ),
+        "task_failed": (
+            "任务没有完成，后续流程已停止",
+            "已有历史记录继续保留；系统没有继续生成沟通文字或医生速览。",
+            "error",
+        ),
+        "task_entered_in_error": (
+            "记录错误：任务已标记为不应存在",
+            "历史记录会保留并标明状态；该任务不再被当作有效业务记录。",
+            "error",
+        ),
+    }
+    if stage in terminal_specs:
+        title, detail, tone = terminal_specs[stage]
+        reason = _nurse_task_note(task or {}) or "未记录"
+        return DoctorVisitBriefProjection(
+            state=stage,
+            tone=tone,
+            notice_title=title,
+            notice_detail=f"{detail} 原因：{reason}",
+            summary_text=None,
+            wording_items=(),
+            primary_action=None,
+            primary_label=None,
+            show_decisions=False,
+            decision_actions=(),
+            recorded_decision=None,
+            decision_note=None,
+            show_nurse_link=False,
+            produced=("患者确认记录", "停止前的任务历史"),
+            not_produced=("新的沟通文字", "新的复诊速览", "临床评估", "真实消息发送"),
+            **common,
+        )
+
+    completed_task = task is not None and task.get("status") == "completed"
+    if summary is None:
+        if not completed_task:
+            detail = (
+                "当前还没有完成的护士记录核对。请先返回当前上游步骤；查看或刷新本页不会生成内容。"
+            )
+            return DoctorVisitBriefProjection(
+                state="waiting_for_task",
+                tone="neutral",
+                notice_title="还没有可生成速览的已完成记录核对。",
+                notice_detail=detail,
+                summary_text=None,
+                wording_items=(),
+                primary_action=None,
+                primary_label=None,
+                show_decisions=False,
+                decision_actions=(),
+                recorded_decision=None,
+                decision_note=None,
+                show_nurse_link=task is not None,
+                produced=("患者确认记录",) if statement else (),
+                not_produced=("已完成的记录核对", "复诊速览"),
+                **common,
+            )
+        return DoctorVisitBriefProjection(
+            state="ready_to_generate",
+            tone="active",
+            notice_title="还没有可生成的复诊速览",
+            notice_detail=(
+                "已有一条完成的记录核对。生成速览是明确动作，查看或刷新页面不会自动生成。"
+            ),
+            summary_text=None,
+            wording_items=(),
+            primary_action="generate",
+            primary_label="按当前记录生成速览",
+            show_decisions=False,
+            decision_actions=(),
+            recorded_decision=None,
+            decision_note=None,
+            show_nurse_link=False,
+            produced=("患者确认记录", "已完成的记录核对"),
+            not_produced=("复诊速览", "临床评估", "真实消息发送"),
+            **common,
+        )
+
+    wording_items = project_doctor_summary_wording(
+        summary,
+        confirmed_statement=statement,
+        review=review,
+        review_source_summary=review_source_summary,
+    )
+    summary_text = doctor_summary_text(wording_items)
+    if not completed_task or summary_text is None:
+        return failed(
+            "当前速览与已完成记录核对的精确来源不一致；旧记录仍会保留，系统没有继续保存措辞决定。"
+            "请刷新，或前往记录追溯。"
+        )
+
+    if stage == "story_complete":
+        if stale:
+            return failed(
+                "完成状态与当前速览来源不一致；原记录仍会保留，系统没有继续任何业务写入。"
+            )
+        return DoctorVisitBriefProjection(
+            state="story_complete",
+            tone="complete",
+            notice_title="演示记录链已走完",
+            notice_detail=(
+                "合成演示 9/9 只表示记录链已完成，不代表临床结论；没有真实发送，也没有临床评估。"
+            ),
+            summary_text=summary_text,
+            wording_items=wording_items,
+            primary_action=None,
+            primary_label=None,
+            show_decisions=False,
+            decision_actions=(),
+            recorded_decision=None,
+            decision_note=None,
+            show_nurse_link=False,
+            produced=("患者确认记录", "护士核对历史", "未发送的沟通文字", "复诊速览"),
+            not_produced=("临床评估", "诊断或风险分级", "真实消息发送", "EMR 写回"),
+            **common,
+        )
+
+    if stale:
+        return DoctorVisitBriefProjection(
+            state="stale",
+            tone="caution",
+            notice_title="这版速览基于较早记录。",
+            notice_detail=(
+                "患者确认、护理动作或沟通文字已经变化。旧版本继续保留，但不能冒充当前版本。"
+            ),
+            summary_text=summary_text,
+            wording_items=wording_items,
+            primary_action="refresh",
+            primary_label="按当前记录生成新版本",
+            show_decisions=False,
+            decision_actions=(),
+            recorded_decision=None,
+            decision_note=None,
+            show_nurse_link=False,
+            produced=("旧版复诊速览",),
+            not_produced=("按当前记录生成的新版本",),
+            **common,
+        )
+
+    status = getattr(getattr(summary, "status", None), "value", getattr(summary, "status", None))
+    decision = _decision_value(review)
+    decision_labels = dict(DOCTOR_DECISION_ACTIONS)
+    if status == "safety_reviewed":
+        pending = getattr(progress, "communication_readiness", None) == "pending-approval"
+        return DoctorVisitBriefProjection(
+            state="pending" if pending else "current",
+            tone="caution" if pending else "active",
+            notice_title="当前速览已生成" if pending else None,
+            notice_detail=(
+                "沟通文字仍待护士核对；这不等于已发送、可发送或临床结论。"
+                if pending
+                else None
+            ),
+            summary_text=summary_text,
+            wording_items=wording_items,
+            primary_action=None,
+            primary_label=None,
+            show_decisions=True,
+            decision_actions=DOCTOR_DECISION_ACTIONS,
+            recorded_decision=None,
+            decision_note=None,
+            show_nurse_link=pending,
+            produced=("当前版本复诊速览",),
+            not_produced=("临床评估", "真实消息发送", "EMR 写回"),
+            **common,
+        )
+    if status in {"doctor_reviewed", "rejected"}:
+        if decision not in decision_labels:
+            return failed(
+                "速览状态显示已有措辞决定，但对应的不可变决定记录无法读取；系统没有继续提供写入动作。"
+            )
+        rejected = status == "rejected"
+        return DoctorVisitBriefProjection(
+            state="rejected" if rejected else "reviewed",
+            tone="stopped" if rejected else "complete",
+            notice_title=(
+                "未采用这版速览" if rejected else "已记录这版速览的措辞决定"
+            ),
+            notice_detail=(
+                "原始来源和历史版本继续保留；患者确认记录没有被拒绝或删除。"
+                if rejected
+                else f"当前决定：{decision_labels[decision]}。未写入 EMR，也未形成临床评估。"
+            ),
+            summary_text=summary_text,
+            wording_items=wording_items,
+            primary_action=None,
+            primary_label=None,
+            show_decisions=False,
+            decision_actions=(),
+            recorded_decision=decision_labels[decision],
+            decision_note=getattr(review, "note", None),
+            show_nurse_link=False,
+            produced=("不可变措辞决定",),
+            not_produced=("临床评估", "真实消息发送", "EMR 写回"),
+            **common,
+        )
+    return failed(
+        "当前速览状态无法安全映射；原记录仍会保留，系统没有继续提供任何写入动作。"
     )
 
 
@@ -1672,6 +2265,158 @@ def inject_global_styles(st) -> None:
         }
         .st-key-cc_nurse_record_link a * {color:var(--cc-accent-strong) !important;}
         .st-key-cc_nurse_boundary_expander {margin-top:1.25rem; border-top:1px solid var(--cc-border);}
+        .cc-doctor-shell {display:none;}
+        .stApp:has(.cc-doctor-shell) [data-testid="stSidebar"],
+        .stApp:has(.cc-doctor-shell) [data-testid="stHeader"] {display:none !important;}
+        .stApp:has(.cc-doctor-shell) [data-testid="stAppViewContainer"] {margin-left:0 !important;}
+        .stApp:has(.cc-doctor-shell) .block-container {
+            max-width:1180px; padding:.45rem 1.25rem 3rem;
+        }
+        .stApp:has(.cc-doctor-shell) h1 {
+            margin:0; padding:.1rem 0 .45rem; border-bottom:1px solid var(--cc-text);
+            color:var(--cc-text); font-size:1.9rem; line-height:1.25; font-weight:720;
+            letter-spacing:-.025em;
+        }
+        .cc-doctor-boundary {
+            margin:.35rem 0 .55rem; padding:.38rem 0; border-bottom:1px solid var(--cc-border);
+            color:var(--cc-text); font-size:.95rem; line-height:1.55;
+        }
+        .cc-doctor-feedback {
+            margin:.35rem 0; padding:.48rem .7rem; border-left:3px solid var(--cc-accent);
+            background:var(--cc-surface-subtle); color:var(--cc-text); line-height:1.5;
+        }
+        .st-key-cc_doctor_workspace [data-testid="stHorizontalBlock"] {
+            gap:1.35rem; align-items:stretch;
+        }
+        .st-key-cc_doctor_workspace [data-testid="stHorizontalBlock"]
+        > [data-testid="stColumn"]:first-child {padding-right:.2rem; min-width:0;}
+        .st-key-cc_doctor_workspace [data-testid="stHorizontalBlock"]
+        > [data-testid="stColumn"]:last-child {
+            padding-left:1rem; border-left:1px solid var(--cc-border); min-width:0;
+        }
+        .cc-doctor-facts {margin:.1rem 0 .5rem; border-top:1px solid var(--cc-border);}
+        .cc-doctor-fact {
+            display:grid; grid-template-columns:minmax(10.5rem, .34fr) minmax(0, 1fr);
+            gap:1rem; padding:.48rem 0; border-bottom:1px solid var(--cc-border);
+        }
+        .cc-doctor-fact dt {color:var(--cc-text); font-weight:620; line-height:1.45;}
+        .cc-doctor-fact dd {
+            margin:0; color:var(--cc-text); font-size:1.02rem; line-height:1.45;
+            font-weight:620; overflow-wrap:anywhere;
+        }
+        .cc-doctor-fact:last-child dd {color:var(--cc-accent-strong); font-weight:720;}
+        .cc-doctor-notice {
+            margin:.45rem 0; padding:.55rem .75rem; border-left:3px solid var(--cc-accent);
+            background:var(--cc-surface-subtle); color:var(--cc-text);
+        }
+        .cc-doctor-notice--caution, .cc-doctor-notice--stopped {
+            border-left-color:var(--cc-caution); background:var(--cc-caution-bg);
+        }
+        .cc-doctor-notice--error {border-left-color:var(--cc-danger); background:var(--cc-danger-bg);}
+        .cc-doctor-notice h2 {margin:0 0 .12rem; font-size:1.1rem; line-height:1.35;}
+        .cc-doctor-notice p {margin:0; color:var(--cc-text); font-size:.92rem; line-height:1.5;}
+        .cc-doctor-summary {
+            margin:.55rem 0 .45rem; padding:.55rem 0 .65rem;
+            border-top:1px solid var(--cc-accent); border-bottom:1px solid var(--cc-border);
+        }
+        .cc-doctor-summary h2 {margin:0 0 .28rem; font-size:1.08rem; line-height:1.4;}
+        .cc-doctor-summary p {
+            margin:0; color:var(--cc-text); font-size:1.08rem; line-height:1.65;
+            font-weight:520; overflow-wrap:anywhere;
+        }
+        .cc-doctor-source-title {
+            margin:.05rem 0 .35rem; padding-bottom:.42rem; border-bottom:1px solid var(--cc-accent);
+            color:var(--cc-accent-strong); font-size:1rem !important; line-height:1.4 !important;
+        }
+        .stApp:has(.cc-doctor-shell) [class*="st-key-cc_doctor_source_"] button {
+            width:100%; min-height:44px !important; height:auto !important;
+            padding:.42rem .15rem !important; border:0 !important;
+            border-bottom:1px solid var(--cc-border) !important; border-radius:0 !important;
+            background:transparent !important; color:var(--cc-accent-strong) !important;
+            justify-content:flex-start !important; text-align:left !important;
+            font-size:.9rem !important; line-height:1.35 !important; font-weight:620 !important;
+            box-shadow:none !important;
+        }
+        .stApp:has(.cc-doctor-shell) [class*="st-key-cc_doctor_source_active_"] button {
+            border-bottom:2px solid var(--cc-accent) !important;
+            background:var(--cc-surface-subtle) !important;
+        }
+        .st-key-cc_doctor_record_link a,
+        .st-key-cc_doctor_nurse_link a,
+        .st-key-cc_doctor_home_link a,
+        .st-key-cc_doctor_knowledge_link a {
+            min-height:44px; display:flex; align-items:center; border:0 !important;
+            border-bottom:1px solid var(--cc-border) !important; border-radius:0 !important;
+            background:transparent !important; color:var(--cc-accent-strong) !important;
+            font-size:.94rem !important; line-height:1.35 !important; font-weight:620 !important;
+            text-decoration:none !important;
+        }
+        .st-key-cc_doctor_record_link a *,
+        .st-key-cc_doctor_nurse_link a *,
+        .st-key-cc_doctor_home_link a *,
+        .st-key-cc_doctor_knowledge_link a * {color:var(--cc-accent-strong) !important;}
+        .cc-doctor-source-notice {
+            margin:.55rem 0 0; color:var(--cc-caution); font-size:.82rem; line-height:1.45;
+        }
+        .cc-doctor-disclosure {
+            margin:.7rem 0 0; padding:.6rem 0 .2rem; border-top:1px solid var(--cc-accent);
+        }
+        .cc-doctor-disclosure h2 {margin:0; font-size:1.08rem; line-height:1.4; color:var(--cc-text);}
+        .cc-doctor-quote {
+            margin:.2rem 0; padding:.45rem 0; border:0; color:#331A1A;
+            font-family:"Songti SC", STSong, "Noto Serif CJK SC", serif;
+            font-size:1.35rem; line-height:1.6; overflow-wrap:anywhere;
+        }
+        .cc-doctor-source-caption {margin:.05rem 0 .4rem; color:var(--cc-muted); font-size:.88rem;}
+        .cc-doctor-source-copy {margin:.15rem 0 .5rem; color:var(--cc-text); line-height:1.65;}
+        .st-key-cc_doctor_primary button,
+        .st-key-cc_doctor_submit_decision button {
+            width:100%; min-height:48px !important; height:auto !important;
+            border:1px solid var(--cc-accent) !important; border-radius:5px !important;
+            background:var(--cc-accent) !important; color:#fff !important;
+            font-size:1rem !important; line-height:1.35 !important; font-weight:680 !important;
+            box-shadow:none !important;
+        }
+        .st-key-cc_doctor_primary button:hover,
+        .st-key-cc_doctor_submit_decision button:hover {background:var(--cc-accent-strong) !important;}
+        .cc-doctor-decision-head {
+            margin:.85rem 0 .25rem; padding-top:.65rem; border-top:1px solid var(--cc-text);
+        }
+        .cc-doctor-decision-head h2 {margin:0 0 .15rem; font-size:1.2rem; line-height:1.4;}
+        .cc-doctor-decision-head p {margin:0; color:var(--cc-text); font-size:.92rem; line-height:1.5;}
+        .stApp:has(.cc-doctor-shell) [class*="st-key-cc_doctor_decisions_"]
+        [role="radiogroup"] {
+            display:grid !important; grid-template-columns:repeat(3, minmax(0, 1fr));
+            gap:.55rem !important;
+        }
+        .stApp:has(.cc-doctor-shell) [class*="st-key-cc_doctor_decisions_"]
+        [role="radiogroup"] label {
+            min-height:48px; margin:0 !important; padding:.55rem .7rem !important;
+            border:1px solid var(--cc-accent); border-radius:5px;
+            background:var(--cc-bg); color:var(--cc-accent-strong);
+            align-items:center; font-size:.95rem; line-height:1.35; font-weight:620;
+        }
+        .cc-doctor-reject-boundary {
+            margin:.3rem 0 .45rem; color:var(--cc-text); font-size:.9rem; line-height:1.5;
+        }
+        .cc-doctor-recorded-decision {
+            margin:.8rem 0; padding:.65rem 0; border-top:1px solid var(--cc-border);
+            border-bottom:1px solid var(--cc-border);
+        }
+        .cc-doctor-recorded-decision h2 {margin:0 0 .2rem; font-size:1.1rem;}
+        .cc-doctor-recorded-decision p {margin:.12rem 0; color:var(--cc-text); line-height:1.55;}
+        .cc-doctor-outcomes {
+            display:grid; grid-template-columns:1fr 1fr; gap:1rem;
+            margin:.7rem 0; padding:.7rem 0; border-top:1px solid var(--cc-border);
+            border-bottom:1px solid var(--cc-border);
+        }
+        .cc-doctor-outcomes h3 {margin:0 0 .25rem; font-size:1rem;}
+        .cc-doctor-outcomes ul {margin:0; padding-left:1.15rem; line-height:1.55;}
+        .cc-doctor-knowledge {
+            margin:1.2rem 0 0; padding-top:.7rem; border-top:1px solid var(--cc-border);
+        }
+        .cc-doctor-knowledge h2 {margin:0 0 .15rem; font-size:1rem;}
+        .cc-doctor-knowledge p {margin:0; color:var(--cc-muted); font-size:.88rem; line-height:1.5;}
         :where(a, button, input, select, textarea, [tabindex]):focus-visible {
             outline:3px solid color-mix(in srgb, var(--cc-accent) 45%, white) !important;
             outline-offset:3px !important;
@@ -1776,6 +2521,31 @@ def inject_global_styles(st) -> None:
             .cc-nurse-outcomes {grid-template-columns:1fr; gap:.65rem;}
             .cc-nurse-history {grid-template-columns:4rem minmax(0, 1fr);}
             .cc-nurse-history span:last-child {grid-column:1 / -1;}
+            .stApp:has(.cc-doctor-shell) .block-container {padding:.35rem 1rem 2.5rem;}
+            .stApp:has(.cc-doctor-shell) h1 {
+                padding:.1rem 0 .5rem; font-size:1.65rem !important; line-height:1.25 !important;
+            }
+            .st-key-cc_doctor_workspace [data-testid="stHorizontalBlock"] {
+                flex-direction:column; gap:.55rem;
+            }
+            .st-key-cc_doctor_workspace [data-testid="stHorizontalBlock"]
+            > [data-testid="stColumn"] {
+                width:100% !important; flex:1 1 auto !important; min-width:0 !important;
+                padding-left:0 !important; padding-right:0 !important; border-left:0 !important;
+            }
+            .st-key-cc_doctor_workspace [data-testid="stHorizontalBlock"]
+            > [data-testid="stColumn"]:last-child {
+                margin-top:.25rem; padding-top:.55rem !important; border-top:1px solid var(--cc-border);
+            }
+            .cc-doctor-fact {grid-template-columns:1fr; gap:.08rem; padding:.42rem 0;}
+            .cc-doctor-fact dt {color:var(--cc-muted); font-size:.86rem;}
+            .cc-doctor-fact dd {font-size:1rem;}
+            .cc-doctor-notice {margin:.35rem 0; padding:.48rem .65rem;}
+            .cc-doctor-summary {margin:.4rem 0; padding:.45rem 0 .55rem;}
+            .cc-doctor-summary p {font-size:1rem; line-height:1.58;}
+            .stApp:has(.cc-doctor-shell) [class*="st-key-cc_doctor_decisions_"]
+            [role="radiogroup"] {grid-template-columns:1fr; gap:.45rem !important;}
+            .cc-doctor-outcomes {grid-template-columns:1fr; gap:.65rem;}
         }
         </style>
         """,
