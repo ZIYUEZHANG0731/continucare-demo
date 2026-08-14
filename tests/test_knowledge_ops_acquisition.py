@@ -102,6 +102,19 @@ def _service(tmp_path: Path, *, connector=None, environment="synthetic_test"):
     return service, ledger, quarantine
 
 
+def _ledger_state(ledger: AppendOnlyLedger):
+    return (
+        ledger.verify_all(),
+        tuple(
+            (
+                collection.value,
+                tuple(entry.ref for entry in ledger.list_heads(collection)),
+            )
+            for collection in LedgerCollection
+        ),
+    )
+
+
 def test_offline_pipeline_covers_all_five_validation_domains(tmp_path):
     service, ledger, quarantine = _service(tmp_path)
     results = []
@@ -918,6 +931,7 @@ def test_production_source_promotion_rejects_synthetic_evidence(tmp_path):
         decisions=_DecisionProvider(decision),
         environment=AcquisitionEnvironment.PRODUCTION,
     )
+    before = _ledger_state(ledger)
 
     with pytest.raises(KnowledgeOpsPolicyError, match="rejects synthetic evidence"):
         service.promote(
@@ -926,6 +940,91 @@ def test_production_source_promotion_rejects_synthetic_evidence(tmp_path):
             snapshot_ref=result.snapshot_refs[0],
             promoted_by="system:test",
         )
+    assert _ledger_state(ledger) == before
+
+
+def test_non_synthetic_production_promotion_still_reports_persistent_readiness_gap(
+    tmp_path,
+):
+    ledger, result, _synthetic_evidence = _promotion_context(tmp_path)
+    original_candidate = SourceCandidate.model_validate(
+        ledger.get(result.candidate_refs[0]).payload
+    )
+    candidate = SourceCandidate.model_validate(
+        {
+            **original_candidate.model_dump(mode="json"),
+            "candidate_id": "production-readiness-candidate",
+            "request_id": "production-readiness-probe",
+            "synthetic": False,
+        }
+    )
+    candidate_ref = ledger.append(
+        LedgerCollection.CANDIDATE,
+        candidate.candidate_id,
+        payload_type="source_candidate",
+        payload=candidate,
+        recorded_by="system:nonproduction-readiness-fixture",
+        synthetic=False,
+    ).ref
+    original_snapshot = SourceSnapshot.model_validate(
+        ledger.get(result.snapshot_refs[0]).payload
+    )
+    snapshot = SourceSnapshot.model_validate(
+        {
+            **original_snapshot.model_dump(mode="json"),
+            "snapshot_id": "production-readiness-snapshot",
+            "candidate_ref": candidate_ref.model_dump(mode="json"),
+            "storage": "metadata_only",
+            "quarantine_blob": None,
+            "synthetic": False,
+        }
+    )
+    snapshot_ref = ledger.append(
+        LedgerCollection.SNAPSHOT,
+        snapshot.snapshot_id,
+        payload_type="source_snapshot",
+        payload=snapshot,
+        recorded_by="system:nonproduction-readiness-fixture",
+        synthetic=False,
+    ).ref
+    evidence = tuple(
+        ledger.append(
+            LedgerCollection.REVIEW_EVENT,
+            f"nonproduction-{role}-readiness-fixture",
+            payload_type="review_event",
+            payload={"role": role, "synthetic": False},
+            recorded_by="system:nonproduction-readiness-fixture",
+            synthetic=False,
+        ).ref
+        for role in ("knowledge-curator", "rights-officer")
+    )
+    decision = PromotionDecision(
+        subject_ref=candidate_ref,
+        approved_roles=("knowledge_curator", "rights_officer"),
+        evidence_refs=evidence,
+        synthetic=False,
+        production_eligible=False,
+    )
+    service = SourcePromotionService(
+        bundle=load_builtin_ops_bundle(),
+        ledger=ledger,
+        decisions=_DecisionProvider(decision),
+        environment=AcquisitionEnvironment.PRODUCTION,
+    )
+    before = _ledger_state(ledger)
+
+    with pytest.raises(
+        KnowledgeOpsPolicyError,
+        match="production Source promotion is blocked by persistent readiness Gaps",
+    ):
+        service.promote(
+            source_id="blocked-nonsynthetic-production-source",
+            candidate_ref=candidate_ref,
+            snapshot_ref=snapshot_ref,
+            promoted_by="system:test",
+        )
+
+    assert _ledger_state(ledger) == before
 
 
 def test_source_promotion_rejects_stale_candidate_version(tmp_path):

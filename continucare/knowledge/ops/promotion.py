@@ -278,16 +278,16 @@ class SourcePromotionService:
             production_eligible = False
             registry_status = "synthetic_fixture"
         else:
+            if candidate.synthetic or snapshot.synthetic or decision.synthetic:
+                raise KnowledgeOpsPolicyError(
+                    "production promotion rejects synthetic evidence"
+                )
             if any(
                 ReadinessBlock.PRODUCTION_ELIGIBILITY.value in gap.blocks
                 for gap in self._bundle.readiness_gaps
             ):
                 raise KnowledgeOpsPolicyError(
                     "production Source promotion is blocked by persistent readiness Gaps"
-                )
-            if candidate.synthetic or snapshot.synthetic or decision.synthetic:
-                raise KnowledgeOpsPolicyError(
-                    "production promotion rejects synthetic evidence"
                 )
             if not decision.production_eligible:
                 raise KnowledgeOpsPolicyError(
