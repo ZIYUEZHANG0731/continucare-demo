@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from urllib.parse import urlparse
 
 
@@ -53,6 +54,59 @@ PATIENT_EMERGENCY_NOTICE = (
 )
 
 
+NURSE_ROLE_BOUNDARY = (
+    "这里核对的是患者记录，不判断风险，也不提供诊疗建议。"
+)
+
+
+NURSE_RESULT_BOUNDARY = (
+    "这里只记录核对结果，不形成诊断、风险等级或治疗建议。"
+)
+
+
+NURSE_STOP_CONSEQUENCE = (
+    "这会停止后续业务动作；不会生成新的沟通文字或医生速览。"
+    "已有记录仍会保留供追溯。"
+)
+
+
+_NURSE_KNOWN_STAGES = {
+    "not_started",
+    "candidate_ready",
+    "candidate_unsure",
+    "candidate_rejected",
+    "patient_confirmed",
+    "task_requested",
+    "nurse_received",
+    "nurse_in_progress",
+    "task_rejected",
+    "task_cancelled",
+    "task_failed",
+    "task_entered_in_error",
+    "communication_pending",
+    "doctor_brief_pending",
+    "communication_ready",
+    "doctor_brief_ready",
+    "story_complete",
+}
+
+
+_NURSE_STAGE_TASK_STATUS = {
+    "task_requested": "requested",
+    "nurse_received": "received",
+    "nurse_in_progress": "in-progress",
+    "task_rejected": "rejected",
+    "task_cancelled": "cancelled",
+    "task_failed": "failed",
+    "task_entered_in_error": "entered-in-error",
+    "communication_pending": "completed",
+    "doctor_brief_pending": "completed",
+    "communication_ready": "completed",
+    "doctor_brief_ready": "completed",
+    "story_complete": "completed",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class DemoGuideProjection:
     """Human-language home projection derived only from persisted progress."""
@@ -89,6 +143,416 @@ class PatientFollowupProjection:
     show_record_link: bool
     show_home_link: bool
     show_nurse_demo_link: bool
+
+
+@dataclass(frozen=True, slots=True)
+class NurseTaskProjection:
+    """One persisted manual-review Task in nurse-facing language."""
+
+    task_id: str
+    submitted_at: str
+    patient_label: str
+    queue: str
+    tone: str
+    status_title: str
+    status_detail: str
+    original_quote: str | None
+    confirmed_statement: str
+    primary_action: str | None
+    primary_label: str | None
+    primary_writes: bool
+    secondary_actions: tuple[tuple[str, str], ...]
+    outcome_label: str | None
+    review_note: str | None
+    communication_text: str | None
+    communication_marker: str | None
+    stop_reason: str | None
+    produced: tuple[str, ...]
+    not_produced: tuple[str, ...]
+    history: tuple[tuple[str, str, str], ...]
+    technical_references: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NurseWorkbenchProjection:
+    """Pure nurse workbench projection derived from already-read facts."""
+
+    state: str
+    tone: str
+    notice_title: str | None
+    notice_detail: str | None
+    pending_tasks: tuple[NurseTaskProjection, ...]
+    completed_tasks: tuple[NurseTaskProjection, ...]
+    selected_task_id: str | None
+
+
+def _nurse_task_note(task: dict) -> str | None:
+    notes = task.get("note", [])
+    if not isinstance(notes, list):
+        return None
+    values = [
+        str(item.get("text") or "").strip()
+        for item in notes
+        if isinstance(item, dict) and str(item.get("text") or "").strip()
+    ]
+    return values[-1] if values else None
+
+
+def _nurse_task_references(task: dict) -> tuple[str, ...]:
+    references = {
+        str(task.get("reasonReference", {}).get("reference") or "").strip(),
+        *(
+            str(item.get("valueReference", {}).get("reference") or "").strip()
+            for item in task.get("input", [])
+            if isinstance(item, dict)
+        ),
+    }
+    return tuple(sorted(item for item in references if item))
+
+
+def _nurse_sort_key(item: NurseTaskProjection):
+    try:
+        instant = datetime.fromisoformat(item.submitted_at.replace("Z", "+00:00"))
+        if instant.tzinfo is None:
+            raise ValueError
+    except (TypeError, ValueError):
+        return (1, item.submitted_at, item.task_id)
+    return (0, instant, item.task_id)
+
+
+def _fail_closed_nurse_task(
+    task: dict,
+    context: dict,
+    *,
+    detail: str,
+) -> NurseTaskProjection:
+    task_id = str(task.get("id") or "unknown-task")
+    return NurseTaskProjection(
+        task_id=task_id,
+        submitted_at=str(task.get("authoredOn") or ""),
+        patient_label=str(context.get("patient_label") or "合成患者"),
+        queue="completed",
+        tone="error",
+        status_title="这项记录暂时无法安全处理",
+        status_detail=detail,
+        original_quote=context.get("original_quote"),
+        confirmed_statement=str(
+            context.get("confirmed_statement") or "患者已确认的表述暂时无法读取"
+        ),
+        primary_action=None,
+        primary_label=None,
+        primary_writes=False,
+        secondary_actions=(),
+        outcome_label=context.get("outcome_label"),
+        review_note=context.get("review_note"),
+        communication_text=context.get("communication_text"),
+        communication_marker=None,
+        stop_reason=None,
+        produced=(),
+        not_produced=("后续业务动作",),
+        history=tuple(context.get("history") or ()),
+        technical_references=_nurse_task_references(task),
+    )
+
+
+def _project_nurse_task(
+    task: dict,
+    context: dict,
+    *,
+    story_complete: bool,
+) -> NurseTaskProjection:
+    task_id = str(task.get("id") or "")
+    submitted_at = str(task.get("authoredOn") or "")
+    status = str(task.get("status") or "")
+    if (
+        task.get("resourceType") != "Task"
+        or not task_id
+        or not submitted_at
+        or not status
+    ):
+        return _fail_closed_nurse_task(
+            task,
+            context,
+            detail="任务字段不完整；页面没有推测下一步，也没有继续任何写入。",
+        )
+
+    common = {
+        "task_id": task_id,
+        "submitted_at": submitted_at,
+        "patient_label": str(context.get("patient_label") or "合成患者"),
+        "original_quote": context.get("original_quote"),
+        "confirmed_statement": str(
+            context.get("confirmed_statement") or "患者已确认一条随访表述"
+        ),
+        "outcome_label": context.get("outcome_label"),
+        "review_note": context.get("review_note"),
+        "communication_text": context.get("communication_text"),
+        "history": tuple(context.get("history") or ()),
+        "technical_references": _nurse_task_references(task),
+    }
+    if status in {"requested", "received", "in-progress", "completed"} and (
+        not context.get("original_quote")
+        or not str(context.get("confirmed_statement") or "").strip()
+    ):
+        return _fail_closed_nurse_task(
+            task,
+            context,
+            detail="患者确认内容或原话来源不完整；页面没有推测下一步。",
+        )
+    if story_complete:
+        return NurseTaskProjection(
+            queue="completed",
+            tone="complete",
+            status_title="演示记录链已走完",
+            status_detail="这只表示合成接力记录已完成；不代表临床完成、治疗完成或风险解除。",
+            primary_action=None,
+            primary_label=None,
+            primary_writes=False,
+            secondary_actions=(),
+            communication_marker="模拟（未真实发送）" if context.get("communication_text") else None,
+            stop_reason=None,
+            produced=("患者确认记录", "护士核对历史", "未发送的沟通文字", "复诊速览"),
+            not_produced=("临床评估", "真实消息发送"),
+            **common,
+        )
+
+    action_specs = {
+        "requested": (
+            "等待接手",
+            "这是一条例行记录核对，按最初提交时间进入队列。",
+            "acknowledge",
+            "接手这项核对",
+            (("cancel", "取消任务"),),
+        ),
+        "received": (
+            "已接手",
+            "下一步是开始核对患者已经确认的记录。",
+            "start",
+            "开始核对",
+            (("reject", "拒绝处理"), ("cancel", "取消任务")),
+        ),
+        "in-progress": (
+            "正在核对",
+            "请选择一个受控结果，并留下本次处理说明。",
+            "record_outcome",
+            "记录结果并生成沟通文字",
+            (("cancel", "取消任务"),),
+        ),
+    }
+    if status in action_specs:
+        title, detail, action, label, secondary = action_specs[status]
+        return NurseTaskProjection(
+            queue="pending",
+            tone="active",
+            status_title=title,
+            status_detail=detail,
+            primary_action=action,
+            primary_label=label,
+            primary_writes=True,
+            secondary_actions=secondary,
+            communication_marker=None,
+            stop_reason=None,
+            produced=(),
+            not_produced=(),
+            **common,
+        )
+
+    if status == "completed":
+        readiness = context.get("communication_readiness")
+        has_pending_brief = bool(context.get("has_pending_brief"))
+        if readiness == "pending-approval" and not has_pending_brief:
+            return NurseTaskProjection(
+                queue="pending",
+                tone="caution",
+                status_title="沟通文字待核对",
+                status_detail="需要先由医生按当前记录明确生成一版复诊速览。查看页面不会自动生成。",
+                primary_action="open_doctor",
+                primary_label="前往复诊速览",
+                primary_writes=False,
+                secondary_actions=(),
+                communication_marker="模拟（未真实发送）",
+                stop_reason=None,
+                produced=("护士核对结果", "待人工核对的沟通文字"),
+                not_produced=("按当前来源生成的复诊速览", "真实消息发送"),
+                **common,
+            )
+        if readiness == "pending-approval" and has_pending_brief:
+            return NurseTaskProjection(
+                queue="pending",
+                tone="caution",
+                status_title="沟通文字待核对",
+                status_detail="复诊速览已生成；现在只需人工核对沟通文字。",
+                primary_action="approve_draft",
+                primary_label="确认文字已核对",
+                primary_writes=True,
+                secondary_actions=(),
+                communication_marker="模拟（未真实发送）",
+                stop_reason=None,
+                produced=("护士核对结果", "待人工核对的沟通文字", "当前版本复诊速览"),
+                not_produced=("真实消息发送",),
+                **common,
+            )
+        if readiness == "ready-to-send":
+            return NurseTaskProjection(
+                queue="completed",
+                tone="complete",
+                status_title="核对已完成",
+                status_detail="沟通文字已经人工核对；本演示不会发送。",
+                primary_action="open_doctor",
+                primary_label="前往复诊速览",
+                primary_writes=False,
+                secondary_actions=(),
+                communication_marker="模拟（未真实发送）",
+                stop_reason=None,
+                produced=("护士核对结果", "已人工核对的沟通文字"),
+                not_produced=("真实消息发送",),
+                **common,
+            )
+        return _fail_closed_nurse_task(
+            task,
+            context,
+            detail="已完成任务与沟通文字状态不一致；页面没有推测下一步。",
+        )
+
+    if status in {"rejected", "cancelled", "failed", "entered-in-error"}:
+        is_error = status in {"failed", "entered-in-error"}
+        reason = _nurse_task_note(task) or "未记录"
+        title = (
+            "记录错误：任务已标记为不应存在"
+            if status == "entered-in-error"
+            else "任务没有完成，后续流程已停止"
+            if status == "failed"
+            else "流程已停止"
+        )
+        detail = (
+            "已有历史记录会保留并标明状态；后续业务动作已经停止。"
+            if is_error
+            else "已有记录继续保留供追溯，不再提供业务动作。"
+        )
+        has_communication = bool(context.get("communication_text"))
+        return NurseTaskProjection(
+            queue="completed",
+            tone="error" if is_error else "stopped",
+            status_title=title,
+            status_detail=detail,
+            primary_action=None,
+            primary_label=None,
+            primary_writes=False,
+            secondary_actions=(),
+            communication_marker=(
+                "模拟（未真实发送）" if has_communication else None
+            ),
+            stop_reason=reason,
+            produced=("患者确认记录", "任务历史") + (("既有沟通文字",) if has_communication else ()),
+            not_produced=("新的沟通文字", "新的医生速览", "真实消息发送"),
+            **common,
+        )
+
+    return _fail_closed_nurse_task(
+        task,
+        context,
+        detail="任务状态无法安全映射；页面没有推测下一步，也没有继续任何写入。",
+    )
+
+
+def project_nurse_workbench(
+    progress,
+    *,
+    tasks: tuple[dict, ...] = (),
+    task_contexts: dict[str, dict] | None = None,
+    selected_task_id: str | None = None,
+) -> NurseWorkbenchProjection:
+    """Project the nurse page without caching or mutating business state."""
+
+    contexts = task_contexts or {}
+    stage = getattr(getattr(progress, "stage", None), "value", None)
+    if stage is None:
+        stage = str(getattr(progress, "stage", ""))
+    integrity_issue = bool(getattr(progress, "integrity_issue", None))
+    unknown_stage = stage not in _NURSE_KNOWN_STAGES
+    story_complete = stage == "story_complete"
+    progress_task_id = str(getattr(progress, "task_id", None) or "")
+    expected_task_status = _NURSE_STAGE_TASK_STATUS.get(stage)
+
+    projected = []
+    has_stage_task_mismatch = False
+    for task in tasks:
+        task_id = str(task.get("id") or "")
+        context = contexts.get(task_id, {})
+        stage_task_mismatch = bool(
+            progress_task_id
+            and task_id == progress_task_id
+            and str(task.get("status") or "") != expected_task_status
+        )
+        has_stage_task_mismatch = has_stage_task_mismatch or stage_task_mismatch
+        if integrity_issue or unknown_stage or stage_task_mismatch:
+            item = _fail_closed_nurse_task(
+                task,
+                context,
+                detail=(
+                    "这一轮记录存在完整性问题；页面没有继续任何业务动作。"
+                    if integrity_issue
+                    else "任务状态与当前记录链不一致；页面没有推测下一步，也没有继续任何业务动作。"
+                    if stage_task_mismatch
+                    else "这一轮状态无法安全映射；页面没有继续任何业务动作。"
+                ),
+            )
+        else:
+            item = _project_nurse_task(
+                task,
+                context,
+                story_complete=story_complete,
+            )
+        projected.append(item)
+
+    pending = tuple(
+        sorted(
+            (item for item in projected if item.queue == "pending"),
+            key=_nurse_sort_key,
+        )
+    )
+    completed = tuple(
+        sorted(
+            (item for item in projected if item.queue == "completed"),
+            key=_nurse_sort_key,
+        )
+    )
+    available_ids = {item.task_id for item in (*pending, *completed)}
+    selected = selected_task_id if selected_task_id in available_ids else None
+    if selected is None and pending:
+        selected = pending[0].task_id
+    if selected is None and completed:
+        selected = completed[0].task_id
+
+    if integrity_issue or unknown_stage or has_stage_task_mismatch:
+        return NurseWorkbenchProjection(
+            state="error",
+            tone="error",
+            notice_title="这一轮记录暂时无法安全读取",
+            notice_detail="页面保持只读，没有推测下一步，也没有继续任何业务动作。",
+            pending_tasks=pending,
+            completed_tasks=completed,
+            selected_task_id=selected,
+        )
+    if not projected:
+        return NurseWorkbenchProjection(
+            state="empty",
+            tone="neutral",
+            notice_title="目前没有待核对记录",
+            notice_detail="新的例行记录核对会按最初提交时间出现在这里。",
+            pending_tasks=(),
+            completed_tasks=(),
+            selected_task_id=None,
+        )
+    return NurseWorkbenchProjection(
+        state="ready",
+        tone="complete" if story_complete else "active",
+        notice_title=None,
+        notice_detail=None,
+        pending_tasks=pending,
+        completed_tasks=completed,
+        selected_task_id=selected,
+    )
 
 
 def patient_recorded_meaning(candidate) -> str:
@@ -1040,6 +1504,174 @@ def inject_global_styles(st) -> None:
         .st-key-cc_patient_other_methods [data-testid="stCheckbox"] label {
             color:var(--cc-muted); font-size:.92rem; font-weight:580;
         }
+        .cc-nurse-shell {display:none;}
+        .stApp:has(.cc-nurse-shell) [data-testid="stSidebar"],
+        .stApp:has(.cc-nurse-shell) [data-testid="stHeader"] {display:none !important;}
+        .stApp:has(.cc-nurse-shell) [data-testid="stAppViewContainer"] {margin-left:0 !important;}
+        .stApp:has(.cc-nurse-shell) .block-container {
+            max-width:1180px; padding:.45rem 1.25rem 3rem;
+        }
+        .stApp:has(.cc-nurse-shell) h1 {
+            margin:0; padding:.1rem 0 .45rem; border-bottom:1px solid var(--cc-text);
+            color:var(--cc-text); font-size:1.9rem; line-height:1.25; font-weight:720;
+            letter-spacing:-.025em;
+        }
+        .cc-nurse-boundary {
+            margin:.35rem 0 .65rem; padding:.4rem 0; border-bottom:1px solid var(--cc-border);
+            color:var(--cc-text); font-size:.95rem; line-height:1.6;
+        }
+        .st-key-cc_nurse_workspace [data-testid="stHorizontalBlock"]:has(.cc-nurse-sort) {
+            gap:0 !important; align-items:stretch;
+        }
+        .st-key-cc_nurse_workspace [data-testid="stHorizontalBlock"]:has(.cc-nurse-sort)
+        > [data-testid="stColumn"]:first-child {
+            padding-right:1.15rem; border-right:1px solid var(--cc-border);
+        }
+        .st-key-cc_nurse_workspace [data-testid="stHorizontalBlock"]:has(.cc-nurse-sort)
+        > [data-testid="stColumn"]:last-child {
+            padding-left:1.4rem; min-width:0;
+        }
+        .stApp:has(.cc-nurse-shell) [data-testid="stTabs"] [role="tablist"] {
+            gap:1.1rem; border-bottom:1px solid var(--cc-border);
+        }
+        .stApp:has(.cc-nurse-shell) [data-testid="stTabs"] [role="tab"] {
+            min-height:44px; padding:.45rem .05rem; color:var(--cc-muted);
+            font-size:.98rem; font-weight:640;
+        }
+        .stApp:has(.cc-nurse-shell) [data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+            color:var(--cc-accent-strong) !important;
+        }
+        .stApp:has(.cc-nurse-shell) [data-testid="stTabs"]
+        [role="tab"][aria-selected="true"] .react-aria-SelectionIndicator {
+            background:var(--cc-accent) !important;
+        }
+        .cc-nurse-sort {
+            margin:.7rem 0 .45rem; color:var(--cc-muted); font-size:.88rem; line-height:1.5;
+        }
+        [class*="st-key-cc_nurse_task_"] button {
+            width:100%; min-height:44px !important; height:auto !important;
+            padding:.58rem .65rem !important; border:0 !important;
+            border-top:1px solid var(--cc-border) !important; border-radius:0 !important;
+            background:transparent !important; color:var(--cc-text) !important;
+            justify-content:flex-start !important; text-align:left !important;
+            font-size:.96rem !important; line-height:1.35 !important; font-weight:650 !important;
+            box-shadow:none !important;
+        }
+        [class*="st-key-cc_nurse_task_"] button:hover {background:var(--cc-surface-subtle) !important;}
+        [class*="st-key-cc_nurse_task_selected_"] button {
+            background:var(--cc-surface-subtle) !important;
+            border-left:3px solid var(--cc-accent) !important;
+        }
+        [class*="st-key-cc_nurse_disclosure_"] button {
+            width:100%; min-height:44px !important; height:auto !important;
+            padding:.4rem .25rem !important; border:0 !important;
+            border-bottom:1px solid var(--cc-border) !important; border-radius:0 !important;
+            background:transparent !important; color:var(--cc-accent-strong) !important;
+            font-size:.9rem !important; line-height:1.35 !important; font-weight:620 !important;
+            box-shadow:none !important;
+        }
+        [class*="st-key-cc_nurse_disclosure_active_"] button {
+            border-bottom:2px solid var(--cc-accent) !important;
+            background:var(--cc-surface-subtle) !important;
+        }
+        .cc-nurse-task-meta {
+            margin:-.25rem 0 .45rem; padding:0 .65rem .45rem;
+            color:var(--cc-muted); font-size:.8rem; line-height:1.45;
+        }
+        .cc-nurse-empty {
+            margin:.8rem 0; padding:.85rem 0; border-top:1px solid var(--cc-border);
+            border-bottom:1px solid var(--cc-border); color:var(--cc-muted); line-height:1.6;
+        }
+        .cc-nurse-detail-head {
+            display:grid; grid-template-columns:minmax(8.5rem, .34fr) minmax(0, 1fr);
+            gap:1rem; padding:.55rem 0; border-bottom:1px solid var(--cc-border);
+        }
+        .cc-nurse-detail-head dt {font-weight:620; color:var(--cc-muted);}
+        .cc-nurse-detail-head dd {
+            margin:0; color:var(--cc-text); font-weight:620; overflow-wrap:anywhere;
+        }
+        .cc-nurse-statement {
+            margin:.55rem 0 0; padding:.75rem 0; border-bottom:1px solid var(--cc-border);
+        }
+        .cc-nurse-statement span {
+            display:block; margin-bottom:.18rem; color:var(--cc-muted);
+            font-size:.88rem; font-weight:580;
+        }
+        .cc-nurse-statement strong {
+            color:var(--cc-text); font-size:1.38rem; line-height:1.45; font-weight:690;
+        }
+        .cc-nurse-status {
+            margin:.75rem 0; padding:.58rem .8rem; border-left:3px solid var(--cc-accent);
+            background:var(--cc-surface-subtle); color:var(--cc-text);
+        }
+        .cc-nurse-status--caution, .cc-nurse-status--stopped {
+            border-left-color:var(--cc-caution); background:var(--cc-caution-bg);
+        }
+        .cc-nurse-status--error {border-left-color:var(--cc-danger); background:var(--cc-danger-bg);}
+        .cc-nurse-status h2 {margin:0 0 .15rem; font-size:1.25rem; line-height:1.4;}
+        .cc-nurse-status p {margin:0; line-height:1.55;}
+        .cc-nurse-action-title {
+            margin:.8rem 0 .35rem; color:var(--cc-muted); font-size:.88rem; font-weight:620;
+        }
+        .st-key-cc_nurse_primary button,
+        .st-key-cc_nurse_primary_link a {
+            width:100%; min-height:48px !important; height:auto !important;
+            display:flex; align-items:center; justify-content:center;
+            border:1px solid var(--cc-accent) !important; border-radius:5px !important;
+            background:var(--cc-accent) !important; color:#fff !important;
+            font-size:1rem !important; line-height:1.35 !important; font-weight:680 !important;
+            text-decoration:none !important; box-shadow:none !important;
+        }
+        .st-key-cc_nurse_primary button:hover,
+        .st-key-cc_nurse_primary_link a:hover {background:var(--cc-accent-strong) !important;}
+        .st-key-cc_nurse_primary_link a * {color:#fff !important;}
+        [class*="st-key-cc_nurse_secondary_"] button {
+            min-height:44px !important; height:auto !important; border:0 !important;
+            border-bottom:1px solid var(--cc-border) !important; border-radius:0 !important;
+            background:transparent !important; color:var(--cc-accent-strong) !important;
+            font-size:.94rem !important; font-weight:620 !important; box-shadow:none !important;
+        }
+        .cc-nurse-result-boundary {
+            margin:.6rem 0; padding:.62rem .75rem; border:1px solid var(--cc-border);
+            background:var(--cc-surface-subtle); color:var(--cc-text); line-height:1.55;
+        }
+        .cc-nurse-communication {
+            display:grid; grid-template-columns:minmax(8.5rem, .34fr) minmax(0, 1fr);
+            gap:.2rem 1rem; margin:.5rem 0; padding:.55rem 0; border-top:1px solid var(--cc-border);
+            border-bottom:1px solid var(--cc-border);
+        }
+        .cc-nurse-communication h3 {grid-row:1 / span 2; margin:0; font-size:1rem; line-height:1.5;}
+        .cc-nurse-communication p {margin:0; color:var(--cc-text); line-height:1.5;}
+        .cc-nurse-mock {color:var(--cc-caution) !important; font-size:.88rem; font-weight:650;}
+        .cc-nurse-consequence {
+            margin:.7rem 0; padding:.7rem .8rem; border:1px solid var(--cc-caution);
+            background:var(--cc-caution-bg); color:#7A3E00; line-height:1.6;
+        }
+        [class*="st-key-cc_nurse_confirm_"] button {
+            min-height:46px !important; height:auto !important; border:1px solid var(--cc-caution) !important;
+            background:var(--cc-caution) !important; color:#fff !important; font-weight:680 !important;
+        }
+        .cc-nurse-outcomes {
+            display:grid; grid-template-columns:1fr 1fr; gap:1rem;
+            margin:.7rem 0; padding:.75rem 0; border-top:1px solid var(--cc-border);
+            border-bottom:1px solid var(--cc-border);
+        }
+        .cc-nurse-outcomes h3 {margin:0 0 .25rem; font-size:1rem;}
+        .cc-nurse-outcomes ul {margin:0; padding-left:1.15rem; line-height:1.6;}
+        .cc-nurse-history {
+            display:grid; grid-template-columns:4.5rem minmax(5.5rem, .35fr) minmax(0, 1fr);
+            gap:.65rem; padding:.45rem 0; border-bottom:1px solid var(--cc-border);
+            color:var(--cc-text); font-size:.9rem; line-height:1.5;
+        }
+        .cc-nurse-technical {overflow-wrap:anywhere; word-break:break-word;}
+        .st-key-cc_nurse_record_link a {
+            min-height:44px; display:flex; align-items:center; border:0 !important;
+            border-bottom:1px solid var(--cc-border) !important; border-radius:0 !important;
+            background:transparent !important; color:var(--cc-accent-strong) !important;
+            font-size:.96rem !important; font-weight:620 !important; text-decoration:none !important;
+        }
+        .st-key-cc_nurse_record_link a * {color:var(--cc-accent-strong) !important;}
+        .st-key-cc_nurse_boundary_expander {margin-top:1.25rem; border-top:1px solid var(--cc-border);}
         :where(a, button, input, select, textarea, [tabindex]):focus-visible {
             outline:3px solid color-mix(in srgb, var(--cc-accent) 45%, white) !important;
             outline-offset:3px !important;
@@ -1107,6 +1739,43 @@ def inject_global_styles(st) -> None:
             .cc-patient-consequence {padding:.42rem .65rem; font-size:.88rem; line-height:1.42;}
             .cc-patient-boundary {padding:.45rem .65rem; font-size:.88rem; line-height:1.42;}
             .cc-patient-outcomes {grid-template-columns:1fr; gap:.65rem;}
+            .stApp:has(.cc-nurse-shell) .block-container {padding:.35rem 1rem 2.5rem;}
+            .stApp:has(.cc-nurse-shell) h1 {
+                padding:.1rem 0 .5rem; font-size:1.65rem !important; line-height:1.25 !important;
+            }
+            .st-key-cc_nurse_workspace [data-testid="stHorizontalBlock"]:has(.cc-nurse-sort) {
+                flex-direction:column; gap:.55rem !important;
+            }
+            .st-key-cc_nurse_workspace [data-testid="stHorizontalBlock"]:has(.cc-nurse-sort)
+            > [data-testid="stColumn"] {
+                width:100% !important; flex:1 1 auto !important; min-width:0 !important;
+                padding-left:0 !important; padding-right:0 !important; border-right:0 !important;
+            }
+            .st-key-cc_nurse_workspace [data-testid="stHorizontalBlock"]:has(.cc-nurse-sort)
+            > [data-testid="stColumn"]:first-child {
+                padding-bottom:.45rem; border-bottom:1px solid var(--cc-border);
+            }
+            .st-key-cc_nurse_workspace [data-testid="stHorizontalBlock"]:not(:has(.cc-nurse-sort)) {
+                flex-direction:row !important; gap:.35rem !important;
+            }
+            .st-key-cc_nurse_workspace [data-testid="stHorizontalBlock"]:not(:has(.cc-nurse-sort))
+            > [data-testid="stColumn"] {
+                width:auto !important; flex:1 1 0 !important; min-width:0 !important;
+                padding-left:0 !important; padding-right:0 !important; border:0 !important;
+            }
+            .cc-nurse-detail-head {
+                grid-template-columns:7.4rem minmax(0, 1fr); gap:.45rem; padding:.4rem 0;
+            }
+            .cc-nurse-statement {margin:.35rem 0 0; padding:.5rem 0;}
+            .cc-nurse-statement strong {font-size:1.25rem;}
+            .cc-nurse-status {margin:.4rem 0; padding:.5rem .65rem;}
+            .cc-nurse-status h2 {font-size:1.15rem !important;}
+            .cc-nurse-action-title {margin:.45rem 0 .25rem;}
+            .cc-nurse-communication {grid-template-columns:1fr; gap:.3rem;}
+            .cc-nurse-communication h3 {grid-row:auto;}
+            .cc-nurse-outcomes {grid-template-columns:1fr; gap:.65rem;}
+            .cc-nurse-history {grid-template-columns:4rem minmax(0, 1fr);}
+            .cc-nurse-history span:last-child {grid-column:1 / -1;}
         }
         </style>
         """,
