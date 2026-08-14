@@ -37,12 +37,14 @@ from continucare.knowledge.ops.models import (
 )
 from continucare.knowledge.ops.promotion import GovernedSourceV2, PromotionDecision
 from continucare.knowledge.ops.security import (
+    DigestTrustProfile,
     assert_no_sensitive_data,
     digest_derived_internal_id,
 )
 from continucare.knowledge.ops.store import (
     AppendOnlyLedger,
     LedgerCollection,
+    LedgerEntry,
     LedgerRef,
 )
 
@@ -695,7 +697,10 @@ class ReviewPacketBuilder:
             raise KnowledgeOpsPolicyError("Review subject collection is incompatible")
         if self._ledger.head(subject_ref.collection, subject_ref.record_id).ref != subject_ref:
             raise KnowledgeOpsPolicyError("Review Packet cannot target a stale subject")
-        assert_no_sensitive_data(subject_entry.payload)
+        _assert_review_subject_no_sensitive_data(
+            subject_kind=subject_kind_value,
+            entry=subject_entry,
+        )
         author_provenance = _subject_author_provenance(
             gate=GovernanceGate(gate),
             subject_payload=subject_entry.payload,
@@ -732,6 +737,7 @@ class ReviewPacketBuilder:
                     "Review subject does not reference a SourceCandidate"
                 )
             candidate = SourceCandidate.model_validate(candidate_entry.payload)
+            assert_no_sensitive_data(candidate.model_dump(mode="json"))
             profile = next(
                 (
                     item
@@ -784,17 +790,25 @@ class ReviewPacketBuilder:
         )
 
         synthetic = subject_entry.synthetic
-        for reference in (*evidence_refs, *effective_open_gap_refs):
+        for reference in evidence_refs:
             entry = self._ledger.get(reference)
             assert_no_sensitive_data(entry.payload)
             synthetic = synthetic or entry.synthetic
         for reference in effective_open_gap_refs:
             entry = self._ledger.get(reference)
-            if entry.collection != LedgerCollection.GAP.value:
+            if (
+                entry.collection != LedgerCollection.GAP.value
+                or entry.payload_type != "knowledge_gap"
+            ):
                 raise KnowledgeOpsPolicyError("open_gap_refs must reference KnowledgeGap")
             gap = KnowledgeGap.model_validate(entry.payload)
+            assert_no_sensitive_data(
+                gap.model_dump(mode="json"),
+                digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
+            )
             if gap.lifecycle != "open":
                 raise KnowledgeOpsPolicyError("Review Packet gap must be open")
+            synthetic = synthetic or entry.synthetic
 
         timestamp = generated_at or datetime.now(timezone.utc)
         subject = ReviewSubject(subject_kind=subject_kind, object_ref=subject_ref)
@@ -820,6 +834,10 @@ class ReviewPacketBuilder:
             generated_at=timestamp,
             generated_by=generated_by,
             synthetic=synthetic,
+        )
+        assert_no_sensitive_data(
+            packet.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.REVIEW_PACKET,
         )
         return self._ledger.append(
             LedgerCollection.REVIEW_PACKET,
@@ -867,7 +885,10 @@ class ReviewEventService:
             ledger=self._ledger,
             packet=packet,
         )
-        assert_no_sensitive_data(packet_entry.payload)
+        assert_no_sensitive_data(
+            packet_entry.payload,
+            digest_trust_profile=DigestTrustProfile.REVIEW_PACKET,
+        )
         timestamp = decided_at or datetime.now(timezone.utc)
         if timestamp.tzinfo is None:
             raise KnowledgeOpsPolicyError("review decision time must include a timezone")
@@ -912,11 +933,9 @@ class ReviewEventService:
 
         supplemental_evidence_synthetic = False
         if decision_payload is not None:
-            assert_no_sensitive_data(
-                {
-                    "decision_payload": decision_payload.model_dump(mode="json"),
-                    "rationale": rationale,
-                }
+            _assert_review_open_text_no_sensitive_data(
+                decision_payload=decision_payload,
+                rationale=rationale,
             )
             for check in decision_payload.checklist:
                 for evidence_ref in check.evidence_refs:
@@ -926,7 +945,10 @@ class ReviewEventService:
                         supplemental_evidence_synthetic or evidence_entry.synthetic
                     )
         else:
-            assert_no_sensitive_data({"rationale": rationale})
+            _assert_review_open_text_no_sensitive_data(
+                decision_payload=None,
+                rationale=rationale,
+            )
 
         gate_policy = self._bundle.review_gate(packet.gate)
         if identity.synthetic:
@@ -1013,6 +1035,27 @@ class ReviewEventService:
         if attestation is None:
             raise KnowledgeOpsPolicyError("review event attestation was denied")
         event = ReviewEvent(**event_fields, review_attestation=attestation)
+        try:
+            attestation_verified = self._reviewers.verify_review_attestation(
+                identity,
+                role=role,
+                scope=packet.scope,
+                event_claim_sha256=_review_event_claim_sha256(event),
+                attestation=event.review_attestation,
+                evaluated_at=timestamp,
+            )
+        except Exception as exc:
+            raise KnowledgeOpsPolicyError(
+                "issued review event attestation could not be verified"
+            ) from exc
+        if not attestation_verified:
+            raise KnowledgeOpsPolicyError(
+                "issued review event attestation failed verification"
+            )
+        assert_no_sensitive_data(
+            event.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.REVIEW_EVENT,
+        )
         return self._ledger.append(
             LedgerCollection.REVIEW_EVENT,
             event_record_id,
@@ -1067,7 +1110,10 @@ class ReviewLedgerDecisionProvider:
                 ledger=self._ledger,
                 packet=packet,
             )
-            assert_no_sensitive_data(packet_head.payload)
+            assert_no_sensitive_data(
+                packet_head.payload,
+                digest_trust_profile=DigestTrustProfile.REVIEW_PACKET,
+            )
         except (
             KeyError,
             KnowledgeOpsIntegrityError,
@@ -1122,7 +1168,10 @@ class ReviewLedgerDecisionProvider:
             ):
                 return None
             try:
-                assert_no_sensitive_data(head.payload)
+                _assert_review_open_text_no_sensitive_data(
+                    decision_payload=event.decision_payload,
+                    rationale=event.rationale,
+                )
                 _validate_approved_payload(
                     packet,
                     ReviewerRole(role),
@@ -1165,6 +1214,10 @@ class ReviewLedgerDecisionProvider:
                     )
                 ):
                     return None
+                assert_no_sensitive_data(
+                    head.payload,
+                    digest_trust_profile=DigestTrustProfile.REVIEW_EVENT,
+                )
             except Exception:
                 return None
             events.append((head.ref, event, identity))
@@ -1251,7 +1304,10 @@ def _resolve_packet_material(
         raise KnowledgeOpsPolicyError(
             "EvidenceCandidate cannot be used as a Claim review subject"
         )
-    assert_no_sensitive_data(subject_entry.payload)
+    _assert_review_subject_no_sensitive_data(
+        subject_kind=subject_kind,
+        entry=subject_entry,
+    )
     current_author_provenance = _subject_author_provenance(
         gate=GovernanceGate(packet.gate),
         subject_payload=subject_entry.payload,
@@ -1285,6 +1341,7 @@ def _resolve_packet_material(
         if candidate_head is None or candidate_head.ref != owning_candidate_ref:
             raise KnowledgeOpsPolicyError("Review Packet candidate is not current")
         candidate = SourceCandidate.model_validate(candidate_entry.payload)
+        assert_no_sensitive_data(candidate.model_dump(mode="json"))
         profile = next(
             (
                 item
@@ -1320,15 +1377,23 @@ def _resolve_packet_material(
             raise KnowledgeOpsPolicyError("Review Packet requests a denied Source operation")
 
     material_entries = []
-    for reference in (*packet.evidence_refs, *packet.open_gap_refs):
+    for reference in packet.evidence_refs:
         entry = ledger.get(reference)
         assert_no_sensitive_data(entry.payload)
         material_entries.append(entry)
     for reference in packet.open_gap_refs:
         entry = ledger.get(reference)
-        if entry.collection != LedgerCollection.GAP.value:
+        if (
+            entry.collection != LedgerCollection.GAP.value
+            or entry.payload_type != "knowledge_gap"
+        ):
             raise KnowledgeOpsPolicyError("Review Packet open gap ref is not a KnowledgeGap")
         gap = KnowledgeGap.model_validate(entry.payload)
+        assert_no_sensitive_data(
+            gap.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
+        )
+        material_entries.append(entry)
         gap_head = ledger.head(reference.collection, reference.record_id)
         if gap.lifecycle != "open" or gap_head is None or gap_head.ref != reference:
             raise KnowledgeOpsPolicyError("Review Packet does not pin a current open gap")
@@ -1377,6 +1442,121 @@ def _validate_approved_payload(
         ReviewerRole.PHARMACIST,
     } and payload.confirmed_scope != packet.scope:
         raise KnowledgeOpsPolicyError("specialist approval must confirm exact packet scope")
+
+
+def _assert_review_open_text_no_sensitive_data(
+    *,
+    decision_payload: ReviewDecisionPayload | None,
+    rationale: str,
+) -> None:
+    """Scan open review text before any digest path receives verified trust."""
+
+    value: dict[str, object] = {"rationale": rationale}
+    if decision_payload is not None:
+        value["decision_payload"] = {
+            "checklist": [
+                {
+                    "check_id": check.check_id,
+                    "result": check.result,
+                    "note": check.note,
+                }
+                for check in decision_payload.checklist
+            ],
+            "source_operation_decisions": [
+                {
+                    "operation": item.operation,
+                    "decision": item.decision,
+                    "conditions": item.conditions,
+                }
+                for item in decision_payload.source_operation_decisions
+            ],
+            "confirmed_scope": (
+                None
+                if decision_payload.confirmed_scope is None
+                else decision_payload.confirmed_scope.model_dump(mode="json")
+            ),
+            "limitations": decision_payload.limitations,
+        }
+    assert_no_sensitive_data(value)
+
+
+def _assert_review_subject_no_sensitive_data(
+    *,
+    subject_kind: ReviewSubjectKind,
+    entry: LedgerEntry,
+) -> None:
+    """Select digest trust only after an exact subject schema is established."""
+
+    kind = ReviewSubjectKind(subject_kind)
+    if kind == ReviewSubjectKind.SOURCE_CANDIDATE:
+        if entry.payload_type != "source_candidate":
+            raise KnowledgeOpsPolicyError(
+                "SourceCandidate review requires the exact source_candidate payload"
+            )
+        subject = SourceCandidate.model_validate(entry.payload)
+        assert_no_sensitive_data(subject.model_dump(mode="json"))
+        return
+    if kind == ReviewSubjectKind.SOURCE_SNAPSHOT:
+        if entry.payload_type != "source_snapshot":
+            raise KnowledgeOpsPolicyError(
+                "SourceSnapshot review requires the exact source_snapshot payload"
+            )
+        subject = SourceSnapshot.model_validate(entry.payload)
+        assert_no_sensitive_data(
+            subject.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+        )
+        return
+    if kind == ReviewSubjectKind.SOURCE:
+        if entry.payload_type != "governed_source_v2":
+            raise KnowledgeOpsPolicyError(
+                "Source review requires the exact governed_source_v2 payload"
+            )
+        subject = GovernedSourceV2.model_validate(entry.payload)
+        assert_no_sensitive_data(
+            subject.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.GOVERNED_SOURCE,
+        )
+        return
+    if kind == ReviewSubjectKind.CHANGE_SET:
+        if entry.payload_type != "change_set":
+            raise KnowledgeOpsPolicyError(
+                "ChangeSet review requires the exact change_set payload"
+            )
+        subject = ChangeSet.model_validate(entry.payload)
+        assert_no_sensitive_data(
+            subject.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_CHANGE_SET,
+        )
+        return
+    if (
+        kind == ReviewSubjectKind.CLINICAL_CLAIM
+        and entry.payload_type == "machine_draft_claim_v2"
+    ):
+        from continucare.knowledge.ops.evidence import MachineDraftClaim
+
+        subject = MachineDraftClaim.model_validate(entry.payload)
+        assert_no_sensitive_data(
+            subject.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.MACHINE_DRAFT_CLAIM,
+        )
+        return
+    if kind == ReviewSubjectKind.KNOWLEDGE_RELEASE:
+        if entry.payload_type != "knowledge_release_candidate":
+            raise KnowledgeOpsPolicyError(
+                "release review requires the exact knowledge_release_candidate payload"
+            )
+        from continucare.knowledge.ops.release import KnowledgeReleaseCandidate
+
+        subject = KnowledgeReleaseCandidate.model_validate(entry.payload)
+        assert_no_sensitive_data(
+            subject.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.KNOWLEDGE_RELEASE_CANDIDATE,
+        )
+        return
+    # Legacy binding/content/translation/terminology and non-machine Claim payloads
+    # have no digest-bearing v2 schema in this slice, so they receive no trust.
+    assert_no_sensitive_data(entry.payload)
 
 
 def _subject_author_provenance(

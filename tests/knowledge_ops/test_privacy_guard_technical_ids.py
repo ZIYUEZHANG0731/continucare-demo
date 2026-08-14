@@ -16,7 +16,9 @@ from continucare.knowledge.ops.models import KnowledgeOpsPolicyError
 from continucare.knowledge.ops.security import (
     AUDITED_SHA256_FIELDS,
     AUDITED_SHA256_FIELD_EVIDENCE,
+    DIGEST_TRUST_PROFILE_PATHS,
     NUMERIC_SENSITIVE_PATTERNS,
+    DigestTrustProfile,
     assert_no_sensitive_data,
     digest_derived_internal_id,
     maximum_unseparated_digit_run,
@@ -25,6 +27,15 @@ from continucare.knowledge.ops.security import (
 
 
 PHONE_BEARING_HEX64 = "a" * 8 + "13800138000" + "b" * 45
+VERIFIED_DIGEST_PAYLOAD = b"verified-digest-fixture-318"
+VERIFIED_DIGEST_SHA256 = (
+    "0801d1a49c36a5ca5dff318001ec48a16ebcb2603b0bbc3ab17707581220db7b"
+)
+VERIFIED_DIGEST_CN_PHONE = "17707581220"
+
+
+def _cn_phone_pattern():
+    return next(item.expression for item in NUMERIC_SENSITIVE_PATTERNS if item.name == "cn_phone")
 
 
 def _walk(value: object, path: str = "$"):
@@ -41,7 +52,7 @@ def _walk(value: object, path: str = "$"):
 def test_numeric_sensitive_patterns_expose_stable_separation_metadata() -> None:
     by_name = {item.name: item for item in NUMERIC_SENSITIVE_PATTERNS}
     assert by_name["cn_phone"].minimum_unseparated_digit_run == 11
-    assert by_name["cn_national_id"].minimum_unseparated_digit_run == 18
+    assert by_name["cn_national_id"].minimum_unseparated_digit_run == 17
     assert by_name["international_phone"].requires_leading_plus is True
     assert by_name["international_phone"].minimum_unseparated_digit_run is None
     assert min_sensitive_unseparated_digit_run == 11
@@ -143,13 +154,119 @@ def test_valid_grouped_event_attestation_and_fixture_ids_require_no_exemption() 
     assert_no_sensitive_data({"internal_ids": values})
 
 
-def test_only_exact_audited_lowercase_sha256_fields_receive_digest_treatment() -> None:
+def test_audited_digest_field_names_receive_no_default_scanner_trust() -> None:
     assert len(PHONE_BEARING_HEX64) == 64
-    assert re.search(r"1[3-9]\d{9}", PHONE_BEARING_HEX64)
+    assert _cn_phone_pattern().search(PHONE_BEARING_HEX64)
     assert AUDITED_SHA256_FIELDS == frozenset(AUDITED_SHA256_FIELD_EVIDENCE)
     assert all(AUDITED_SHA256_FIELD_EVIDENCE.values())
     for field in AUDITED_SHA256_FIELDS:
-        assert_no_sensitive_data({field: PHONE_BEARING_HEX64})
+        with pytest.raises(
+            KnowledgeOpsPolicyError, match="appears to contain personal data"
+        ):
+            assert_no_sensitive_data({field: PHONE_BEARING_HEX64})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"metadata": {"document_sha256": PHONE_BEARING_HEX64}},
+        {"metadata": {"entry_sha256": PHONE_BEARING_HEX64}},
+        {"metadata": {"attestation_sha256": PHONE_BEARING_HEX64}},
+        {"foo_sha256": PHONE_BEARING_HEX64},
+        {"untrusted": {"content_sha256": PHONE_BEARING_HEX64}},
+    ],
+)
+def test_untrusted_or_nested_digest_paths_are_rejected(payload: object) -> None:
+    with pytest.raises(KnowledgeOpsPolicyError, match="appears to contain personal data"):
+        assert_no_sensitive_data(
+            payload,
+            digest_trust_profile=(
+                DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT
+            ),
+        )
+
+
+def test_recomputed_digest_requires_an_exact_code_selected_trusted_path() -> None:
+    digest = hashlib.sha256(VERIFIED_DIGEST_PAYLOAD).hexdigest()
+    assert digest == VERIFIED_DIGEST_SHA256
+    phone_match = _cn_phone_pattern().search(digest)
+    assert phone_match is not None
+    assert phone_match.group() == VERIFIED_DIGEST_CN_PHONE
+
+    assert_no_sensitive_data(
+        {"content_sha256": digest},
+        digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+    )
+    with pytest.raises(
+        KnowledgeOpsPolicyError, match="appears to contain personal data"
+    ):
+        assert_no_sensitive_data({"content_sha256": digest})
+    for untrusted in (
+        {"metadata": {"content_sha256": digest}},
+        {"nested": {"content_sha256": digest}},
+    ):
+        with pytest.raises(
+            KnowledgeOpsPolicyError, match="appears to contain personal data"
+        ):
+            assert_no_sensitive_data(
+                untrusted,
+                digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+            )
+
+
+def _payload_for_trusted_path(segments: tuple[object, ...], digest: str) -> object:
+    value: object = digest
+    for segment in reversed(segments):
+        value = {segment: value} if isinstance(segment, str) else [value]
+    return value
+
+
+@pytest.mark.parametrize("profile", tuple(DigestTrustProfile), ids=str)
+def test_every_profile_trusts_only_its_exact_verified_schema_path(
+    profile: DigestTrustProfile,
+) -> None:
+    assert set(DIGEST_TRUST_PROFILE_PATHS) == set(DigestTrustProfile)
+    trusted_path = DIGEST_TRUST_PROFILE_PATHS[profile][0]
+    assert trusted_path.evidence
+    assert all(segment != "*" for segment in trusted_path.segments)
+    digest = hashlib.sha256(VERIFIED_DIGEST_PAYLOAD).hexdigest()
+    assert digest == VERIFIED_DIGEST_SHA256
+    assert _cn_phone_pattern().search(digest)
+
+    assert_no_sensitive_data(
+        _payload_for_trusted_path(trusted_path.segments, digest),
+        digest_trust_profile=profile,
+    )
+
+    terminal_field = trusted_path.segments[-1]
+    assert isinstance(terminal_field, str)
+    for untrusted in (
+        {"wrong_path": {terminal_field: digest}},
+        {"metadata": {terminal_field: digest}},
+    ):
+        with pytest.raises(
+            KnowledgeOpsPolicyError, match="appears to contain personal data"
+        ):
+            assert_no_sensitive_data(
+                untrusted,
+                digest_trust_profile=profile,
+            )
+
+
+def test_trust_profiles_exclude_unbound_provenance_digest() -> None:
+    assert all(
+        "provenance_evidence_sha256" not in item.segments
+        for paths in DIGEST_TRUST_PROFILE_PATHS.values()
+        for item in paths
+    )
+
+
+@pytest.mark.parametrize("digest", ["a" * 63, "a" * 65])
+def test_digest_derived_internal_id_requires_an_exact_sha256(
+    digest: str,
+) -> None:
+    with pytest.raises(ValueError, match="requires lower-case hexadecimal"):
+        digest_derived_internal_id("event", digest, digest_characters=20)
 
 
 @pytest.mark.parametrize(

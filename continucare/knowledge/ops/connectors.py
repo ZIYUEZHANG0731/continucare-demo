@@ -24,6 +24,7 @@ from continucare.knowledge.ops.models import (
     safe_relative_parts,
 )
 from continucare.knowledge.ops.security import (
+    DigestTrustProfile,
     assert_no_sensitive_data,
     validate_transport_route,
     validate_url_against_policy,
@@ -144,12 +145,18 @@ class OfflineFixtureConnector:
             ) from exc
         self._by_id = {item.stable_id: item for item in self._catalog.resources}
         for item in self._catalog.resources:
-            assert_no_sensitive_data(item.model_dump(mode="json"))
+            assert_no_sensitive_data(
+                item.model_dump(mode="json", exclude={"content_sha256"})
+            )
             payload = self._read_fixture_file(item.content_path)
             if hashlib.sha256(payload).hexdigest() != item.content_sha256:
                 raise KnowledgeOpsIntegrityError(
                     f"offline fixture {item.stable_id} content SHA-256 mismatch"
                 )
+            assert_no_sensitive_data(
+                item.model_dump(mode="json"),
+                digest_trust_profile=DigestTrustProfile.OFFLINE_FIXTURE_RESOURCE,
+            )
 
     @property
     def fixture_set_id(self) -> str:

@@ -38,6 +38,7 @@ from continucare.knowledge.ops import (
     validate_url_against_policy,
 )
 from continucare.knowledge.ops.acquisition import AcquisitionRun
+from continucare.knowledge.ops.security import NUMERIC_SENSITIVE_PATTERNS
 
 
 FIXTURE_CATALOG_SHA256 = (
@@ -50,6 +51,11 @@ PROFILE_POLICIES = {
     "fixture-acute-high-risk": "nmpa-cn-regulatory-metadata",
     "fixture-rare-disease-terminology": "hpo-official-release-metadata",
 }
+VERIFIED_ACQUISITION_DIGEST_PAYLOAD = b"verified-acquisition-digest-467"
+VERIFIED_ACQUISITION_DIGEST_SHA256 = (
+    "c892a18617c8d8e20ec15680838003dd5d50a80b269c89daccf1960b9915acd8"
+)
+VERIFIED_ACQUISITION_DIGEST_CN_PHONE = "15680838003"
 
 
 def _fixture_root() -> Path:
@@ -481,6 +487,108 @@ def test_acquisition_revalidates_fetched_bytes_before_quarantine(tmp_path, updat
     assert run.failure_code in {"integrity_error", "policy_error"}
 
 
+def test_recomputed_phone_shaped_content_digest_uses_exact_snapshot_trust_path(
+    tmp_path,
+):
+    bundle = load_builtin_ops_bundle()
+    request = _request(
+        "fixture-medication-followup", request_id="verified-digest-path"
+    )
+    policy = bundle.source_policy("nmpa-cn-regulatory-metadata")
+    fixture_connector = _connector()
+    fixture_resource = fixture_connector.discover(request, policy)[0]
+    discovered = fixture_resource.model_copy(
+        update={"connector_id": "verified-digest-path-test"}
+    )
+    body = VERIFIED_ACQUISITION_DIGEST_PAYLOAD
+    digest = hashlib.sha256(body).hexdigest()
+    assert digest == VERIFIED_ACQUISITION_DIGEST_SHA256
+    phone_pattern = next(
+        item.expression for item in NUMERIC_SENSITIVE_PATTERNS if item.name == "cn_phone"
+    )
+    phone_match = phone_pattern.search(digest)
+    assert phone_match is not None
+    assert phone_match.group() == VERIFIED_ACQUISITION_DIGEST_CN_PHONE
+    fetched = replace(
+        fixture_connector.fetch(fixture_resource, policy),
+        connector_id="verified-digest-path-test",
+        body=body,
+        content_sha256=digest,
+    )
+
+    class VerifiedDigestConnector:
+        connector_id = "verified-digest-path-test"
+
+        def discover(self, request, policy):
+            return (discovered,)
+
+        def fetch(self, resource, policy):
+            return fetched
+
+    service, ledger, quarantine = _service(
+        tmp_path,
+        connector=VerifiedDigestConnector(),
+    )
+    result = service.run(request)
+    snapshot = SourceSnapshot.model_validate(
+        ledger.get(result.snapshot_refs[0]).payload
+    )
+
+    assert result.status == "completed"
+    assert hashlib.sha256(body).hexdigest() == digest == snapshot.content_sha256
+    phone_match = phone_pattern.search(digest)
+    assert phone_match is not None
+    assert phone_match.group() == VERIFIED_ACQUISITION_DIGEST_CN_PHONE
+    assert snapshot.quarantine_blob is not None
+    assert quarantine.read_verified(snapshot.quarantine_blob) == body
+
+
+def test_offline_fixture_connector_accepts_rehashed_phone_bearing_content_digest(
+    tmp_path,
+):
+    fixture_root = tmp_path / "phone-bearing-fixture"
+    fixture_root.mkdir()
+    body = VERIFIED_ACQUISITION_DIGEST_PAYLOAD
+    digest = hashlib.sha256(body).hexdigest()
+    assert digest == VERIFIED_ACQUISITION_DIGEST_SHA256
+    catalog = json.loads((_fixture_root() / "catalog.json").read_text())
+    resource = next(
+        item
+        for item in catalog["resources"]
+        if item["validation_profile_id"] == "fixture-medication-followup"
+    )
+    resource = {
+        **resource,
+        "content_path": "verified-phone-bearing-digest.bin",
+        "content_sha256": digest,
+    }
+    catalog["resources"] = [resource]
+    catalog_bytes = json.dumps(
+        catalog,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    (fixture_root / resource["content_path"]).write_bytes(body)
+    (fixture_root / "catalog.json").write_bytes(catalog_bytes)
+
+    connector = OfflineFixtureConnector(
+        fixture_root,
+        catalog_sha256=hashlib.sha256(catalog_bytes).hexdigest(),
+    )
+    request = _request(
+        "fixture-medication-followup", request_id="verified-fixture-digest"
+    )
+    policy = load_builtin_ops_bundle().source_policy(
+        "nmpa-cn-regulatory-metadata"
+    )
+    discovered = connector.discover(request, policy)
+    assert len(discovered) == 1
+    fetched = connector.fetch(discovered[0], policy)
+    assert fetched.body == body
+    assert fetched.content_sha256 == digest
+
+
 def test_acquisition_rejects_retired_source_policy_before_writing(tmp_path):
     bundle = load_builtin_ops_bundle()
     policies = tuple(
@@ -636,6 +744,57 @@ def test_synthetic_candidate_to_source_promotion_remains_nonproduction(tmp_path)
     assert source.runtime_authority == "none"
     assert source.unresolved_gap_refs == result.gap_refs
     assert len(result.gap_refs) == 2
+
+
+def test_verified_phone_bearing_snapshot_digest_survives_source_promotion(tmp_path):
+    ledger, result, evidence = _promotion_context(tmp_path)
+    digest = hashlib.sha256(VERIFIED_ACQUISITION_DIGEST_PAYLOAD).hexdigest()
+    assert digest == VERIFIED_ACQUISITION_DIGEST_SHA256
+    snapshot = SourceSnapshot.model_validate(
+        ledger.get(result.snapshot_refs[0]).payload
+    )
+    assert snapshot.quarantine_blob is not None
+    verified_snapshot = snapshot.model_copy(
+        update={
+            "content_sha256": digest,
+            "quarantine_blob": snapshot.quarantine_blob.model_copy(
+                update={
+                    "content_sha256": digest,
+                    "relative_path": f"blobs/{digest}.bin",
+                }
+            ),
+        }
+    )
+    snapshot_ref = ledger.append(
+        LedgerCollection.SNAPSHOT,
+        snapshot.snapshot_id,
+        payload_type="source_snapshot",
+        payload=verified_snapshot,
+        recorded_by="system:verified-digest-fixture",
+        synthetic=True,
+        expected_record_version=2,
+    ).ref
+    decision = PromotionDecision(
+        subject_ref=result.candidate_refs[0],
+        approved_roles=("knowledge_curator", "rights_officer"),
+        evidence_refs=evidence,
+        blocking_gap_refs=result.gap_refs,
+        synthetic=True,
+        production_eligible=False,
+    )
+    source_ref = SourcePromotionService(
+        bundle=load_builtin_ops_bundle(),
+        ledger=ledger,
+        decisions=_DecisionProvider(decision),
+    ).promote(
+        source_id="synthetic-phone-bearing-digest-source",
+        candidate_ref=result.candidate_refs[0],
+        snapshot_ref=snapshot_ref,
+        promoted_by="system:synthetic-test",
+    )
+
+    source = GovernedSourceV2.model_validate(ledger.get(source_ref).payload)
+    assert source.content_sha256 == digest
 
 
 def test_source_promotion_fails_without_all_required_roles(tmp_path):

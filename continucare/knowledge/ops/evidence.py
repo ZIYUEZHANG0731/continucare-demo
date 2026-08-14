@@ -24,6 +24,7 @@ from continucare.knowledge.ops.models import (
     StrictModel,
 )
 from continucare.knowledge.ops.security import (
+    DigestTrustProfile,
     assert_no_sensitive_data,
     validate_url_against_policy,
 )
@@ -286,7 +287,10 @@ class EvidenceCandidateService:
             author_provenance=author_provenance,
             synthetic=True,
         )
-        assert_no_sensitive_data(candidate.model_dump(mode="json"))
+        assert_no_sensitive_data(
+            candidate.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.EVIDENCE_CANDIDATE,
+        )
         return self._ledger.append(
             LedgerCollection.EVIDENCE_CANDIDATE,
             candidate.candidate_id,
@@ -325,8 +329,11 @@ class EvidenceCandidateService:
             raise KnowledgeOpsPolicyError("SourceSnapshot does not belong to SourceCandidate")
         if source.synthetic != source_entry.synthetic or snapshot.synthetic != snapshot_entry.synthetic:
             raise KnowledgeOpsPolicyError("source payload and ledger synthetic status differ")
-        assert_no_sensitive_data(source_entry.payload)
-        assert_no_sensitive_data(snapshot_entry.payload)
+        assert_no_sensitive_data(source.model_dump(mode="json"))
+        assert_no_sensitive_data(
+            snapshot.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+        )
         return source_entry, snapshot_entry, source, snapshot
 
 
@@ -364,6 +371,10 @@ class EvidenceCandidatePromotionService:
             raise KnowledgeOpsPolicyError(
                 "P1 promotion accepts synthetic EvidenceCandidate lineage only"
             )
+        assert_no_sensitive_data(
+            candidate.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.EVIDENCE_CANDIDATE,
+        )
         if (
             author_provenance.author_identity_id
             != candidate.author_provenance.author_identity_id
@@ -377,6 +388,9 @@ class EvidenceCandidatePromotionService:
         snapshot_entry = self._ledger.get(candidate.source_snapshot_ref)
         source_entry = self._ledger.get(candidate.source_candidate_ref)
         if (
+            snapshot_entry.collection != LedgerCollection.SNAPSHOT.value
+            or source_entry.collection != LedgerCollection.CANDIDATE.value
+            or
             snapshot_entry.payload_type != "source_snapshot"
             or source_entry.payload_type != "source_candidate"
             or not snapshot_entry.synthetic
@@ -384,6 +398,12 @@ class EvidenceCandidatePromotionService:
         ):
             raise KnowledgeOpsPolicyError("draft Claim source lineage is invalid")
         snapshot = SourceSnapshot.model_validate(snapshot_entry.payload)
+        source = SourceCandidate.model_validate(source_entry.payload)
+        assert_no_sensitive_data(source.model_dump(mode="json"))
+        assert_no_sensitive_data(
+            snapshot.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+        )
         if snapshot.content_sha256 != candidate.whole_record_sha256:
             raise KnowledgeOpsPolicyError("EvidenceCandidate whole-record digest changed")
 
@@ -395,6 +415,10 @@ class EvidenceCandidatePromotionService:
                     "draft Claim successor must preserve typed synthetic lineage"
                 )
             previous = MachineDraftClaim.model_validate(head.payload)
+            assert_no_sensitive_data(
+                previous.model_dump(mode="json"),
+                digest_trust_profile=DigestTrustProfile.MACHINE_DRAFT_CLAIM,
+            )
             if previous.evidence_candidate_ref != evidence_candidate_ref:
                 raise KnowledgeOpsPolicyError(
                     "draft Claim successor cannot substitute its EvidenceCandidate"
@@ -416,7 +440,10 @@ class EvidenceCandidatePromotionService:
             created_by=created_by,
             synthetic=True,
         )
-        assert_no_sensitive_data(claim.model_dump(mode="json"))
+        assert_no_sensitive_data(
+            claim.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.MACHINE_DRAFT_CLAIM,
+        )
         return self._ledger.append(
             LedgerCollection.CLAIM,
             claim.claim_id,

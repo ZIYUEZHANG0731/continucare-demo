@@ -35,6 +35,7 @@ from continucare.knowledge.ops.models import (
     safe_relative_parts,
 )
 from continucare.knowledge.ops.security import (
+    DigestTrustProfile,
     assert_deidentified_query_terms,
     assert_no_sensitive_data,
     digest_derived_internal_id,
@@ -422,6 +423,10 @@ class AcquisitionService:
             status=AcquisitionRunStatus.RUNNING,
             started_at=started_at,
         )
+        assert_no_sensitive_data(
+            running.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_RUN,
+        )
         self._ledger.append(
             LedgerCollection.ACQUISITION_RUN,
             run_id,
@@ -476,11 +481,22 @@ class AcquisitionService:
                         LedgerCollection.SNAPSHOT,
                         _derived_id("snapshot", logical_source_key),
                     )
-                    previous_snapshot = (
-                        None
-                        if previous_snapshot_entry is None
-                        else SourceSnapshot.model_validate(previous_snapshot_entry.payload)
-                    )
+                    if previous_snapshot_entry is None:
+                        previous_snapshot = None
+                    else:
+                        if previous_snapshot_entry.payload_type != "source_snapshot":
+                            raise KnowledgeOpsIntegrityError(
+                                "snapshot ledger head has an unexpected payload type"
+                            )
+                        previous_snapshot = SourceSnapshot.model_validate(
+                            previous_snapshot_entry.payload
+                        )
+                        assert_no_sensitive_data(
+                            previous_snapshot.model_dump(mode="json"),
+                            digest_trust_profile=(
+                                DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT
+                            ),
+                        )
                     document = self._connector.fetch(resource, policy)
                     self._validate_fetched_document(resource, policy, document)
                     persist_decision = policy.decision_for(SourceOperation.PERSIST_SNAPSHOT)
@@ -500,6 +516,12 @@ class AcquisitionService:
                         quarantine_blob=blob,
                         synthetic=True,
                     )
+                    assert_no_sensitive_data(
+                        snapshot.model_dump(mode="json"),
+                        digest_trust_profile=(
+                            DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT
+                        ),
+                    )
                     snapshot_entry = self._ledger.append(
                         LedgerCollection.SNAPSHOT,
                         snapshot.snapshot_id,
@@ -518,6 +540,10 @@ class AcquisitionService:
                         current_entry=snapshot_entry.ref,
                         current=snapshot,
                         observed_at=started_at,
+                    )
+                    assert_no_sensitive_data(
+                        change.model_dump(mode="json"),
+                        digest_trust_profile=DigestTrustProfile.ACQUISITION_CHANGE_SET,
                     )
                     change_entry = self._ledger.append(
                         LedgerCollection.CHANGE_SET,
@@ -582,6 +608,10 @@ class AcquisitionService:
                 gap_refs=tuple(gap_refs),
                 failure_code=failure_code,
             )
+        assert_no_sensitive_data(
+            terminal.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_RUN,
+        )
         terminal_entry = self._ledger.append(
             LedgerCollection.ACQUISITION_RUN,
             run_id,
@@ -766,6 +796,10 @@ class AcquisitionService:
             blocks=blocks,
             observed_at=observed_at,
             synthetic=True,
+        )
+        assert_no_sensitive_data(
+            gap.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
         )
         return self._ledger.append(
             LedgerCollection.GAP,

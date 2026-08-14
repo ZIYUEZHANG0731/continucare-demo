@@ -34,6 +34,7 @@ from continucare.knowledge.ops.store import (
     LedgerRef,
 )
 from continucare.knowledge.ops.security import (
+    DigestTrustProfile,
     assert_no_sensitive_data,
     validate_url_against_policy,
 )
@@ -159,9 +160,15 @@ class SourcePromotionService:
             raise KnowledgeOpsPolicyError(
                 "EvidenceCandidate cannot be promoted as a SourceCandidate"
             )
-        if candidate_entry.collection != LedgerCollection.CANDIDATE.value:
+        if (
+            candidate_entry.collection != LedgerCollection.CANDIDATE.value
+            or candidate_entry.payload_type != "source_candidate"
+        ):
             raise KnowledgeOpsPolicyError("promotion subject must be a SourceCandidate")
-        if snapshot_entry.collection != LedgerCollection.SNAPSHOT.value:
+        if (
+            snapshot_entry.collection != LedgerCollection.SNAPSHOT.value
+            or snapshot_entry.payload_type != "source_snapshot"
+        ):
             raise KnowledgeOpsPolicyError("promotion requires a SourceSnapshot")
         if self._ledger.head(candidate_ref.collection, candidate_ref.record_id).ref != candidate_ref:
             raise KnowledgeOpsPolicyError("stale SourceCandidate cannot be promoted")
@@ -169,8 +176,11 @@ class SourcePromotionService:
             raise KnowledgeOpsPolicyError("stale SourceSnapshot cannot be promoted")
         candidate = SourceCandidate.model_validate(candidate_entry.payload)
         snapshot = SourceSnapshot.model_validate(snapshot_entry.payload)
-        assert_no_sensitive_data(candidate_entry.payload)
-        assert_no_sensitive_data(snapshot_entry.payload)
+        assert_no_sensitive_data(candidate.model_dump(mode="json"))
+        assert_no_sensitive_data(
+            snapshot.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+        )
         if snapshot.candidate_ref != candidate_ref:
             raise KnowledgeOpsPolicyError("SourceSnapshot does not belong to candidate")
         policy = self._bundle.source_policy(
@@ -238,6 +248,10 @@ class SourcePromotionService:
                     "promotion blocking gaps must reference KnowledgeGap records"
                 )
             gap = KnowledgeGap.model_validate(gap_entry.payload)
+            assert_no_sensitive_data(
+                gap.model_dump(mode="json"),
+                digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
+            )
             if gap.lifecycle != "open":
                 raise KnowledgeOpsPolicyError(
                     "promotion decision may only carry current open gaps"
@@ -246,6 +260,10 @@ class SourcePromotionService:
                 raise KnowledgeOpsPolicyError(
                     "promotion decision uses a stale KnowledgeGap"
                 )
+        assert_no_sensitive_data(
+            decision.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.PROMOTION_DECISION,
+        )
 
         if self._environment == AcquisitionEnvironment.SYNTHETIC_TEST:
             if not candidate.synthetic or not snapshot.synthetic or not decision.synthetic:
@@ -312,6 +330,10 @@ class SourcePromotionService:
             registry_status=registry_status,
             synthetic=candidate.synthetic,
             production_eligible=production_eligible,
+        )
+        assert_no_sensitive_data(
+            source.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.GOVERNED_SOURCE,
         )
         return self._ledger.append(
             LedgerCollection.SOURCE,

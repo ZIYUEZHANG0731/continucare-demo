@@ -28,12 +28,14 @@ from continucare.knowledge.ops.models import (
 from continucare.knowledge.ops.promotion import GovernedSourceV2
 from continucare.knowledge.ops.review import ReviewLedgerDecisionProvider
 from continucare.knowledge.ops.security import (
+    DigestTrustProfile,
     assert_no_sensitive_data,
     digest_derived_internal_id,
 )
 from continucare.knowledge.ops.store import (
     AppendOnlyLedger,
     LedgerCollection,
+    LedgerEntry,
     LedgerRef,
 )
 
@@ -238,7 +240,7 @@ class ReleaseReadinessService:
     def stage_candidate(
         self, candidate: KnowledgeReleaseCandidate
     ) -> LedgerRef:
-        assert_no_sensitive_data(candidate.model_dump(mode="json"))
+        _assert_release_candidate_open_material_no_sensitive_data(candidate)
         expected_manifests = self._bundle.manifest_evidence()
         if (
             candidate.governance_bundle_id != self._bundle.index.bundle_id
@@ -251,9 +253,30 @@ class ReleaseReadinessService:
             )
         for artifact in candidate.artifacts:
             entry = self._ledger.get(artifact.object_ref)
-            assert_no_sensitive_data(entry.payload)
+            expected_collection = _ARTIFACT_COLLECTIONS[artifact.artifact_kind]
+            if entry.collection != expected_collection.value:
+                raise KnowledgeOpsPolicyError(
+                    "release artifact kind does not match its ledger collection"
+                )
+            _assert_release_artifact_no_sensitive_data(artifact, entry)
         for gap_ref in candidate.blocking_gap_refs:
-            self._ledger.get(gap_ref)
+            gap_entry = self._ledger.get(gap_ref)
+            if (
+                gap_entry.collection != LedgerCollection.GAP.value
+                or gap_entry.payload_type != "knowledge_gap"
+            ):
+                raise KnowledgeOpsPolicyError(
+                    "release blocking gap must reference an exact KnowledgeGap"
+                )
+            gap = KnowledgeGap.model_validate(gap_entry.payload)
+            assert_no_sensitive_data(
+                gap.model_dump(mode="json"),
+                digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
+            )
+        assert_no_sensitive_data(
+            candidate.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.KNOWLEDGE_RELEASE_CANDIDATE,
+        )
         return self._ledger.append(
             LedgerCollection.RELEASE_CANDIDATE,
             candidate.release_candidate_id,
@@ -272,14 +295,17 @@ class ReleaseReadinessService:
         assessed_at: datetime | None = None,
     ) -> LedgerRef:
         candidate_entry = self._ledger.get(release_candidate_ref)
-        if candidate_entry.collection != LedgerCollection.RELEASE_CANDIDATE.value:
+        if (
+            candidate_entry.collection != LedgerCollection.RELEASE_CANDIDATE.value
+            or candidate_entry.payload_type != "knowledge_release_candidate"
+        ):
             raise KnowledgeOpsPolicyError("readiness subject must be a release candidate")
         candidate = KnowledgeReleaseCandidate.model_validate(candidate_entry.payload)
         blockers: list[ReadinessBlocker] = []
         production_reviews = 0
 
         try:
-            assert_no_sensitive_data(candidate_entry.payload)
+            _assert_release_candidate_open_material_no_sensitive_data(candidate)
         except KnowledgeOpsPolicyError:
             blockers.append(
                 _blocker(
@@ -442,7 +468,7 @@ class ReleaseReadinessService:
                     )
                 )
             try:
-                assert_no_sensitive_data(entry.payload)
+                _assert_release_artifact_no_sensitive_data(artifact, entry)
             except KnowledgeOpsPolicyError:
                 blockers.append(
                     _blocker(
@@ -451,6 +477,15 @@ class ReleaseReadinessService:
                         artifact.object_ref,
                     )
                 )
+            except (ValidationError, ValueError):
+                blockers.append(
+                    _blocker(
+                        ReadinessBlockerCode.UNKNOWN_OR_STALE_ARTIFACT,
+                        "Artifact payload does not satisfy its strict v2 contract.",
+                        artifact.object_ref,
+                    )
+                )
+                continue
             if entry.synthetic:
                 blockers.append(
                     _blocker(
@@ -477,12 +512,18 @@ class ReleaseReadinessService:
                 related_gap_subject_keys.add(_ref_key(source.candidate_ref))
                 try:
                     source_candidate_entry = self._ledger.get(source.candidate_ref)
-                    if source_candidate_entry.collection != LedgerCollection.CANDIDATE.value:
+                    if (
+                        source_candidate_entry.collection
+                        != LedgerCollection.CANDIDATE.value
+                        or source_candidate_entry.payload_type != "source_candidate"
+                    ):
                         raise ValueError("wrong SourceCandidate collection")
                     source_candidate = SourceCandidate.model_validate(
                         source_candidate_entry.payload
                     )
-                    assert_no_sensitive_data(source_candidate_entry.payload)
+                    assert_no_sensitive_data(
+                        source_candidate.model_dump(mode="json")
+                    )
                 except KnowledgeOpsPolicyError:
                     blockers.append(
                         _blocker(
@@ -586,8 +627,15 @@ class ReleaseReadinessService:
 
         for gap_entry in self._ledger.list_heads(LedgerCollection.GAP):
             try:
-                assert_no_sensitive_data(gap_entry.payload)
+                if gap_entry.payload_type != "knowledge_gap":
+                    raise ValueError("wrong gap payload type")
                 gap = KnowledgeGap.model_validate(gap_entry.payload)
+                assert_no_sensitive_data(
+                    gap.model_dump(mode="json"),
+                    digest_trust_profile=(
+                        DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP
+                    ),
+                )
             except KnowledgeOpsPolicyError:
                 blockers.append(
                     _blocker(
@@ -617,10 +665,18 @@ class ReleaseReadinessService:
         for gap_ref in unique_gap_refs:
             try:
                 gap_entry = self._ledger.get(gap_ref)
-                if gap_entry.collection != LedgerCollection.GAP.value:
+                if (
+                    gap_entry.collection != LedgerCollection.GAP.value
+                    or gap_entry.payload_type != "knowledge_gap"
+                ):
                     raise ValueError("wrong collection")
-                assert_no_sensitive_data(gap_entry.payload)
                 gap = KnowledgeGap.model_validate(gap_entry.payload)
+                assert_no_sensitive_data(
+                    gap.model_dump(mode="json"),
+                    digest_trust_profile=(
+                        DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP
+                    ),
+                )
                 gap_head = self._ledger.head(
                     LedgerCollection.GAP, gap_ref.record_id
                 )
@@ -635,8 +691,15 @@ class ReleaseReadinessService:
                         )
                     )
                     gap_entry = gap_head
-                    assert_no_sensitive_data(gap_entry.payload)
+                    if gap_entry.payload_type != "knowledge_gap":
+                        raise ValueError("wrong gap payload type")
                     gap = KnowledgeGap.model_validate(gap_entry.payload)
+                    assert_no_sensitive_data(
+                        gap.model_dump(mode="json"),
+                        digest_trust_profile=(
+                            DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP
+                        ),
+                    )
             except KnowledgeOpsPolicyError:
                 blockers.append(
                     _blocker(
@@ -664,6 +727,27 @@ class ReleaseReadinessService:
                     )
                 )
 
+        if _release_candidate_digest_context_verified(
+            bundle=self._bundle,
+            ledger=self._ledger,
+            candidate=candidate,
+        ):
+            try:
+                assert_no_sensitive_data(
+                    candidate.model_dump(mode="json"),
+                    digest_trust_profile=(
+                        DigestTrustProfile.KNOWLEDGE_RELEASE_CANDIDATE
+                    ),
+                )
+            except KnowledgeOpsPolicyError:
+                blockers.append(
+                    _blocker(
+                        ReadinessBlockerCode.PATIENT_DATA_RISK,
+                        "Release candidate failed the no-patient-data guard.",
+                        release_candidate_ref,
+                    )
+                )
+
         timestamp = assessed_at or datetime.now(timezone.utc)
         blockers = _unique_blockers(blockers)
         report_id = _derived_id("readiness", release_candidate_ref)
@@ -676,6 +760,17 @@ class ReleaseReadinessService:
             assessed_by=assessed_by,
             inspected_artifact_count=len(candidate.artifacts),
             production_review_count=production_reviews,
+        )
+        report_profile = DigestTrustProfile.RELEASE_READINESS_REPORT_BASE
+        if all(
+            blocker.subject_ref is None
+            or _ledger_ref_resolves(self._ledger, blocker.subject_ref)
+            for blocker in report.blockers
+        ):
+            report_profile = DigestTrustProfile.RELEASE_READINESS_REPORT
+        assert_no_sensitive_data(
+            report.model_dump(mode="json"),
+            digest_trust_profile=report_profile,
         )
         return self._ledger.append(
             LedgerCollection.READINESS_REPORT,
@@ -700,16 +795,44 @@ class ReleaseReadinessService:
             assessed_by=finalized_by,
             assessed_at=timestamp,
         )
-        report = ReleaseReadinessReport.model_validate(
-            self._ledger.get(report_ref).payload
+        report_entry = self._ledger.get(report_ref)
+        if (
+            report_entry.collection != LedgerCollection.READINESS_REPORT.value
+            or report_entry.payload_type != "knowledge_release_readiness"
+        ):
+            raise KnowledgeOpsPolicyError(
+                "KnowledgeRelease requires an exact readiness report"
+            )
+        report = ReleaseReadinessReport.model_validate(report_entry.payload)
+        assert_no_sensitive_data(
+            report.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.RELEASE_READINESS_REPORT,
         )
         if not report.ready:
             raise KnowledgeReleaseBlocked(
                 "KnowledgeRelease candidate is not ready",
                 readiness_report_ref=report_ref,
             )
-        candidate = KnowledgeReleaseCandidate.model_validate(
-            self._ledger.get(release_candidate_ref).payload
+        candidate_entry = self._ledger.get(release_candidate_ref)
+        if (
+            candidate_entry.collection != LedgerCollection.RELEASE_CANDIDATE.value
+            or candidate_entry.payload_type != "knowledge_release_candidate"
+        ):
+            raise KnowledgeOpsPolicyError(
+                "KnowledgeRelease requires an exact release candidate"
+            )
+        candidate = KnowledgeReleaseCandidate.model_validate(candidate_entry.payload)
+        if not _release_candidate_digest_context_verified(
+            bundle=self._bundle,
+            ledger=self._ledger,
+            candidate=candidate,
+        ):
+            raise KnowledgeOpsPolicyError(
+                "KnowledgeRelease candidate digest context is not verified"
+            )
+        assert_no_sensitive_data(
+            candidate.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.KNOWLEDGE_RELEASE_CANDIDATE,
         )
         release = KnowledgeRelease(
             release_id=candidate.release_candidate_id,
@@ -725,6 +848,10 @@ class ReleaseReadinessService:
             finalized_at=timestamp,
             finalized_by=finalized_by,
         )
+        assert_no_sensitive_data(
+            release.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.KNOWLEDGE_RELEASE,
+        )
         return self._ledger.append(
             LedgerCollection.RELEASE,
             release.release_id,
@@ -734,6 +861,103 @@ class ReleaseReadinessService:
             recorded_at=timestamp,
             synthetic=False,
         ).ref
+
+
+def _assert_release_candidate_open_material_no_sensitive_data(
+    candidate: KnowledgeReleaseCandidate,
+) -> None:
+    """Scan every untrusted field before verified release digests receive trust."""
+
+    payload = candidate.model_dump(mode="json")
+    payload.pop("governance_index_sha256")
+    for manifest in payload["governance_manifests"]:
+        manifest.pop("manifest_sha256")
+    for artifact in payload["artifacts"]:
+        artifact["object_ref"].pop("entry_sha256")
+    for gap_ref in payload["blocking_gap_refs"]:
+        gap_ref.pop("entry_sha256")
+    assert_no_sensitive_data(payload)
+
+
+def _assert_release_artifact_no_sensitive_data(
+    artifact: ReleaseArtifact,
+    entry: LedgerEntry,
+) -> None:
+    """Select artifact digest trust only for an exact strict v2 payload."""
+
+    if artifact.artifact_kind == ReleaseArtifactKind.SOURCE:
+        if entry.payload_type != "governed_source_v2":
+            raise ValueError("Source artifact has an unexpected payload type")
+        source = GovernedSourceV2.model_validate(entry.payload)
+        assert_no_sensitive_data(
+            source.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.GOVERNED_SOURCE,
+        )
+        return
+    if (
+        artifact.artifact_kind == ReleaseArtifactKind.CLINICAL_CLAIM
+        and entry.payload_type == "machine_draft_claim_v2"
+    ):
+        from continucare.knowledge.ops.evidence import MachineDraftClaim
+
+        claim = MachineDraftClaim.model_validate(entry.payload)
+        assert_no_sensitive_data(
+            claim.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.MACHINE_DRAFT_CLAIM,
+        )
+        return
+    # Other artifact kinds have no strict digest-bearing v2 model in this slice.
+    assert_no_sensitive_data(entry.payload)
+
+
+def _release_candidate_digest_context_verified(
+    *,
+    bundle: KnowledgeOpsBundle,
+    ledger: AppendOnlyLedger,
+    candidate: KnowledgeReleaseCandidate,
+) -> bool:
+    if (
+        candidate.governance_bundle_id != bundle.index.bundle_id
+        or candidate.governance_bundle_version != bundle.index.bundle_version
+        or candidate.governance_index_sha256 != bundle.index_sha256()
+        or candidate.governance_manifests != bundle.manifest_evidence()
+    ):
+        return False
+    try:
+        for artifact in candidate.artifacts:
+            entry = ledger.get(artifact.object_ref)
+            if entry.collection != _ARTIFACT_COLLECTIONS[artifact.artifact_kind].value:
+                return False
+            if artifact.artifact_kind == ReleaseArtifactKind.SOURCE:
+                if entry.payload_type != "governed_source_v2":
+                    return False
+                GovernedSourceV2.model_validate(entry.payload)
+            elif (
+                artifact.artifact_kind == ReleaseArtifactKind.CLINICAL_CLAIM
+                and entry.payload_type == "machine_draft_claim_v2"
+            ):
+                from continucare.knowledge.ops.evidence import MachineDraftClaim
+
+                MachineDraftClaim.model_validate(entry.payload)
+        for gap_ref in candidate.blocking_gap_refs:
+            gap_entry = ledger.get(gap_ref)
+            if (
+                gap_entry.collection != LedgerCollection.GAP.value
+                or gap_entry.payload_type != "knowledge_gap"
+            ):
+                return False
+            KnowledgeGap.model_validate(gap_entry.payload)
+    except (KeyError, KnowledgeOpsIntegrityError, ValidationError, ValueError):
+        return False
+    return True
+
+
+def _ledger_ref_resolves(ledger: AppendOnlyLedger, reference: LedgerRef) -> bool:
+    try:
+        ledger.get(reference)
+    except (KeyError, KnowledgeOpsIntegrityError, ValidationError, ValueError):
+        return False
+    return True
 
 
 def _blocker(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -32,6 +33,8 @@ from continucare.knowledge.ops import (
     ReviewPacketBuilder,
     ReviewerIdentity,
     ReviewSubjectKind,
+    SourceCandidate,
+    SourceSnapshot,
     load_builtin_ops_bundle,
 )
 from continucare.knowledge.ops.models import (
@@ -49,6 +52,11 @@ LIMITATIONS = (
     EvidenceLimitationCode.RIGHTS_UNRESOLVED,
     EvidenceLimitationCode.METADATA_ONLY,
     EvidenceLimitationCode.CLINICAL_INTERPRETATION_UNREVIEWED,
+)
+PHONE_BEARING_HEX64 = "a" * 8 + "13800138000" + "b" * 45
+VERIFIED_DIGEST_PAYLOAD = b"verified-digest-fixture-318"
+VERIFIED_DIGEST_SHA256 = (
+    "0801d1a49c36a5ca5dff318001ec48a16ebcb2603b0bbc3ab17707581220db7b"
 )
 
 
@@ -103,6 +111,19 @@ def _author(*, identity: str = "synthetic-machine-author", principal: str = "syn
         provenance_reference="urn:continucare:synthetic:machine-derivation",
         provenance_evidence_sha256="a" * 64,
         synthetic=True,
+    )
+
+
+def _ledger_state(ledger: AppendOnlyLedger):
+    return (
+        ledger.verify_all(),
+        tuple(
+            (
+                collection.value,
+                tuple(entry.ref for entry in ledger.list_heads(collection)),
+            )
+            for collection in LedgerCollection
+        ),
     )
 
 
@@ -184,6 +205,134 @@ def test_evidence_candidate_is_independently_typed_and_digest_only(tmp_path: Pat
 
     with pytest.raises(ValidationError):
         EvidenceCandidate.model_validate({**entry.payload, "snippet": "forbidden"})
+
+
+def test_verified_phone_bearing_snapshot_digest_survives_machine_lineage(
+    tmp_path: Path,
+) -> None:
+    bundle, profile, ledger, acquisition = _acquire(tmp_path)
+    digest = hashlib.sha256(VERIFIED_DIGEST_PAYLOAD).hexdigest()
+    assert digest == VERIFIED_DIGEST_SHA256
+    snapshot = SourceSnapshot.model_validate(
+        ledger.get(acquisition.snapshot_refs[0]).payload
+    )
+    assert snapshot.quarantine_blob is not None
+    verified_snapshot = snapshot.model_copy(
+        update={
+            "content_sha256": digest,
+            "quarantine_blob": snapshot.quarantine_blob.model_copy(
+                update={
+                    "content_sha256": digest,
+                    "relative_path": f"blobs/{digest}.bin",
+                }
+            ),
+        }
+    )
+    snapshot_ref = ledger.append(
+        LedgerCollection.SNAPSHOT,
+        snapshot.snapshot_id,
+        payload_type="source_snapshot",
+        payload=verified_snapshot,
+        recorded_by="system:verified-digest-fixture",
+        recorded_at=NOW + timedelta(minutes=1),
+        synthetic=True,
+        expected_record_version=2,
+    ).ref
+    author = _author()
+    evidence_ref = EvidenceCandidateService(bundle=bundle, ledger=ledger).stage(
+        candidate_id="evc-phone-bearing-derived-digest",
+        source_candidate_ref=acquisition.candidate_refs[0],
+        source_snapshot_ref=snapshot_ref,
+        connector_version="1.0.0",
+        parser_id="synthetic-metadata-record-parser",
+        parser_version="1.0.0",
+        benchmark_symptom_refs=("core-symptom-nausea",),
+        proposed_knowledge_layer="L1_terminology",
+        proposed_claim_type="metadata-support-candidate",
+        proposed_scope=profile.scope,
+        derivation_provenance=EvidenceDerivationProvenance(
+            fixture_set_id="knowledge-ops-five-domain-fixtures",
+            extraction_profile_id="synthetic-metadata-only-v1",
+            selected_metadata_fields=("stable_source_key", "document_version"),
+        ),
+        known_limitation_codes=LIMITATIONS,
+        author_provenance=author,
+        recorded_by=author.author_identity_id,
+        recorded_at=NOW + timedelta(minutes=2),
+    )
+    candidate = EvidenceCandidate.model_validate(ledger.get(evidence_ref).payload)
+    assert candidate.whole_record_sha256 == digest
+
+    claim_ref = EvidenceCandidatePromotionService(
+        ledger=ledger
+    ).promote_to_draft_claim(
+        evidence_candidate_ref=evidence_ref,
+        claim_id="dcl-phone-bearing-derived-digest",
+        author_provenance=author.model_copy(
+            update={"authored_at": NOW + timedelta(minutes=3)}
+        ),
+        created_by=author.author_identity_id,
+        created_at=NOW + timedelta(minutes=4),
+    )
+    assert MachineDraftClaim.model_validate(ledger.get(claim_ref).payload)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["document_sha256", "entry_sha256", "attestation_sha256"],
+)
+def test_source_candidate_open_metadata_never_inherits_digest_trust(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    _bundle, _profile, ledger, acquisition = _acquire(tmp_path)
+    before = _ledger_state(ledger)
+    payload = dict(ledger.get(acquisition.candidate_refs[0]).payload)
+    payload["metadata"] = {field: PHONE_BEARING_HEX64}
+
+    with pytest.raises(
+        KnowledgeOpsPolicyError, match="appears to contain personal data"
+    ):
+        SourceCandidate.model_validate(payload)
+
+    assert _ledger_state(ledger) == before
+
+
+def test_unbound_author_provenance_digest_is_rejected_before_stage_write(
+    tmp_path: Path,
+) -> None:
+    bundle, profile, ledger, acquisition = _acquire(tmp_path)
+    author = _author().model_copy(
+        update={"provenance_evidence_sha256": PHONE_BEARING_HEX64}
+    )
+    before = _ledger_state(ledger)
+
+    with pytest.raises(
+        KnowledgeOpsPolicyError, match="appears to contain personal data"
+    ):
+        EvidenceCandidateService(bundle=bundle, ledger=ledger).stage(
+            candidate_id="evc-untrusted-provenance-digest",
+            source_candidate_ref=acquisition.candidate_refs[0],
+            source_snapshot_ref=acquisition.snapshot_refs[0],
+            connector_version="1.0.0",
+            parser_id="synthetic-metadata-record-parser",
+            parser_version="1.0.0",
+            benchmark_symptom_refs=("core-symptom-nausea",),
+            proposed_knowledge_layer="L1_terminology",
+            proposed_claim_type="metadata-support-candidate",
+            proposed_scope=profile.scope,
+            derivation_provenance=EvidenceDerivationProvenance(
+                fixture_set_id="knowledge-ops-five-domain-fixtures",
+                extraction_profile_id="synthetic-metadata-only-v1",
+                selected_metadata_fields=("stable_source_key", "document_version"),
+            ),
+            known_limitation_codes=LIMITATIONS,
+            author_provenance=author,
+            recorded_by=author.author_identity_id,
+            recorded_at=NOW + timedelta(minutes=2),
+        )
+
+    assert _ledger_state(ledger) == before
 
 
 def test_evidence_candidate_revisions_are_contiguous_append_only_history(
