@@ -39,6 +39,7 @@ from continucare.knowledge.ops.models import (
     KNOWLEDGE_OPS_CONTRACT_VERSION,
     ClinicalContextScope,
     CoverageValidationProfile,
+    GovernanceManifestEvidence,
     GovernanceGate,
     IntendedUse,
     KnowledgeLayer,
@@ -61,7 +62,6 @@ from continucare.knowledge.ops.read_model import (
     load_builtin_ops_read_model,
 )
 from continucare.knowledge.ops.release import (
-    GovernanceManifestEvidence,
     KnowledgeRelease,
     KnowledgeReleaseBlocked,
     KnowledgeReleaseCandidate,

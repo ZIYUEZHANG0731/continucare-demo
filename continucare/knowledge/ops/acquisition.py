@@ -396,6 +396,8 @@ class AcquisitionService:
                 "acquisition scope must equal the exact frozen validation profile scope"
             )
         policies = tuple(self._bundle.source_policy(policy_id) for policy_id in request.policy_ids)
+        if any(policy.status != "active" for policy in policies):
+            raise KnowledgeOpsPolicyError("acquisition cannot use a retired SourcePolicy")
         if self._environment == AcquisitionEnvironment.PRODUCTION:
             if isinstance(self._connector, OfflineFixtureConnector):
                 raise KnowledgeOpsPolicyError(
@@ -450,6 +452,7 @@ class AcquisitionService:
                     )
                     continue
                 for resource in resources:
+                    self._validate_discovered_resource(request, policy, resource)
                     logical_source_key = (
                         f"{resource.connector_id}-{policy.policy_id}-{resource.stable_id}"
                     )
@@ -475,10 +478,7 @@ class AcquisitionService:
                         else SourceSnapshot.model_validate(previous_snapshot_entry.payload)
                     )
                     document = self._connector.fetch(resource, policy)
-                    if not document.synthetic:
-                        raise KnowledgeOpsPolicyError(
-                            "synthetic acquisition run received non-synthetic bytes"
-                        )
+                    self._validate_fetched_document(resource, policy, document)
                     persist_decision = policy.decision_for(SourceOperation.PERSIST_SNAPSHOT)
                     blob = self._quarantine.put_fixture(
                         document, policy_decision=persist_decision
@@ -622,6 +622,75 @@ class AcquisitionService:
             discovered_at=observed_at,
             synthetic=resource.synthetic,
         )
+
+    def _validate_discovered_resource(self, request, policy, resource) -> None:
+        if (
+            resource.connector_id != self._connector.connector_id
+            or resource.validation_profile_id != request.validation_profile_id
+            or resource.policy_id != policy.policy_id
+        ):
+            raise KnowledgeOpsPolicyError(
+                "connector returned a resource outside the exact acquisition request"
+            )
+        if not resource.synthetic:
+            raise KnowledgeOpsPolicyError(
+                "Knowledge Ops v2.0 acquisition accepts synthetic resources only"
+            )
+        if resource.source_type not in policy.source_types:
+            raise KnowledgeOpsPolicyError(
+                "connector resource source_type is outside SourcePolicy"
+            )
+        policy_jurisdictions = {
+            (item.system, item.code) for item in policy.source_jurisdictions
+        }
+        resource_jurisdictions = {
+            (item.system, item.code) for item in resource.jurisdictions
+        }
+        if not resource_jurisdictions.issubset(policy_jurisdictions):
+            raise KnowledgeOpsPolicyError(
+                "connector resource jurisdiction is outside SourcePolicy"
+            )
+        if not set(resource.languages).issubset(set(policy.languages)):
+            raise KnowledgeOpsPolicyError(
+                "connector resource language is outside SourcePolicy"
+            )
+        assert_no_sensitive_data(resource.model_dump(mode="json"))
+
+    def _validate_fetched_document(self, resource, policy, document) -> None:
+        if (
+            document.connector_id != self._connector.connector_id
+            or document.connector_id != resource.connector_id
+            or document.stable_id != resource.stable_id
+        ):
+            raise KnowledgeOpsPolicyError(
+                "connector returned bytes outside the exact discovered resource"
+            )
+        if not document.synthetic:
+            raise KnowledgeOpsPolicyError(
+                "synthetic acquisition run received non-synthetic bytes"
+            )
+        expected_url = validate_url_against_policy(
+            str(resource.canonical_url), policy
+        )
+        fetched_url = validate_url_against_policy(document.canonical_url, policy)
+        if fetched_url != expected_url:
+            raise KnowledgeOpsPolicyError(
+                "fetched document URL differs from the discovered resource"
+            )
+        if document.content_type not in policy.allowed_content_types:
+            raise KnowledgeOpsPolicyError(
+                "fetched document content type is outside SourcePolicy"
+            )
+        if len(document.body) > policy.maximum_response_bytes:
+            raise KnowledgeOpsPolicyError(
+                "fetched document exceeds SourcePolicy byte limit"
+            )
+        if hashlib.sha256(document.body).hexdigest() != document.content_sha256:
+            raise KnowledgeOpsIntegrityError("fetched document digest mismatch")
+        if document.redirect_urls or document.peer_ips:
+            raise KnowledgeOpsPolicyError(
+                "synthetic fixture fetch cannot carry live transport attestations"
+            )
 
     def _default_source_gaps(
         self,

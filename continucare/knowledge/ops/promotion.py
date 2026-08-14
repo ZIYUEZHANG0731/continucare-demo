@@ -32,6 +32,7 @@ from continucare.knowledge.ops.store import (
     LedgerCollection,
     LedgerRef,
 )
+from continucare.knowledge.ops.security import validate_url_against_policy
 
 
 class PromotionDecision(StrictModel):
@@ -165,6 +166,33 @@ class SourcePromotionService:
         policy = self._bundle.source_policy(
             candidate.policy.policy_id, candidate.policy.policy_version
         )
+        if policy.status != "active":
+            raise KnowledgeOpsPolicyError("retired SourcePolicy cannot promote a Source")
+        canonical_url = validate_url_against_policy(str(candidate.canonical_url), policy)
+        snapshot_url = validate_url_against_policy(str(snapshot.canonical_url), policy)
+        if snapshot_url != canonical_url:
+            raise KnowledgeOpsPolicyError(
+                "SourceSnapshot canonical URL differs from SourceCandidate"
+            )
+        if snapshot.content_type not in policy.allowed_content_types:
+            raise KnowledgeOpsPolicyError(
+                "SourceSnapshot content type is outside SourcePolicy"
+            )
+        if snapshot.content_size > policy.maximum_response_bytes:
+            raise KnowledgeOpsPolicyError("SourceSnapshot exceeds SourcePolicy byte limit")
+        if candidate.source_type not in policy.source_types:
+            raise KnowledgeOpsPolicyError("SourceCandidate type is outside SourcePolicy")
+        policy_jurisdictions = {
+            (item.system, item.code) for item in policy.source_jurisdictions
+        }
+        if not {
+            (item.system, item.code) for item in candidate.jurisdictions
+        }.issubset(policy_jurisdictions):
+            raise KnowledgeOpsPolicyError(
+                "SourceCandidate jurisdiction is outside SourcePolicy"
+            )
+        if not set(candidate.languages).issubset(set(policy.languages)):
+            raise KnowledgeOpsPolicyError("SourceCandidate language is outside SourcePolicy")
         if policy.decision_for(SourceOperation.REGISTER_LINK_METADATA) != "allow":
             raise KnowledgeOpsPolicyError("SourcePolicy blocks Source registration")
 
@@ -187,6 +215,12 @@ class SourcePromotionService:
                 raise KnowledgeOpsPolicyError(
                     "promotion decision evidence must reference review events"
                 )
+            if self._ledger.head(
+                evidence_ref.collection, evidence_ref.record_id
+            ).ref != evidence_ref:
+                raise KnowledgeOpsPolicyError(
+                    "promotion decision uses a stale review event"
+                )
         for gap_ref in decision.blocking_gap_refs:
             gap_entry = self._ledger.get(gap_ref)
             if gap_entry.collection != LedgerCollection.GAP.value:
@@ -197,6 +231,10 @@ class SourcePromotionService:
             if gap.lifecycle != "open":
                 raise KnowledgeOpsPolicyError(
                     "promotion decision may only carry current open gaps"
+                )
+            if self._ledger.head(gap_ref.collection, gap_ref.record_id).ref != gap_ref:
+                raise KnowledgeOpsPolicyError(
+                    "promotion decision uses a stale KnowledgeGap"
                 )
 
         if self._environment == AcquisitionEnvironment.SYNTHETIC_TEST:
@@ -224,6 +262,13 @@ class SourcePromotionService:
                 raise KnowledgeOpsPolicyError(
                     "production Source promotion is blocked by unresolved gaps"
                 )
+            if (
+                not self._bundle.release_intent.formal_reviewers_available
+                or not self._bundle.release_intent.formal_license_decisions_available
+            ):
+                raise KnowledgeOpsPolicyError(
+                    "governance bundle has no formal reviewer/license authority"
+                )
             access_mode = "link_only"
             production_eligible = True
             registry_status = "registered"
@@ -234,7 +279,7 @@ class SourcePromotionService:
             candidate_ref=candidate_ref,
             snapshot_ref=snapshot_ref,
             policy=candidate.policy,
-            canonical_url=candidate.canonical_url,
+            canonical_url=canonical_url,
             title=candidate.title,
             issuing_authority=candidate.issuing_authority,
             source_type=candidate.source_type,

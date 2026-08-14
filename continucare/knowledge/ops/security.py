@@ -68,6 +68,7 @@ _CN_NATIONAL_ID = re.compile(r"(?<!\d)\d{17}[0-9Xx](?!\w)")
 _LABELED_IDENTIFIER = re.compile(
     r"(?i)(?:patient|patient[ _-]?id|mrn|medical[ _-]?record|身份证|病历号|患者)\s*[:=]"
 )
+_INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
 
 def assert_deidentified_query_terms(terms: Sequence[str]) -> None:
@@ -160,11 +161,19 @@ def validate_url_against_policy(url: str, policy: SourcePolicy) -> str:
             f"source host {host!r} is outside SourcePolicy {policy.policy_id}"
         )
 
-    decoded_path = unquote(parsed.path)
+    if _INVALID_PERCENT_ESCAPE.search(parsed.path) or _INVALID_PERCENT_ESCAPE.search(
+        parsed.query
+    ):
+        raise KnowledgeOpsPolicyError("source URL contains an invalid percent escape")
+    decoded_path = _fully_unquote(parsed.path, component="path")
+    if any(ord(character) < 32 for character in decoded_path):
+        raise KnowledgeOpsPolicyError("source URL path contains encoded control characters")
     if "\\" in parsed.path or "\\" in decoded_path:
         raise KnowledgeOpsPolicyError("source URL path cannot contain backslashes")
     if any(part in {".", ".."} for part in decoded_path.split("/")):
         raise KnowledgeOpsPolicyError("source URL path cannot contain traversal segments")
+    if _contains_sensitive_text(decoded_path):
+        raise KnowledgeOpsPolicyError("source URL path appears to contain personal data")
 
     try:
         query_pairs = parse_qsl(
@@ -184,7 +193,12 @@ def validate_url_against_policy(url: str, policy: SourcePolicy) -> str:
             )
         if any(part in lowered for part in _SENSITIVE_QUERY_KEY_PARTS):
             raise KnowledgeOpsPolicyError("source URL query cannot contain credentials")
-        if len(value) > 256 or _contains_sensitive_text(value):
+        decoded_value = _fully_unquote(value, component="query value")
+        if (
+            len(decoded_value) > 256
+            or any(ord(character) < 32 for character in decoded_value)
+            or _contains_sensitive_text(decoded_value)
+        ):
             raise KnowledgeOpsPolicyError(
                 f"source URL query value for {key!r} is unsafe or contains personal data"
             )
@@ -240,4 +254,16 @@ def _contains_sensitive_text(value: str) -> bool:
             _CN_NATIONAL_ID,
             _LABELED_IDENTIFIER,
         )
+    )
+
+
+def _fully_unquote(value: str, *, component: str) -> str:
+    current = value
+    for _ in range(4):
+        decoded = unquote(current)
+        if decoded == current:
+            return decoded
+        current = decoded
+    raise KnowledgeOpsPolicyError(
+        f"source URL {component} uses excessive nested percent encoding"
     )

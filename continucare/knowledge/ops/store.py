@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import secrets
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -134,7 +135,14 @@ class AppendOnlyLedger:
             raise ValueError("recorded_at must include a timezone")
 
         lock_path = self._locks_root / f"{collection_value.value}--{record_id}.lock"
-        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            lock_fd = os.open(
+                lock_path,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except OSError as exc:
+            raise KnowledgeOpsIntegrityError("ledger lock file is unsafe") from exc
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             history = self._history_unlocked(collection_value, record_id)
@@ -241,11 +249,25 @@ class AppendOnlyLedger:
         collection_dir = self._records_root / collection.value
         record_dir = collection_dir / record_id
         if create:
-            collection_dir.mkdir(mode=0o700, exist_ok=True)
-            record_dir.mkdir(mode=0o700, exist_ok=True)
-        for path in (collection_dir, record_dir):
-            if path.exists() and path.is_symlink():
-                raise KnowledgeOpsIntegrityError("ledger path cannot be a symlink")
+            for path in (collection_dir, record_dir):
+                if path.is_symlink():
+                    raise KnowledgeOpsIntegrityError(
+                        "ledger path cannot be a symlink"
+                    )
+                try:
+                    path.mkdir(mode=0o700)
+                except FileExistsError:
+                    pass
+                if path.is_symlink() or not path.is_dir():
+                    raise KnowledgeOpsIntegrityError(
+                        "ledger path must be a regular directory"
+                    )
+        else:
+            for path in (collection_dir, record_dir):
+                if path.exists() and path.is_symlink():
+                    raise KnowledgeOpsIntegrityError(
+                        "ledger path cannot be a symlink"
+                    )
         return record_dir
 
     def _history_unlocked(
@@ -256,7 +278,19 @@ class AppendOnlyLedger:
             return ()
         if record_dir.is_symlink() or not record_dir.is_dir():
             raise KnowledgeOpsIntegrityError("invalid ledger record path")
-        paths = sorted(record_dir.glob("*.json"))
+        paths: list[Path] = []
+        for child in sorted(record_dir.iterdir()):
+            if (
+                not child.is_symlink()
+                and child.is_file()
+                and re.fullmatch(r"\.\d{8}\.json\.[0-9a-f]{24}\.tmp", child.name)
+            ):
+                continue
+            if child.is_symlink() or not child.is_file() or not child.name.endswith(".json"):
+                raise KnowledgeOpsIntegrityError(
+                    "ledger record directory contains an unexpected entry"
+                )
+            paths.append(child)
         expected_names = [f"{index:08d}.json" for index in range(1, len(paths) + 1)]
         if [path.name for path in paths] != expected_names:
             raise KnowledgeOpsIntegrityError("ledger versions must be contiguous")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -211,7 +212,11 @@ def test_review_packet_pins_exact_subject_scope_gaps_and_safety_boundary(tmp_pat
 
     assert packet.subject.subject_kind == "source_candidate"
     assert packet.subject.object_ref == acquisition.candidate_refs[0]
-    assert packet.subject_payload_sha256 == acquisition.candidate_refs[0].entry_sha256
+    assert packet.subject_entry_sha256 == acquisition.candidate_refs[0].entry_sha256
+    assert packet.governance_bundle_id == bundle.index.bundle_id
+    assert packet.governance_bundle_version == bundle.index.bundle_version
+    assert packet.governance_index_sha256 == bundle.index_sha256()
+    assert packet.governance_manifests == bundle.manifest_evidence()
     assert packet.gate == "source_promotion"
     assert packet.requested_roles == ("knowledge_curator", "rights_officer")
     assert packet.requested_source_operations == ("register_link_metadata",)
@@ -224,6 +229,35 @@ def test_review_packet_pins_exact_subject_scope_gaps_and_safety_boundary(tmp_pat
     assert packet.contains_patient_data is False
     assert packet.knowledge_effect == "informational_only"
     assert packet.runtime_authority == "none"
+
+
+def test_review_packet_contract_rejects_subject_digest_mismatch(tmp_path):
+    bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
+    packet_ref = _source_review_packet(bundle, profile, ledger, acquisition)
+    payload = ledger.get(packet_ref).payload
+    payload["subject_entry_sha256"] = "0" * 64
+
+    with pytest.raises(ValidationError, match="subject digest"):
+        ReviewPacket.model_validate(payload)
+
+
+def test_packet_builder_adds_default_operation_to_explicit_operations(tmp_path):
+    bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
+    packet_ref = ReviewPacketBuilder(bundle=bundle, ledger=ledger).build(
+        subject_kind="source_candidate",
+        subject_ref=acquisition.candidate_refs[0],
+        gate="source_promotion",
+        scope=profile.scope,
+        generated_by="system:test",
+        known_limitations=("Synthetic expanded operation check only.",),
+        requested_source_operations=("persist_snapshot",),
+    )
+    packet = ReviewPacket.model_validate(ledger.get(packet_ref).payload)
+
+    assert packet.requested_source_operations == (
+        "register_link_metadata",
+        "persist_snapshot",
+    )
 
 
 def test_review_packet_discovers_related_open_gaps_when_caller_omits_them(tmp_path):
@@ -338,6 +372,105 @@ def test_synthetic_review_events_are_append_only_and_never_count_toward_release(
     assert ledger.get(packet_ref).synthetic is True
 
 
+def test_gate_decision_rejects_packet_from_different_governance_bundle(tmp_path):
+    bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
+    _approve_source_synthetically(bundle, profile, ledger, acquisition)
+    changed_bundle = replace(
+        bundle,
+        index=bundle.index.model_copy(
+            update={"bundle_version": bundle.index.bundle_version + 1}
+        ),
+    )
+
+    assert ReviewLedgerDecisionProvider(
+        bundle=changed_bundle, ledger=ledger
+    ).resolve_gate(
+        acquisition.candidate_refs[0], GovernanceGate.SOURCE_PROMOTION
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "updates, message",
+    [
+        ({"requested_roles": ("knowledge_curator",)}, "required role"),
+        ({"requested_source_operations": ()}, "required Source operation"),
+    ],
+)
+def test_review_event_revalidates_direct_packet_bypass(tmp_path, updates, message):
+    bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
+    packet_ref = _source_review_packet(bundle, profile, ledger, acquisition)
+    packet = ReviewPacket.model_validate(ledger.get(packet_ref).payload)
+    bypass_packet = packet.model_copy(update=updates)
+    bypass_ref = ledger.append(
+        LedgerCollection.REVIEW_PACKET,
+        packet.packet_id,
+        payload_type="review_packet",
+        payload=bypass_packet,
+        recorded_by="system:test-bypass-attempt",
+        synthetic=True,
+    ).ref
+    service = ReviewEventService(
+        bundle=bundle,
+        ledger=ledger,
+        reviewers=_reviewers("knowledge_curator"),
+    )
+
+    with pytest.raises(KnowledgeOpsPolicyError, match=message):
+        service.record(
+            packet_ref=bypass_ref,
+            reviewer_identity_id="synthetic-knowledge_curator",
+            reviewer_role="knowledge_curator",
+            axis="metadata_quality",
+            decision="approved",
+            rationale="Synthetic direct-ledger bypass must fail closed.",
+            decision_payload=_payload(),
+        )
+    assert ledger.list_heads(LedgerCollection.REVIEW_EVENT) == ()
+
+
+def test_gate_decision_revalidates_direct_event_payload_bypass(tmp_path):
+    bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
+    _, event_refs, decisions, _ = _approve_source_synthetically(
+        bundle, profile, ledger, acquisition
+    )
+    rights_entry = ledger.get(event_refs[1])
+    rights_event = ReviewEvent.model_validate(rights_entry.payload)
+    bypass_event = rights_event.model_copy(update={"decision_payload": _payload()})
+    ledger.append(
+        LedgerCollection.REVIEW_EVENT,
+        event_refs[1].record_id,
+        payload_type="review_event_v2",
+        payload=bypass_event,
+        recorded_by="system:test-bypass-attempt",
+        synthetic=True,
+    )
+
+    assert decisions.resolve_gate(
+        acquisition.candidate_refs[0], GovernanceGate.SOURCE_PROMOTION
+    ) is None
+
+
+def test_review_event_rejects_personal_data_in_rationale(tmp_path):
+    bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
+    packet_ref = _source_review_packet(bundle, profile, ledger, acquisition)
+    service = ReviewEventService(
+        bundle=bundle,
+        ledger=ledger,
+        reviewers=_reviewers("knowledge_curator"),
+    )
+
+    with pytest.raises(KnowledgeOpsPolicyError, match="personal data"):
+        service.record(
+            packet_ref=packet_ref,
+            reviewer_identity_id="synthetic-knowledge_curator",
+            reviewer_role="knowledge_curator",
+            axis="metadata_quality",
+            decision="revision_requested",
+            rationale="Contact user@example.org for this review.",
+        )
+    assert ledger.list_heads(LedgerCollection.REVIEW_EVENT) == ()
+
+
 def test_latest_review_event_head_controls_gate_without_history_rewrite(tmp_path):
     bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
     packet_ref = _source_review_packet(bundle, profile, ledger, acquisition)
@@ -357,7 +490,7 @@ def test_latest_review_event_head_controls_gate_without_history_rewrite(tmp_path
         reviewer_identity_id="synthetic-knowledge_curator",
         reviewer_role="knowledge_curator",
         axis="metadata_quality",
-        decision="changes_requested",
+        decision="revision_requested",
         rationale="Synthetic change request supersedes the decision head.",
     )
     service.record(
@@ -654,6 +787,7 @@ def _synthetic_release_context(tmp_path):
         ),
         governance_bundle_id=bundle.index.bundle_id,
         governance_bundle_version=bundle.index.bundle_version,
+        governance_index_sha256=bundle.index_sha256(),
         governance_manifests=_manifest_evidence(bundle),
         artifacts=(
             ReleaseArtifact(
@@ -762,6 +896,7 @@ def test_empty_release_intent_is_explicitly_not_ready(tmp_path):
         intended_uses=("internal_knowledge_operations",),
         governance_bundle_id=bundle.index.bundle_id,
         governance_bundle_version=bundle.index.bundle_version,
+        governance_index_sha256=bundle.index_sha256(),
         governance_manifests=_manifest_evidence(bundle),
         artifacts=(),
         blocking_gap_refs=(),
@@ -814,6 +949,7 @@ def test_release_cannot_hide_gaps_carried_by_promoted_source(tmp_path):
         intended_uses=("informational_display",),
         governance_bundle_id=bundle.index.bundle_id,
         governance_bundle_version=bundle.index.bundle_version,
+        governance_index_sha256=bundle.index_sha256(),
         governance_manifests=_manifest_evidence(bundle),
         artifacts=(
             ReleaseArtifact(
@@ -838,6 +974,48 @@ def test_release_cannot_hide_gaps_carried_by_promoted_source(tmp_path):
     ) == len(acquisition.gap_refs) + 1
 
 
+def test_release_rejects_source_profile_substitution(tmp_path):
+    bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
+    _, _, decisions, source_ref = _approve_source_synthetically(
+        bundle, profile, ledger, acquisition
+    )
+    substituted_profile = next(
+        item
+        for item in bundle.coverage_profiles
+        if item.profile_id == "fixture-acute-high-risk"
+    )
+    readiness = ReleaseReadinessService(
+        bundle=bundle, ledger=ledger, decisions=decisions
+    )
+    candidate = KnowledgeReleaseCandidate(
+        release_candidate_id="profile-substitution-release",
+        intended_uses=("informational_display",),
+        governance_bundle_id=bundle.index.bundle_id,
+        governance_bundle_version=bundle.index.bundle_version,
+        governance_index_sha256=bundle.index_sha256(),
+        governance_manifests=_manifest_evidence(bundle),
+        artifacts=(
+            ReleaseArtifact(
+                artifact_kind="source",
+                object_ref=source_ref,
+                validation_profile_id=substituted_profile.profile_id,
+                scope=substituted_profile.scope,
+            ),
+        ),
+        created_at=datetime.now(timezone.utc),
+        created_by="system:test",
+        synthetic=True,
+    )
+    candidate_ref = readiness.stage_candidate(candidate)
+    report = ReleaseReadinessReport.model_validate(
+        ledger.get(readiness.assess(candidate_ref)).payload
+    )
+
+    assert "artifact_profile_scope_mismatch" in {
+        blocker.code for blocker in report.blockers
+    }
+
+
 def test_release_stage_rejects_mismatched_governance_manifest_evidence(tmp_path):
     bundle = load_builtin_ops_bundle()
     ledger = AppendOnlyLedger(tmp_path / "ledger")
@@ -853,6 +1031,7 @@ def test_release_stage_rejects_mismatched_governance_manifest_evidence(tmp_path)
         intended_uses=("internal_knowledge_operations",),
         governance_bundle_id=bundle.index.bundle_id,
         governance_bundle_version=bundle.index.bundle_version,
+        governance_index_sha256=bundle.index_sha256(),
         governance_manifests=tuple(evidence),
         created_at=datetime.now(timezone.utc),
         created_by="system:test",
@@ -862,6 +1041,59 @@ def test_release_stage_rejects_mismatched_governance_manifest_evidence(tmp_path)
     with pytest.raises(KnowledgeOpsPolicyError, match="does not match"):
         readiness.stage_candidate(candidate)
     assert ledger.verify_all() == 0
+
+    direct_ref = ledger.append(
+        LedgerCollection.RELEASE_CANDIDATE,
+        candidate.release_candidate_id,
+        payload_type="knowledge_release_candidate",
+        payload=candidate,
+        recorded_by="system:test-bypass-attempt",
+        synthetic=False,
+    ).ref
+    report = ReleaseReadinessReport.model_validate(
+        ledger.get(readiness.assess(direct_ref)).payload
+    )
+    assert "governance_manifest_mismatch" in {
+        blocker.code for blocker in report.blockers
+    }
+
+
+def test_release_candidate_personal_data_fails_stage_and_direct_bypass(tmp_path):
+    bundle = load_builtin_ops_bundle()
+    ledger = AppendOnlyLedger(tmp_path / "ledger")
+    decisions = ReviewLedgerDecisionProvider(bundle=bundle, ledger=ledger)
+    readiness = ReleaseReadinessService(
+        bundle=bundle,
+        ledger=ledger,
+        decisions=decisions,
+    )
+    candidate = KnowledgeReleaseCandidate(
+        release_candidate_id="personal-data-release",
+        intended_uses=("internal_knowledge_operations",),
+        governance_bundle_id=bundle.index.bundle_id,
+        governance_bundle_version=bundle.index.bundle_version,
+        governance_index_sha256=bundle.index_sha256(),
+        governance_manifests=_manifest_evidence(bundle),
+        created_at=datetime.now(timezone.utc),
+        created_by="user@example.org",
+        synthetic=True,
+    )
+
+    with pytest.raises(KnowledgeOpsPolicyError, match="personal data"):
+        readiness.stage_candidate(candidate)
+    direct_ref = ledger.append(
+        LedgerCollection.RELEASE_CANDIDATE,
+        candidate.release_candidate_id,
+        payload_type="knowledge_release_candidate",
+        payload=candidate,
+        recorded_by="system:test-bypass-attempt",
+        synthetic=True,
+    ).ref
+    report = ReleaseReadinessReport.model_validate(
+        ledger.get(readiness.assess(direct_ref)).payload
+    )
+
+    assert "patient_data_risk" in {blocker.code for blocker in report.blockers}
 
 
 def test_synthetic_reviewer_cannot_attach_to_nonsynthetic_release_packet(tmp_path):
@@ -878,6 +1110,7 @@ def test_synthetic_reviewer_cannot_attach_to_nonsynthetic_release_packet(tmp_pat
         intended_uses=("internal_knowledge_operations",),
         governance_bundle_id=bundle.index.bundle_id,
         governance_bundle_version=bundle.index.bundle_version,
+        governance_index_sha256=bundle.index_sha256(),
         governance_manifests=_manifest_evidence(bundle),
         created_at=datetime.now(timezone.utc),
         created_by="system:test",
@@ -932,6 +1165,7 @@ def test_release_contract_rejects_runtime_authority_and_clinical_rules():
         "intended_uses": ["informational_display"],
         "governance_bundle_id": bundle.index.bundle_id,
         "governance_bundle_version": bundle.index.bundle_version,
+        "governance_index_sha256": bundle.index_sha256(),
         "governance_manifests": _manifest_evidence(bundle),
         "artifacts": [],
         "blocking_gap_refs": [],

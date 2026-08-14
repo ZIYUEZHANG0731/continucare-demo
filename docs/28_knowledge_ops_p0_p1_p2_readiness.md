@@ -67,6 +67,7 @@ P0 adds:
 - eight manual governance gates for Source promotion, content persistence,
   mapping, translation, Claim, Binding, patient content, and release;
 - a hash-pinned v2 bundle loader that loads no partial state;
+- append-only manifest history with an explicit current head per manifest ID;
 - a UI-independent incremental read model;
 - a filesystem append-only ledger with exact versions, predecessor SHA-256,
   canonical JSON, exclusive locking, atomic no-overwrite creation, and full
@@ -95,7 +96,8 @@ indexing are either human-review-required or denied.
 
 The manifest statements are deliberately conservative. `needs_verification`,
 `registration_required`, and `license_required` are blockers, not informal
-permission claims.
+permission claims. No built-in policy currently claims verified-open or
+verified-restricted reuse rights.
 
 ## 5. P1 acquisition staging
 
@@ -106,7 +108,8 @@ P1 implements the following offline flow:
 2. discover fixture metadata through an `OfflineFixtureConnector`;
 3. validate every URL against its Source Policy before connector access;
 4. create an append-only `SourceCandidate`;
-5. fetch only a hash-pinned synthetic fixture;
+5. fetch only a hash-pinned synthetic fixture, then independently revalidate
+   connector/resource identity, URL, content type, byte limit, and digest;
 6. place exact bytes in a content-addressed synthetic quarantine;
 7. create an append-only `SourceSnapshot` containing content and metadata
    digests;
@@ -175,7 +178,9 @@ Synthetic promotion results in:
 - `runtime_authority=none`.
 
 A production Source cannot be promoted with synthetic evidence or unresolved
-gaps. No automatic clinical-Claim or Binding promotion API exists.
+gaps. Contract v2.0 additionally blocks production Source promotion because
+its pinned intent declares that neither formal reviewers nor formal license
+decisions exist. No automatic clinical-Claim or Binding promotion API exists.
 
 ## 8. P2 reviewer and Review Packet model
 
@@ -201,6 +206,8 @@ cannot approve. Synthetic identities can act only on synthetic packets.
 A Review Packet pins:
 
 - exact subject LedgerRef and digest;
+- exact governance bundle ID/version, canonical index digest, and every
+  historical/current manifest digest;
 - subject kind and governance gate;
 - exact requested roles;
 - exact Source operations requiring a rights decision;
@@ -223,11 +230,21 @@ failure. A rights approval must explicitly approve every requested Source
 operation; omitted operations remain denied. Clinical, terminology, and
 pharmacy approvals must confirm the packet's exact scope.
 
+ReviewEvent decisions are explicit `in_review`, `revision_requested`,
+`rejected`, or `approved` states; later events append rather than mutate the
+earlier decision.
+
 Events form one append-only ledger chain for each exact subject and role. The
 latest head controls the gate. A new packet invalidates approvals tied to an
 older packet. Synthetic event heads may exercise the mechanism but always have
 `counts_toward_release=false`. A multi-role gate also requires distinct reviewer
 identities, preserving basic separation of duties.
+
+Event recording and gate resolution independently revalidate the packet's
+current subject, required roles and Source operations, policy/profile scope,
+open Gaps, governance pins, and approval payloads. Direct low-level ledger
+writes that omit or contradict those constraints are rejected by gate
+resolution.
 
 ## 9. KnowledgeRelease readiness
 
@@ -239,9 +256,10 @@ The v2 bundle contains a release-intent manifest with:
 - `release_ready=false`;
 - `status=readiness_only_blocked`.
 
-A `KnowledgeReleaseCandidate` pins the exact governance bundle and every
-manifest digest. The readiness service rejects manifest substitution before it
-records the candidate.
+A `KnowledgeReleaseCandidate` pins the exact governance bundle, canonical
+bundle-index digest, and every manifest digest. The readiness service rejects
+manifest substitution before it records the candidate and rechecks the same
+evidence during assessment.
 
 Readiness fails closed for any of the following:
 

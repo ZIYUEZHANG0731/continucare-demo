@@ -9,16 +9,16 @@ from typing import Literal
 
 from pydantic import Field, ValidationError, field_validator, model_validator
 
-from continucare.knowledge.ops.acquisition import KnowledgeGap
+from continucare.knowledge.ops.acquisition import KnowledgeGap, SourceCandidate
 from continucare.knowledge.ops.manifests import KnowledgeOpsBundle
 from continucare.knowledge.ops.models import (
     ClinicalContextScope,
+    GovernanceManifestEvidence,
     GovernanceGate,
     IntendedUse,
     KnowledgeOpsIntegrityError,
     KnowledgeOpsPolicyError,
     NonBlank,
-    ReviewerRole,
     SafeId,
     Sha256,
     StrictModel,
@@ -74,12 +74,6 @@ class ReleaseArtifact(StrictModel):
     scope: ClinicalContextScope
 
 
-class GovernanceManifestEvidence(StrictModel):
-    file_id: SafeId
-    file_version: int = Field(ge=1)
-    manifest_sha256: Sha256
-
-
 class KnowledgeReleaseCandidate(StrictModel):
     release_candidate_id: SafeId
     target_jurisdiction: Literal["CN"] = "CN"
@@ -87,6 +81,7 @@ class KnowledgeReleaseCandidate(StrictModel):
     intended_uses: tuple[IntendedUse, ...] = Field(min_length=1)
     governance_bundle_id: SafeId
     governance_bundle_version: int = Field(ge=1)
+    governance_index_sha256: Sha256
     governance_manifests: tuple[GovernanceManifestEvidence, ...] = Field(
         min_length=1
     )
@@ -134,6 +129,7 @@ class KnowledgeReleaseCandidate(StrictModel):
 
 class ReadinessBlockerCode(StrEnum):
     GOVERNANCE_RELEASE_INTENT_BLOCKED = "governance_release_intent_blocked"
+    GOVERNANCE_MANIFEST_MISMATCH = "governance_manifest_mismatch"
     EMPTY_RELEASE = "empty_release"
     STALE_RELEASE_CANDIDATE = "stale_release_candidate"
     UNKNOWN_OR_STALE_ARTIFACT = "unknown_or_stale_artifact"
@@ -190,6 +186,7 @@ class KnowledgeRelease(StrictModel):
     intended_uses: tuple[IntendedUse, ...]
     governance_bundle_id: SafeId
     governance_bundle_version: int = Field(ge=1)
+    governance_index_sha256: Sha256
     governance_manifests: tuple[GovernanceManifestEvidence, ...] = Field(min_length=1)
     artifacts: tuple[ReleaseArtifact, ...] = Field(min_length=1)
     finalized_at: datetime
@@ -224,10 +221,12 @@ class ReleaseReadinessService:
     def stage_candidate(
         self, candidate: KnowledgeReleaseCandidate
     ) -> LedgerRef:
-        expected_manifests = _manifest_evidence(self._bundle)
+        assert_no_sensitive_data(candidate.model_dump(mode="json"))
+        expected_manifests = self._bundle.manifest_evidence()
         if (
             candidate.governance_bundle_id != self._bundle.index.bundle_id
             or candidate.governance_bundle_version != self._bundle.index.bundle_version
+            or candidate.governance_index_sha256 != self._bundle.index_sha256()
             or candidate.governance_manifests != expected_manifests
         ):
             raise KnowledgeOpsPolicyError(
@@ -262,6 +261,30 @@ class ReleaseReadinessService:
         blockers: list[ReadinessBlocker] = []
         production_reviews = 0
 
+        try:
+            assert_no_sensitive_data(candidate_entry.payload)
+        except KnowledgeOpsPolicyError:
+            blockers.append(
+                _blocker(
+                    ReadinessBlockerCode.PATIENT_DATA_RISK,
+                    "Release candidate failed the no-patient-data guard.",
+                    release_candidate_ref,
+                )
+            )
+
+        if (
+            candidate.governance_bundle_id != self._bundle.index.bundle_id
+            or candidate.governance_bundle_version != self._bundle.index.bundle_version
+            or candidate.governance_index_sha256 != self._bundle.index_sha256()
+            or candidate.governance_manifests != self._bundle.manifest_evidence()
+        ):
+            blockers.append(
+                _blocker(
+                    ReadinessBlockerCode.GOVERNANCE_MANIFEST_MISMATCH,
+                    "Release candidate does not pin the currently loaded governance bundle.",
+                    release_candidate_ref,
+                )
+            )
         if not self._bundle.release_intent.release_ready:
             blockers.append(
                 _blocker(
@@ -423,6 +446,40 @@ class ReleaseReadinessService:
                     continue
                 review_subject = source.candidate_ref
                 related_gap_subject_keys.add(_ref_key(source.candidate_ref))
+                try:
+                    source_candidate_entry = self._ledger.get(source.candidate_ref)
+                    if source_candidate_entry.collection != LedgerCollection.CANDIDATE.value:
+                        raise ValueError("wrong SourceCandidate collection")
+                    source_candidate = SourceCandidate.model_validate(
+                        source_candidate_entry.payload
+                    )
+                    assert_no_sensitive_data(source_candidate_entry.payload)
+                except KnowledgeOpsPolicyError:
+                    blockers.append(
+                        _blocker(
+                            ReadinessBlockerCode.PATIENT_DATA_RISK,
+                            "SourceCandidate failed the no-patient-data guard.",
+                            artifact.object_ref,
+                        )
+                    )
+                    continue
+                except (KnowledgeOpsIntegrityError, ValidationError, ValueError):
+                    blockers.append(
+                        _blocker(
+                            ReadinessBlockerCode.UNKNOWN_OR_STALE_ARTIFACT,
+                            "Source does not resolve to its exact SourceCandidate.",
+                            artifact.object_ref,
+                        )
+                    )
+                    continue
+                if source_candidate.validation_profile_id != artifact.validation_profile_id:
+                    blockers.append(
+                        _blocker(
+                            ReadinessBlockerCode.ARTIFACT_PROFILE_SCOPE_MISMATCH,
+                            "Source artifact validation profile differs from its Candidate.",
+                            artifact.object_ref,
+                        )
+                    )
                 if not source.production_eligible or source.synthetic:
                     blockers.append(
                         _blocker(
@@ -440,6 +497,15 @@ class ReleaseReadinessService:
                     _blocker(
                         ReadinessBlockerCode.ARTIFACT_REVIEW_MISSING,
                         "Artifact lacks the complete latest role approvals for its gate.",
+                        artifact.object_ref,
+                    )
+                )
+            elif decision.scope != artifact.scope:
+                effective_gap_refs.extend(decision.blocking_gap_refs)
+                blockers.append(
+                    _blocker(
+                        ReadinessBlockerCode.ARTIFACT_PROFILE_SCOPE_MISMATCH,
+                        "Artifact release scope differs from its exact review packet.",
                         artifact.object_ref,
                     )
                 )
@@ -491,7 +557,17 @@ class ReleaseReadinessService:
 
         for gap_entry in self._ledger.list_heads(LedgerCollection.GAP):
             try:
+                assert_no_sensitive_data(gap_entry.payload)
                 gap = KnowledgeGap.model_validate(gap_entry.payload)
+            except KnowledgeOpsPolicyError:
+                blockers.append(
+                    _blocker(
+                        ReadinessBlockerCode.PATIENT_DATA_RISK,
+                        "Gap ledger head failed the no-patient-data guard.",
+                        gap_entry.ref,
+                    )
+                )
+                continue
             except ValidationError:
                 blockers.append(
                     _blocker(
@@ -514,6 +590,7 @@ class ReleaseReadinessService:
                 gap_entry = self._ledger.get(gap_ref)
                 if gap_entry.collection != LedgerCollection.GAP.value:
                     raise ValueError("wrong collection")
+                assert_no_sensitive_data(gap_entry.payload)
                 gap = KnowledgeGap.model_validate(gap_entry.payload)
                 gap_head = self._ledger.head(
                     LedgerCollection.GAP, gap_ref.record_id
@@ -529,7 +606,17 @@ class ReleaseReadinessService:
                         )
                     )
                     gap_entry = gap_head
+                    assert_no_sensitive_data(gap_entry.payload)
                     gap = KnowledgeGap.model_validate(gap_entry.payload)
+            except KnowledgeOpsPolicyError:
+                blockers.append(
+                    _blocker(
+                        ReadinessBlockerCode.PATIENT_DATA_RISK,
+                        "Gap reference failed the no-patient-data guard.",
+                        gap_ref,
+                    )
+                )
+                continue
             except (KnowledgeOpsIntegrityError, ValidationError, ValueError):
                 blockers.append(
                     _blocker(
@@ -602,6 +689,7 @@ class ReleaseReadinessService:
             intended_uses=candidate.intended_uses,
             governance_bundle_id=candidate.governance_bundle_id,
             governance_bundle_version=candidate.governance_bundle_version,
+            governance_index_sha256=candidate.governance_index_sha256,
             governance_manifests=candidate.governance_manifests,
             artifacts=candidate.artifacts,
             finalized_at=timestamp,
@@ -662,16 +750,3 @@ def _derived_id(prefix: str, reference: LedgerRef) -> str:
         return raw
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
     return f"{raw[:107]}-{digest}"
-
-
-def _manifest_evidence(
-    bundle: KnowledgeOpsBundle,
-) -> tuple[GovernanceManifestEvidence, ...]:
-    return tuple(
-        GovernanceManifestEvidence(
-            file_id=pinned.ref.file_id,
-            file_version=pinned.ref.file_version,
-            manifest_sha256=pinned.manifest_sha256,
-        )
-        for pinned in bundle.index.files
-    )

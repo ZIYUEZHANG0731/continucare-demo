@@ -17,6 +17,7 @@ from continucare.knowledge.ops.models import (
     CoverageProfileManifest,
     CoverageValidationProfile,
     FileRef,
+    GovernanceManifestEvidence,
     GovernanceGate,
     KnowledgeOpsBundleIndex,
     KnowledgeReleaseIntent,
@@ -105,6 +106,26 @@ class KnowledgeOpsBundle:
                 return policy
         raise KeyError(f"unknown review gate {gate_value}")
 
+    def manifest_evidence(self) -> tuple[GovernanceManifestEvidence, ...]:
+        return tuple(
+            GovernanceManifestEvidence(
+                file_id=pinned.ref.file_id,
+                file_version=pinned.ref.file_version,
+                manifest_sha256=pinned.manifest_sha256,
+            )
+            for pinned in self.index.files
+        )
+
+    def index_sha256(self) -> str:
+        payload = json.dumps(
+            self.index.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
 
 def load_builtin_ops_bundle() -> KnowledgeOpsBundle:
     source = TraversableBundleSource(files("continucare.knowledge.manifests_v2"))
@@ -156,11 +177,25 @@ def load_ops_bundle(
         digests[pinned.ref.key()] = digest
 
     _validate_file_versions(envelopes, index.current_file_refs)
-    boundary_files = [item for item in envelopes if isinstance(item, SafetyBoundaryManifest)]
-    source_files = [item for item in envelopes if isinstance(item, SourcePolicyManifest)]
-    profile_files = [item for item in envelopes if isinstance(item, CoverageProfileManifest)]
-    review_files = [item for item in envelopes if isinstance(item, ReviewPolicyManifest)]
-    release_files = [item for item in envelopes if isinstance(item, ReleaseIntentManifest)]
+    current_keys = {item.key() for item in index.current_file_refs}
+    current_envelopes = [
+        item for item in envelopes if item.ref.key() in current_keys
+    ]
+    boundary_files = [
+        item for item in current_envelopes if isinstance(item, SafetyBoundaryManifest)
+    ]
+    source_files = [
+        item for item in current_envelopes if isinstance(item, SourcePolicyManifest)
+    ]
+    profile_files = [
+        item for item in current_envelopes if isinstance(item, CoverageProfileManifest)
+    ]
+    review_files = [
+        item for item in current_envelopes if isinstance(item, ReviewPolicyManifest)
+    ]
+    release_files = [
+        item for item in current_envelopes if isinstance(item, ReleaseIntentManifest)
+    ]
     if not all(
         len(items) == 1
         for items in (

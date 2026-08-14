@@ -23,6 +23,7 @@ class KnowledgeOpsReadModel(StrictModel):
     contract_version: Literal[KNOWLEDGE_OPS_CONTRACT_VERSION]
     bundle_id: SafeId
     bundle_version: int = Field(ge=1)
+    bundle_index_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     boundary: SafetyBoundary
     source_policies: tuple[SourcePolicy, ...]
     validation_profiles: tuple[CoverageValidationProfile, ...]
@@ -37,6 +38,7 @@ def build_ops_read_model(bundle: KnowledgeOpsBundle) -> KnowledgeOpsReadModel:
         contract_version=KNOWLEDGE_OPS_CONTRACT_VERSION,
         bundle_id=bundle.index.bundle_id,
         bundle_version=bundle.index.bundle_version,
+        bundle_index_sha256=bundle.index_sha256(),
         boundary=bundle.boundary,
         source_policies=bundle.source_policies,
         validation_profiles=bundle.coverage_profiles,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,8 +16,6 @@ from continucare.knowledge.ops import (
     AcquisitionService,
     AppendOnlyLedger,
     ChangeSet,
-    DiscoveredResource,
-    GapKind,
     GovernedSourceV2,
     GovernanceGate,
     GuardedHttpConnector,
@@ -248,6 +247,11 @@ def test_offline_connector_rejects_symlinked_fixture(tmp_path):
         "https://www.nmpa.gov.cn/a/../source",
         "https://www.nmpa.gov.cn/source#fragment",
         "https://www.nmpa.gov.cn/source?token=secret",
+        "https://www.nmpa.gov.cn/patient/user@example.org",
+        "https://www.nmpa.gov.cn/a/%252e%252e/source",
+        "https://www.nmpa.gov.cn/patient/user%2540example.org",
+        "https://www.nmpa.gov.cn/source%2500",
+        "https://www.nmpa.gov.cn/source%ZZ",
     ],
 )
 def test_url_guard_rejects_ssrf_and_credential_shapes(url):
@@ -377,6 +381,117 @@ def test_production_acquisition_rejects_offline_fixture_without_writing(tmp_path
 
     with pytest.raises(KnowledgeOpsPolicyError, match="cannot run in production"):
         service.run(_request("fixture-medication-followup", request_id="production"))
+    assert ledger.verify_all() == 0
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"validation_profile_id": "fixture-oncology-pro"},
+        {"policy_id": "hpo-official-release-metadata"},
+        {"synthetic": False},
+    ],
+)
+def test_acquisition_revalidates_connector_resources_before_staging(
+    tmp_path, updates
+):
+    bundle = load_builtin_ops_bundle()
+    request = _request("fixture-medication-followup", request_id="connector-boundary")
+    policy = bundle.source_policy("nmpa-cn-regulatory-metadata")
+    discovered = _connector().discover(request, policy)[0].model_copy(
+        update={"connector_id": "boundary-test", **updates}
+    )
+
+    class BoundaryConnector:
+        connector_id = "boundary-test"
+
+        def discover(self, request, policy):
+            return (discovered,)
+
+        def fetch(self, resource, policy):
+            raise AssertionError("invalid resource must fail before fetch")
+
+    service, ledger, _ = _service(tmp_path, connector=BoundaryConnector())
+    result = service.run(request)
+
+    assert result.status == "failed"
+    assert result.candidate_refs == ()
+    run = AcquisitionRun.model_validate(ledger.get(result.run_ref).payload)
+    assert run.failure_code == "policy_error"
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"connector_id": "different-connector"},
+        {"stable_id": "different-resource"},
+        {
+            "canonical_url": (
+                "https://www.nmpa.gov.cn/synthetic-offline-fixture/different"
+            )
+        },
+        {"content_type": "application/xml"},
+        {"content_sha256": "0" * 64},
+        {"synthetic": False},
+        {"redirect_urls": ("https://www.nmpa.gov.cn/redirect",)},
+    ],
+)
+def test_acquisition_revalidates_fetched_bytes_before_quarantine(tmp_path, updates):
+    bundle = load_builtin_ops_bundle()
+    request = _request("fixture-medication-followup", request_id="fetch-boundary")
+    policy = bundle.source_policy("nmpa-cn-regulatory-metadata")
+    fixture_connector = _connector()
+    fixture_resource = fixture_connector.discover(request, policy)[0]
+    discovered = fixture_resource.model_copy(
+        update={"connector_id": "fetch-boundary-test"}
+    )
+    fetched = replace(
+        fixture_connector.fetch(fixture_resource, policy),
+        **{"connector_id": "fetch-boundary-test", **updates},
+    )
+
+    class BoundaryConnector:
+        connector_id = "fetch-boundary-test"
+
+        def discover(self, request, policy):
+            return (discovered,)
+
+        def fetch(self, resource, policy):
+            return fetched
+
+    service, ledger, quarantine = _service(
+        tmp_path, connector=BoundaryConnector()
+    )
+    result = service.run(request)
+
+    assert result.status == "failed"
+    assert result.snapshot_refs == ()
+    assert list((quarantine.root / "blobs").iterdir()) == []
+    run = AcquisitionRun.model_validate(ledger.get(result.run_ref).payload)
+    assert run.failure_code in {"integrity_error", "policy_error"}
+
+
+def test_acquisition_rejects_retired_source_policy_before_writing(tmp_path):
+    bundle = load_builtin_ops_bundle()
+    policies = tuple(
+        (
+            policy.model_copy(update={"status": "retired"})
+            if policy.policy_id == "nmpa-cn-regulatory-metadata"
+            else policy
+        )
+        for policy in bundle.source_policies
+    )
+    retired_bundle = replace(bundle, source_policies=policies)
+    ledger = AppendOnlyLedger(tmp_path / "ledger")
+    service = AcquisitionService(
+        bundle=retired_bundle,
+        ledger=ledger,
+        quarantine=QuarantineBlobStore(tmp_path / "quarantine"),
+        connector=_connector(),
+    )
+
+    with pytest.raises(KnowledgeOpsPolicyError, match="retired SourcePolicy"):
+        service.run(_request("fixture-medication-followup", request_id="retired"))
     assert ledger.verify_all() == 0
 
 
@@ -557,6 +672,47 @@ def test_source_promotion_rejects_non_review_event_evidence(tmp_path):
             source_id="blocked-source",
             candidate_ref=result.candidate_refs[0],
             snapshot_ref=result.snapshot_refs[0],
+            promoted_by="system:test",
+        )
+
+
+def test_source_promotion_revalidates_snapshot_url_identity(tmp_path):
+    ledger, result, evidence = _promotion_context(tmp_path)
+    original = SourceSnapshot.model_validate(
+        ledger.get(result.snapshot_refs[0]).payload
+    )
+    changed_payload = original.model_dump(mode="json")
+    changed_payload["canonical_url"] = (
+        "https://www.nmpa.gov.cn/synthetic-offline-fixture/other"
+    )
+    changed = SourceSnapshot.model_validate(changed_payload)
+    changed_ref = ledger.append(
+        LedgerCollection.SNAPSHOT,
+        original.snapshot_id,
+        payload_type="source_snapshot",
+        payload=changed,
+        recorded_by="system:test",
+        synthetic=True,
+    ).ref
+    decision = PromotionDecision(
+        subject_ref=result.candidate_refs[0],
+        approved_roles=("knowledge_curator", "rights_officer"),
+        evidence_refs=evidence,
+        blocking_gap_refs=result.gap_refs,
+        synthetic=True,
+        production_eligible=False,
+    )
+    service = SourcePromotionService(
+        bundle=load_builtin_ops_bundle(),
+        ledger=ledger,
+        decisions=_DecisionProvider(decision),
+    )
+
+    with pytest.raises(KnowledgeOpsPolicyError, match="differs"):
+        service.promote(
+            source_id="blocked-url-source",
+            candidate_ref=result.candidate_refs[0],
+            snapshot_ref=changed_ref,
             promoted_by="system:test",
         )
 

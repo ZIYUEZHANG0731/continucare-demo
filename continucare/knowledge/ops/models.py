@@ -127,7 +127,10 @@ class Jurisdiction(StrictModel):
         if self.system == "global" and self.code != "GLOBAL":
             raise ValueError("global jurisdiction code must be GLOBAL")
         if self.system == "iso3166_1" and (
-            len(self.code) != 2 or not self.code.isascii() or not self.code.isupper()
+            len(self.code) != 2
+            or not self.code.isascii()
+            or not self.code.isalpha()
+            or not self.code.isupper()
         ):
             raise ValueError("iso3166_1 jurisdiction must be an uppercase alpha-2 code")
         return self
@@ -442,6 +445,12 @@ class PinnedFile(StrictModel):
         return value
 
 
+class GovernanceManifestEvidence(StrictModel):
+    file_id: SafeId
+    file_version: int = Field(ge=1)
+    manifest_sha256: Sha256
+
+
 class EnvelopeBase(StrictModel):
     file_id: SafeId
     file_version: int = Field(ge=1)
@@ -532,8 +541,8 @@ class KnowledgeOpsBundleIndex(StrictModel):
             raise ValueError("pinned files must have unique refs")
         if len(current) != len(set(current)):
             raise ValueError("current file refs must be unique")
-        if set(current) != set(pinned):
-            raise ValueError("v2 bundle must explicitly select every pinned policy file")
+        if not set(current).issubset(set(pinned)):
+            raise ValueError("current file refs must select pinned policy files")
         paths = [item.relative_path for item in self.files]
         if len(paths) != len(set(paths)):
             raise ValueError("pinned file paths must be unique")

@@ -121,6 +121,11 @@ def test_clinical_scope_forbids_implicit_or_empty_jurisdiction():
     with pytest.raises(ValidationError):
         ClinicalContextScope.model_validate(payload)
 
+    payload = profile.scope.model_dump(mode="json")
+    payload["jurisdictions"] = [{"system": "iso3166_1", "code": "C1"}]
+    with pytest.raises(ValidationError, match="alpha-2"):
+        ClinicalContextScope.model_validate(payload)
+
 
 @pytest.mark.parametrize(
     "origin",
@@ -180,6 +185,10 @@ def test_builtin_policies_keep_live_network_and_unsafe_automation_disabled():
     bundle = load_builtin_ops_bundle()
 
     assert all(policy.live_network_enabled is False for policy in bundle.source_policies)
+    assert all(
+        policy.license_posture not in {"verified_open", "verified_restricted"}
+        for policy in bundle.source_policies
+    )
     for policy in bundle.source_policies:
         assert policy.decision_for(SourceOperation.MODEL_TRAINING) == "deny"
         assert policy.decision_for(SourceOperation.VECTOR_INDEX) == "deny"
@@ -205,6 +214,7 @@ def test_incremental_read_model_has_no_release_or_runtime_authority():
 
     assert model.contract_version == "2.0.0"
     assert model.operational_state == "readiness_only"
+    assert model.bundle_index_sha256 == load_builtin_ops_bundle().index_sha256()
     assert model.production_releases == ()
     assert model.boundary.knowledge_effect == "informational_only"
     assert model.boundary.runtime_authority == "none"
@@ -256,6 +266,62 @@ def test_manifest_index_pins_exact_current_heads_and_bytes():
         assert len(payload) == pinned.size
         assert hashlib.sha256(payload).hexdigest() == pinned.manifest_sha256
         assert bundle.manifest_digests[pinned.ref.key()] == pinned.manifest_sha256
+
+
+def test_manifest_loader_preserves_history_and_selects_only_current_head(tmp_path):
+    root = _copy_bundle(tmp_path)
+    first_path = root / "release_intent_v2.json"
+    successor = json.loads(first_path.read_text(encoding="utf-8"))
+    successor["file_version"] = 2
+    successor["intent"]["release_intent_version"] = 2
+    successor["intent"]["reason"] = (
+        "Second append-only readiness fixture remains explicitly blocked."
+    )
+    successor_bytes = (
+        json.dumps(successor, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    successor_path = root / "release_intent_v2_2.json"
+    successor_path.write_bytes(successor_bytes)
+
+    index_path = root / "bundle_index_v2.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    index["bundle_version"] = 2
+    index["files"].append(
+        {
+            "ref": {
+                "file_id": "knowledge-ops-release-intent",
+                "file_version": 2,
+            },
+            "relative_path": successor_path.name,
+            "manifest_sha256": hashlib.sha256(successor_bytes).hexdigest(),
+            "size": len(successor_bytes),
+        }
+    )
+    index["current_file_refs"] = [
+        (
+            {**item, "file_version": 2}
+            if item["file_id"] == "knowledge-ops-release-intent"
+            else item
+        )
+        for item in index["current_file_refs"]
+    ]
+    index_path.write_text(
+        json.dumps(index, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    bundle = load_ops_bundle(DirectoryBundleSource(root))
+
+    assert bundle.index.bundle_version == 2
+    assert bundle.release_intent.release_intent_version == 2
+    assert (
+        "knowledge-ops-release-intent",
+        1,
+    ) in bundle.manifest_digests
+    assert (
+        "knowledge-ops-release-intent",
+        2,
+    ) in bundle.manifest_digests
 
 
 def test_directory_bundle_source_rejects_traversal(tmp_path):
@@ -364,6 +430,42 @@ def test_append_only_ledger_detects_tampering_before_next_append(tmp_path):
         )
 
 
+def test_append_only_ledger_rejects_unexpected_record_files(tmp_path):
+    ledger = AppendOnlyLedger(tmp_path / "ledger")
+    ledger.append(
+        LedgerCollection.GAP,
+        "gap-1",
+        payload_type="knowledge_gap",
+        payload={"reason": "Synthetic"},
+        recorded_by="system:test",
+        synthetic=True,
+    )
+    unexpected = ledger.root / "records" / "gap" / "gap-1" / "untracked.bin"
+    unexpected.write_bytes(b"unexpected")
+
+    with pytest.raises(KnowledgeOpsIntegrityError, match="unexpected entry"):
+        ledger.history(LedgerCollection.GAP, "gap-1")
+
+
+def test_append_only_ledger_rejects_lock_file_symlink(tmp_path):
+    ledger = AppendOnlyLedger(tmp_path / "ledger")
+    outside = tmp_path / "outside-lock"
+    outside.write_text("protected", encoding="utf-8")
+    lock_path = ledger.root / ".locks" / "gap--gap-lock.lock"
+    lock_path.symlink_to(outside)
+
+    with pytest.raises(KnowledgeOpsIntegrityError, match="lock file is unsafe"):
+        ledger.append(
+            LedgerCollection.GAP,
+            "gap-lock",
+            payload_type="knowledge_gap",
+            payload={"reason": "Synthetic"},
+            recorded_by="system:test",
+            synthetic=True,
+        )
+    assert outside.read_text(encoding="utf-8") == "protected"
+
+
 @pytest.mark.parametrize("record_id", ["../escape", "a/b", "", ".hidden", "é"])
 def test_append_only_ledger_rejects_unsafe_identifiers(tmp_path, record_id):
     ledger = AppendOnlyLedger(tmp_path / "ledger")
@@ -448,3 +550,22 @@ def test_ledger_rejects_record_directory_symlink(tmp_path):
             recorded_by="system:test",
             synthetic=True,
         )
+
+
+def test_ledger_rejects_collection_symlink_before_external_write(tmp_path):
+    ledger = AppendOnlyLedger(tmp_path / "ledger")
+    outside = tmp_path / "outside-collection"
+    outside.mkdir()
+    collection_path = ledger.root / "records" / "gap"
+    collection_path.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(KnowledgeOpsIntegrityError, match="symlink"):
+        ledger.append(
+            LedgerCollection.GAP,
+            "gap-external",
+            payload_type="coverage_gap",
+            payload={"reason": "Synthetic"},
+            recorded_by="system:test",
+            synthetic=True,
+        )
+    assert list(outside.iterdir()) == []
