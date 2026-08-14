@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import secrets
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Literal, Protocol
@@ -22,11 +24,13 @@ from continucare.knowledge.ops.models import (
     ClinicalContextScope,
     GovernanceManifestEvidence,
     GovernanceGate,
+    Jurisdiction,
     KnowledgeOpsIntegrityError,
     KnowledgeOpsPolicyError,
     NonBlank,
     ReviewerRole,
     SafeId,
+    Sha256,
     SourceOperation,
     StrictModel,
 )
@@ -47,8 +51,13 @@ class ReviewerAssurance(StrEnum):
 
 class ReviewerIdentity(StrictModel):
     identity_id: SafeId
+    principal_id: SafeId
     display_name: NonBlank
     roles: tuple[ReviewerRole, ...] = Field(min_length=1)
+    authorized_jurisdictions: tuple[Jurisdiction, ...] = Field(min_length=1)
+    authorized_scopes: tuple[ClinicalContextScope, ...] = Field(min_length=1)
+    authorization_valid_from: datetime
+    authorization_valid_until: datetime
     assurance: ReviewerAssurance
     synthetic: bool
     verification_reference: NonBlank | None = None
@@ -63,6 +72,29 @@ class ReviewerIdentity(StrictModel):
     def validate_identity(self) -> "ReviewerIdentity":
         if len(self.roles) != len(set(self.roles)):
             raise ValueError("reviewer roles must be unique")
+        if self.authorization_valid_from.tzinfo is None:
+            raise ValueError("authorization_valid_from must include a timezone")
+        if self.authorization_valid_until.tzinfo is None:
+            raise ValueError("authorization_valid_until must include a timezone")
+        if self.authorization_valid_until <= self.authorization_valid_from:
+            raise ValueError("reviewer authorization validity interval is empty")
+        jurisdiction_keys = [
+            (item.system, item.code) for item in self.authorized_jurisdictions
+        ]
+        if len(jurisdiction_keys) != len(set(jurisdiction_keys)):
+            raise ValueError("authorized reviewer jurisdictions must be unique")
+        scope_keys = [_canonical_model_key(item) for item in self.authorized_scopes]
+        if len(scope_keys) != len(set(scope_keys)):
+            raise ValueError("authorized reviewer scopes must be unique")
+        authorized_jurisdictions = set(jurisdiction_keys)
+        if any(
+            (jurisdiction.system, jurisdiction.code) not in authorized_jurisdictions
+            for scope in self.authorized_scopes
+            for jurisdiction in scope.jurisdictions
+        ):
+            raise ValueError(
+                "authorized reviewer scope exceeds authorized jurisdictions"
+            )
         if self.assurance == ReviewerAssurance.SYNTHETIC_TEST:
             if not self.synthetic:
                 raise ValueError("synthetic reviewer assurance requires synthetic=true")
@@ -104,23 +136,108 @@ class ReviewerIdentity(StrictModel):
                 raise ValueError("formal reviewer requires verification evidence and time")
             if self.verified_at.tzinfo is None:
                 raise ValueError("verified_at must include a timezone")
+            if not (
+                self.authorization_valid_from
+                <= self.verified_at
+                < self.authorization_valid_until
+            ):
+                raise ValueError(
+                    "formal verification time must fall within authorization validity"
+                )
         return self
 
-    @property
-    def production_eligible(self) -> bool:
+    def is_current_at(self, value: datetime) -> bool:
         return (
-            self.active
+            value.tzinfo is not None
+            and self.active
+            and self.authorization_valid_from <= value < self.authorization_valid_until
+        )
+
+    def authorizes(
+        self,
+        *,
+        role: ReviewerRole,
+        scope: ClinicalContextScope,
+        at: datetime,
+    ) -> bool:
+        return (
+            self.is_current_at(at)
+            and ReviewerRole(role) in self.roles
+            and scope in self.authorized_scopes
+            and (
+                self.assurance != ReviewerAssurance.FORMALLY_VERIFIED
+                or (self.verified_at is not None and self.verified_at <= at)
+            )
+            and all(
+                jurisdiction in self.authorized_jurisdictions
+                for jurisdiction in scope.jurisdictions
+            )
+        )
+
+    def is_production_eligible_at(self, value: datetime) -> bool:
+        return (
+            self.is_current_at(value)
             and self.assurance == ReviewerAssurance.FORMALLY_VERIFIED
             and not self.synthetic
         )
 
 
-class ReviewerDirectory(Protocol):
+class ReviewEventAttestation(StrictModel):
+    attestation_id: SafeId
+    event_claim_sha256: Sha256
+    issued_at: datetime
+    valid_until: datetime
+    verifier_reference: NonBlank
+    attestation_sha256: Sha256
+    synthetic: bool
+
+    @model_validator(mode="after")
+    def validate_attestation(self) -> "ReviewEventAttestation":
+        if self.issued_at.tzinfo is None or self.valid_until.tzinfo is None:
+            raise ValueError("review attestation times must include a timezone")
+        if self.valid_until <= self.issued_at:
+            raise ValueError("review attestation validity interval is empty")
+        return self
+
+
+class ReviewerVerifier(Protocol):
+    """Trusted current-identity resolver and event-attestation verifier."""
+
     def resolve(self, identity_id: str) -> ReviewerIdentity | None: ...
+
+    def verify_identity_authorization(
+        self,
+        identity: ReviewerIdentity,
+        *,
+        role: ReviewerRole,
+        scope: ClinicalContextScope,
+        at: datetime,
+    ) -> bool: ...
+
+    def issue_review_attestation(
+        self,
+        identity: ReviewerIdentity,
+        *,
+        role: ReviewerRole,
+        scope: ClinicalContextScope,
+        event_claim_sha256: str,
+        issued_at: datetime,
+    ) -> ReviewEventAttestation | None: ...
+
+    def verify_review_attestation(
+        self,
+        identity: ReviewerIdentity,
+        *,
+        role: ReviewerRole,
+        scope: ClinicalContextScope,
+        event_claim_sha256: str,
+        attestation: ReviewEventAttestation,
+        evaluated_at: datetime,
+    ) -> bool: ...
 
 
 class InMemoryReviewerDirectory:
-    """Test/readiness directory; formal identities are rejected by default."""
+    """Ephemeral readiness verifier; it can never assert a formal reviewer."""
 
     def __init__(
         self,
@@ -137,9 +254,94 @@ class InMemoryReviewerDirectory:
                 "in-memory reviewer directory cannot assert formal production identity"
             )
         self._reviewers = {item.identity_id: item for item in reviewers}
+        self._attestation_key = secrets.token_bytes(32)
 
     def resolve(self, identity_id: str) -> ReviewerIdentity | None:
         return self._reviewers.get(identity_id)
+
+    def verify_identity_authorization(
+        self,
+        identity: ReviewerIdentity,
+        *,
+        role: ReviewerRole,
+        scope: ClinicalContextScope,
+        at: datetime,
+    ) -> bool:
+        current = self.resolve(identity.identity_id)
+        return (
+            current == identity
+            and current.assurance != ReviewerAssurance.FORMALLY_VERIFIED
+            and current.authorizes(role=role, scope=scope, at=at)
+        )
+
+    def issue_review_attestation(
+        self,
+        identity: ReviewerIdentity,
+        *,
+        role: ReviewerRole,
+        scope: ClinicalContextScope,
+        event_claim_sha256: str,
+        issued_at: datetime,
+    ) -> ReviewEventAttestation | None:
+        if not self.verify_identity_authorization(
+            identity, role=role, scope=scope, at=issued_at
+        ):
+            return None
+        attestation_id = f"attest-{event_claim_sha256[:32]}"
+        valid_until = identity.authorization_valid_until
+        verifier_reference = "urn:continucare:readiness:ephemeral-review-verifier"
+        digest = _review_attestation_digest(
+            key=self._attestation_key,
+            identity_id=identity.identity_id,
+            attestation_id=attestation_id,
+            event_claim_sha256=event_claim_sha256,
+            issued_at=issued_at,
+            valid_until=valid_until,
+            verifier_reference=verifier_reference,
+            synthetic=identity.synthetic,
+        )
+        return ReviewEventAttestation(
+            attestation_id=attestation_id,
+            event_claim_sha256=event_claim_sha256,
+            issued_at=issued_at,
+            valid_until=valid_until,
+            verifier_reference=verifier_reference,
+            attestation_sha256=digest,
+            synthetic=identity.synthetic,
+        )
+
+    def verify_review_attestation(
+        self,
+        identity: ReviewerIdentity,
+        *,
+        role: ReviewerRole,
+        scope: ClinicalContextScope,
+        event_claim_sha256: str,
+        attestation: ReviewEventAttestation,
+        evaluated_at: datetime,
+    ) -> bool:
+        if (
+            not self.verify_identity_authorization(
+                identity, role=role, scope=scope, at=evaluated_at
+            )
+            or attestation.event_claim_sha256 != event_claim_sha256
+            or attestation.synthetic != identity.synthetic
+            or attestation.issued_at > evaluated_at
+            or attestation.valid_until <= evaluated_at
+            or attestation.valid_until > identity.authorization_valid_until
+        ):
+            return False
+        expected = _review_attestation_digest(
+            key=self._attestation_key,
+            identity_id=identity.identity_id,
+            attestation_id=attestation.attestation_id,
+            event_claim_sha256=event_claim_sha256,
+            issued_at=attestation.issued_at,
+            valid_until=attestation.valid_until,
+            verifier_reference=attestation.verifier_reference,
+            synthetic=attestation.synthetic,
+        )
+        return hmac.compare_digest(expected, attestation.attestation_sha256)
 
 
 class ReviewSubjectKind(StrEnum):
@@ -331,7 +533,19 @@ class ReviewEvent(StrictModel):
     axis: ReviewAxis
     decision: ReviewDecision
     reviewer_identity_id: SafeId
+    reviewer_principal_id: SafeId
     reviewer_role: ReviewerRole
+    reviewer_roles: tuple[ReviewerRole, ...] = Field(min_length=1)
+    reviewer_authorized_jurisdictions: tuple[Jurisdiction, ...] = Field(
+        min_length=1
+    )
+    reviewer_authorized_scopes: tuple[ClinicalContextScope, ...] = Field(
+        min_length=1
+    )
+    reviewer_authorization_valid_from: datetime
+    reviewer_authorization_valid_until: datetime
+    reviewer_active: bool
+    reviewer_synthetic: bool
     reviewer_assurance: ReviewerAssurance
     reviewer_verification_reference: NonBlank | None = None
     reviewer_verification_evidence_sha256: str | None = Field(
@@ -339,9 +553,12 @@ class ReviewEvent(StrictModel):
     )
     reviewer_verified_by: NonBlank | None = None
     reviewer_verified_at: datetime | None = None
+    reviewer_identity_assertion_sha256: Sha256
     decision_payload: ReviewDecisionPayload | None = None
     rationale: NonBlank
     decided_at: datetime
+    expected_predecessor_sha256: Sha256 | None = None
+    review_attestation: ReviewEventAttestation
     counts_toward_release: bool
     synthetic: bool
     knowledge_effect: Literal["informational_only"] = "informational_only"
@@ -351,6 +568,20 @@ class ReviewEvent(StrictModel):
     def validate_event(self) -> "ReviewEvent":
         if self.decided_at.tzinfo is None:
             raise ValueError("decided_at must include a timezone")
+        if not self.reviewer_active:
+            raise ValueError("ReviewEvent cannot claim an inactive reviewer")
+        if self.reviewer_role not in self.reviewer_roles:
+            raise ValueError("ReviewEvent role is absent from reviewer role snapshot")
+        if self.reviewer_authorization_valid_from.tzinfo is None:
+            raise ValueError("reviewer authorization start must include a timezone")
+        if self.reviewer_authorization_valid_until.tzinfo is None:
+            raise ValueError("reviewer authorization end must include a timezone")
+        if not (
+            self.reviewer_authorization_valid_from
+            <= self.decided_at
+            < self.reviewer_authorization_valid_until
+        ):
+            raise ValueError("ReviewEvent falls outside reviewer authorization validity")
         if self.decision == ReviewDecision.APPROVED and self.decision_payload is None:
             raise ValueError("approved ReviewEvent requires a decision payload")
         verification_evidence = (
@@ -380,6 +611,18 @@ class ReviewEvent(StrictModel):
                 or self.reviewer_verified_at is None
             ):
                 raise ValueError("release-counting event requires identity verification evidence")
+        if (
+            self.reviewer_identity_assertion_sha256
+            != _reviewer_event_identity_assertion_sha256(self)
+        ):
+            raise ValueError("ReviewEvent reviewer identity assertion digest mismatch")
+        if self.review_attestation.issued_at != self.decided_at:
+            raise ValueError("ReviewEvent attestation time must equal decision time")
+        if (
+            self.review_attestation.event_claim_sha256
+            != _review_event_claim_sha256(self)
+        ):
+            raise ValueError("ReviewEvent attestation does not bind the event claim")
         return self
 
 
@@ -564,7 +807,7 @@ class ReviewEventService:
         *,
         bundle: KnowledgeOpsBundle,
         ledger: AppendOnlyLedger,
-        reviewers: ReviewerDirectory,
+        reviewers: ReviewerVerifier,
     ) -> None:
         self._bundle = bundle
         self._ledger = ledger
@@ -594,15 +837,32 @@ class ReviewEventService:
             packet=packet,
         )
         assert_no_sensitive_data(packet_entry.payload)
+        timestamp = decided_at or datetime.now(timezone.utc)
+        if timestamp.tzinfo is None:
+            raise KnowledgeOpsPolicyError("review decision time must include a timezone")
         identity = self._reviewers.resolve(reviewer_identity_id)
         if (
             identity is None
             or identity.identity_id != reviewer_identity_id
-            or not identity.active
         ):
-            raise KnowledgeOpsPolicyError("reviewer identity cannot be resolved as active")
+            raise KnowledgeOpsPolicyError("reviewer identity cannot be resolved")
         role = ReviewerRole(reviewer_role)
-        if role not in identity.roles or role not in packet.requested_roles:
+        try:
+            identity_authorized = self._reviewers.verify_identity_authorization(
+                identity,
+                role=role,
+                scope=packet.scope,
+                at=timestamp,
+            )
+        except Exception as exc:
+            raise KnowledgeOpsPolicyError(
+                "reviewer identity authorization could not be verified"
+            ) from exc
+        if not identity_authorized:
+            raise KnowledgeOpsPolicyError(
+                "reviewer identity is inactive, expired, or outside authorized scope"
+            )
+        if role not in packet.requested_roles:
             raise KnowledgeOpsPolicyError("reviewer role is not authorized for this packet")
         axis_value = ReviewAxis(axis)
         if axis_value not in _ROLE_AXES[role]:
@@ -650,7 +910,6 @@ class ReviewEventService:
                     "synthetic reviewer cannot approve or annotate non-synthetic subject"
                 )
 
-        timestamp = decided_at or datetime.now(timezone.utc)
         synthetic = (
             packet_entry.synthetic
             or packet.synthetic
@@ -661,11 +920,14 @@ class ReviewEventService:
         )
         counts = (
             decision_value == ReviewDecision.APPROVED
-            and identity.production_eligible
+            and identity.is_production_eligible_at(timestamp)
             and not synthetic
         )
         event_record_id = _chain_id("review", packet.subject.object_ref, role.value)
-        event = ReviewEvent(
+        predecessor = self._ledger.head(
+            LedgerCollection.REVIEW_EVENT, event_record_id
+        )
+        event_fields = dict(
             event_id=_event_id(event_record_id, timestamp),
             subject=packet.subject,
             packet_ref=packet_ref,
@@ -673,7 +935,15 @@ class ReviewEventService:
             axis=axis_value,
             decision=decision_value,
             reviewer_identity_id=identity.identity_id,
+            reviewer_principal_id=identity.principal_id,
             reviewer_role=role,
+            reviewer_roles=identity.roles,
+            reviewer_authorized_jurisdictions=identity.authorized_jurisdictions,
+            reviewer_authorized_scopes=identity.authorized_scopes,
+            reviewer_authorization_valid_from=identity.authorization_valid_from,
+            reviewer_authorization_valid_until=identity.authorization_valid_until,
+            reviewer_active=identity.active,
+            reviewer_synthetic=identity.synthetic,
             reviewer_assurance=identity.assurance,
             reviewer_verification_reference=identity.verification_reference,
             reviewer_verification_evidence_sha256=(
@@ -681,16 +951,40 @@ class ReviewEventService:
             ),
             reviewer_verified_by=identity.verified_by,
             reviewer_verified_at=identity.verified_at,
+            reviewer_identity_assertion_sha256=(
+                _reviewer_identity_assertion_sha256(identity)
+            ),
             decision_payload=decision_payload,
             rationale=rationale,
             decided_at=timestamp,
+            expected_predecessor_sha256=(
+                None if predecessor is None else predecessor.entry_sha256
+            ),
             counts_toward_release=counts,
             synthetic=synthetic,
+            knowledge_effect="informational_only",
+            runtime_authority="none",
         )
+        event_claim_sha256 = _review_event_claim_sha256(event_fields)
+        try:
+            attestation = self._reviewers.issue_review_attestation(
+                identity,
+                role=role,
+                scope=packet.scope,
+                event_claim_sha256=event_claim_sha256,
+                issued_at=timestamp,
+            )
+        except Exception as exc:
+            raise KnowledgeOpsPolicyError(
+                "review event attestation could not be issued"
+            ) from exc
+        if attestation is None:
+            raise KnowledgeOpsPolicyError("review event attestation was denied")
+        event = ReviewEvent(**event_fields, review_attestation=attestation)
         return self._ledger.append(
             LedgerCollection.REVIEW_EVENT,
             event_record_id,
-            payload_type="review_event_v2",
+            payload_type="review_event_v3",
             payload=event,
             recorded_by=identity.identity_id,
             recorded_at=timestamp,
@@ -702,14 +996,26 @@ class ReviewLedgerDecisionProvider:
     """Resolve only the unique latest event for every role required by a gate."""
 
     def __init__(
-        self, *, bundle: KnowledgeOpsBundle, ledger: AppendOnlyLedger
+        self,
+        *,
+        bundle: KnowledgeOpsBundle,
+        ledger: AppendOnlyLedger,
+        reviewers: ReviewerVerifier,
     ) -> None:
         self._bundle = bundle
         self._ledger = ledger
+        self._reviewers = reviewers
 
     def resolve_gate(
-        self, subject_ref: LedgerRef, gate: GovernanceGate
+        self,
+        subject_ref: LedgerRef,
+        gate: GovernanceGate,
+        *,
+        evaluated_at: datetime | None = None,
     ) -> GateDecision | None:
+        evaluation_time = evaluated_at or datetime.now(timezone.utc)
+        if evaluation_time.tzinfo is None:
+            return None
         gate_policy = self._bundle.review_gate(gate)
         packet_id = _chain_id("packet", subject_ref, str(gate))
         packet_head = self._ledger.head(LedgerCollection.REVIEW_PACKET, packet_id)
@@ -754,7 +1060,7 @@ class ReviewLedgerDecisionProvider:
             gap_head = self._ledger.head(reference.collection, reference.record_id)
             if gap_head is None or gap_head.ref != reference:
                 return None
-        events: list[tuple[LedgerRef, ReviewEvent]] = []
+        events: list[tuple[LedgerRef, ReviewEvent, ReviewerIdentity]] = []
         supplemental_evidence_synthetic = False
         for role in packet.requested_roles:
             record_id = _chain_id("review", subject_ref, str(role))
@@ -775,6 +1081,14 @@ class ReviewLedgerDecisionProvider:
                 return None
             if event.packet_ref != packet_head.ref:
                 return None
+            if (
+                head.recorded_at != event.decided_at
+                or head.recorded_by != event.reviewer_identity_id
+                or head.supersedes_entry_sha256
+                != event.expected_predecessor_sha256
+                or event.decided_at > evaluation_time
+            ):
+                return None
             try:
                 assert_no_sensitive_data(head.payload)
                 _validate_approved_payload(
@@ -790,14 +1104,35 @@ class ReviewLedgerDecisionProvider:
                             supplemental_evidence_synthetic
                             or evidence_entry.synthetic
                         )
-            except (
-                KnowledgeOpsIntegrityError,
-                KnowledgeOpsPolicyError,
-                ValidationError,
-                ValueError,
-            ):
+                identity = self._reviewers.resolve(event.reviewer_identity_id)
+                if (
+                    identity is None
+                    or not _event_identity_snapshot_matches(event, identity)
+                    or not self._reviewers.verify_identity_authorization(
+                        identity,
+                        role=ReviewerRole(role),
+                        scope=packet.scope,
+                        at=event.decided_at,
+                    )
+                    or not self._reviewers.verify_identity_authorization(
+                        identity,
+                        role=ReviewerRole(role),
+                        scope=packet.scope,
+                        at=evaluation_time,
+                    )
+                    or not self._reviewers.verify_review_attestation(
+                        identity,
+                        role=ReviewerRole(role),
+                        scope=packet.scope,
+                        event_claim_sha256=_review_event_claim_sha256(event),
+                        attestation=event.review_attestation,
+                        evaluated_at=evaluation_time,
+                    )
+                ):
+                    return None
+            except Exception:
                 return None
-            events.append((head.ref, event))
+            events.append((head.ref, event, identity))
         synthetic = (
             packet_head.synthetic
             or packet.synthetic
@@ -805,21 +1140,25 @@ class ReviewLedgerDecisionProvider:
             or any(entry.synthetic for entry in packet_material_entries)
             or any(
                 self._ledger.get(reference).synthetic or event.synthetic
-                for reference, event in events
+                for reference, event, _ in events
             )
+            or any(identity.synthetic for _, _, identity in events)
             or supplemental_evidence_synthetic
         )
-        if len({event.reviewer_identity_id for _, event in events}) != len(events):
+        if len({identity.principal_id for _, _, identity in events}) != len(events):
             return None
         production_eligible = all(
-            event.counts_toward_release for _, event in events
+            identity.is_production_eligible_at(evaluation_time)
+            and not event.synthetic
+            and not event.review_attestation.synthetic
+            for _, event, identity in events
         ) and not synthetic
         return GateDecision(
             subject_ref=subject_ref,
             gate=gate,
             scope=packet.scope,
             approved_roles=tuple(packet.requested_roles),
-            evidence_refs=tuple(reference for reference, _ in events),
+            evidence_refs=tuple(reference for reference, _, _ in events),
             blocking_gap_refs=packet.open_gap_refs,
             synthetic=synthetic,
             production_eligible=production_eligible,
@@ -1115,3 +1454,157 @@ def _event_id(record_id: str, timestamp: datetime) -> str:
         f"{record_id}|{timestamp.isoformat()}".encode("utf-8")
     ).hexdigest()[:20]
     return f"event-{digest}"
+
+
+def _canonical_model_key(value: StrictModel) -> str:
+    return json.dumps(
+        value.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _canonical_json_value(value):
+    if isinstance(value, StrictModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, datetime):
+        return value.isoformat().replace("+00:00", "Z")
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_json_value(item) for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [_canonical_json_value(item) for item in value]
+    return value
+
+
+def _canonical_sha256(payload: dict[str, object]) -> str:
+    encoded = json.dumps(
+        _canonical_json_value(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _reviewer_identity_assertion_payload(
+    identity: ReviewerIdentity,
+) -> dict[str, object]:
+    return {
+        "identity_id": identity.identity_id,
+        "principal_id": identity.principal_id,
+        "roles": identity.roles,
+        "authorized_jurisdictions": identity.authorized_jurisdictions,
+        "authorized_scopes": identity.authorized_scopes,
+        "authorization_valid_from": identity.authorization_valid_from,
+        "authorization_valid_until": identity.authorization_valid_until,
+        "active": identity.active,
+        "synthetic": identity.synthetic,
+        "assurance": identity.assurance,
+        "verification_reference": identity.verification_reference,
+        "verification_evidence_sha256": identity.verification_evidence_sha256,
+        "verified_by": identity.verified_by,
+        "verified_at": identity.verified_at,
+    }
+
+
+def _reviewer_identity_assertion_sha256(identity: ReviewerIdentity) -> str:
+    return _canonical_sha256(_reviewer_identity_assertion_payload(identity))
+
+
+def _reviewer_event_identity_assertion_sha256(event: ReviewEvent) -> str:
+    return _canonical_sha256(
+        {
+            "identity_id": event.reviewer_identity_id,
+            "principal_id": event.reviewer_principal_id,
+            "roles": event.reviewer_roles,
+            "authorized_jurisdictions": event.reviewer_authorized_jurisdictions,
+            "authorized_scopes": event.reviewer_authorized_scopes,
+            "authorization_valid_from": event.reviewer_authorization_valid_from,
+            "authorization_valid_until": event.reviewer_authorization_valid_until,
+            "active": event.reviewer_active,
+            "synthetic": event.reviewer_synthetic,
+            "assurance": event.reviewer_assurance,
+            "verification_reference": event.reviewer_verification_reference,
+            "verification_evidence_sha256": (
+                event.reviewer_verification_evidence_sha256
+            ),
+            "verified_by": event.reviewer_verified_by,
+            "verified_at": event.reviewer_verified_at,
+        }
+    )
+
+
+def _event_identity_snapshot_matches(
+    event: ReviewEvent, identity: ReviewerIdentity
+) -> bool:
+    return (
+        event.reviewer_identity_id == identity.identity_id
+        and event.reviewer_principal_id == identity.principal_id
+        and event.reviewer_roles == identity.roles
+        and event.reviewer_authorized_jurisdictions
+        == identity.authorized_jurisdictions
+        and event.reviewer_authorized_scopes == identity.authorized_scopes
+        and event.reviewer_authorization_valid_from
+        == identity.authorization_valid_from
+        and event.reviewer_authorization_valid_until
+        == identity.authorization_valid_until
+        and event.reviewer_active == identity.active
+        and event.reviewer_synthetic == identity.synthetic
+        and event.reviewer_assurance == identity.assurance
+        and event.reviewer_verification_reference == identity.verification_reference
+        and event.reviewer_verification_evidence_sha256
+        == identity.verification_evidence_sha256
+        and event.reviewer_verified_by == identity.verified_by
+        and event.reviewer_verified_at == identity.verified_at
+        and event.reviewer_identity_assertion_sha256
+        == _reviewer_identity_assertion_sha256(identity)
+    )
+
+
+def _review_event_claim_sha256(
+    value: ReviewEvent | dict[str, object],
+) -> str:
+    if isinstance(value, ReviewEvent):
+        payload = value.model_dump(mode="json")
+    else:
+        payload = _canonical_json_value(value)
+    claim = {
+        key: item
+        for key, item in payload.items()
+        if key not in {"counts_toward_release", "review_attestation"}
+    }
+    return _canonical_sha256(claim)
+
+
+def _review_attestation_digest(
+    *,
+    key: bytes,
+    identity_id: str,
+    attestation_id: str,
+    event_claim_sha256: str,
+    issued_at: datetime,
+    valid_until: datetime,
+    verifier_reference: str,
+    synthetic: bool,
+) -> str:
+    payload = {
+        "identity_id": identity_id,
+        "attestation_id": attestation_id,
+        "event_claim_sha256": event_claim_sha256,
+        "issued_at": issued_at,
+        "valid_until": valid_until,
+        "verifier_reference": verifier_reference,
+        "synthetic": synthetic,
+    }
+    encoded = json.dumps(
+        _canonical_json_value(payload),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hmac.new(key, encoded, hashlib.sha256).hexdigest()

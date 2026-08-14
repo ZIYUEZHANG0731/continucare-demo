@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+import hashlib
+import hmac
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -28,6 +30,7 @@ from continucare.knowledge.ops import (
     ReviewCheck,
     ReviewDecisionPayload,
     ReviewEvent,
+    ReviewEventAttestation,
     ReviewEventService,
     ReviewLedgerDecisionProvider,
     ReviewPacket,
@@ -39,6 +42,7 @@ from continucare.knowledge.ops import (
     load_builtin_ops_bundle,
     load_builtin_ops_read_model,
 )
+from continucare.knowledge.ops import review as review_module
 
 
 FIXTURE_CATALOG_SHA256 = (
@@ -51,10 +55,20 @@ def _fixture_root() -> Path:
 
 
 def _synthetic_reviewer(role: str) -> ReviewerIdentity:
+    scope = next(
+        item.scope
+        for item in load_builtin_ops_bundle().coverage_profiles
+        if item.profile_id == "fixture-medication-followup"
+    )
     return ReviewerIdentity(
         identity_id=f"synthetic-{role}",
+        principal_id=f"synthetic-principal-{role}",
         display_name=f"Synthetic {role} fixture",
         roles=(role,),
+        authorized_jurisdictions=scope.jurisdictions,
+        authorized_scopes=(scope,),
+        authorization_valid_from=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        authorization_valid_until=datetime(2100, 1, 1, tzinfo=timezone.utc),
         assurance="synthetic_test",
         synthetic=True,
     )
@@ -62,6 +76,143 @@ def _synthetic_reviewer(role: str) -> ReviewerIdentity:
 
 def _reviewers(*roles: str) -> InMemoryReviewerDirectory:
     return InMemoryReviewerDirectory(tuple(_synthetic_reviewer(role) for role in roles))
+
+
+class _FormalReviewerVerifierFixture:
+    """Explicit verifier-mechanism fixture; never a production identity source."""
+
+    def __init__(self, *reviewers: ReviewerIdentity) -> None:
+        self._reviewers = {item.identity_id: item for item in reviewers}
+        self._key = b"continucare-formal-verifier-mechanism-fixture-only"
+
+    def resolve(self, identity_id: str) -> ReviewerIdentity | None:
+        return self._reviewers.get(identity_id)
+
+    def replace(self, identity: ReviewerIdentity) -> None:
+        if identity.identity_id not in self._reviewers:
+            raise KeyError(identity.identity_id)
+        self._reviewers[identity.identity_id] = identity
+
+    def verify_identity_authorization(
+        self, identity, *, role, scope, at
+    ) -> bool:
+        return (
+            self.resolve(identity.identity_id) == identity
+            and identity.assurance == "formally_verified"
+            and identity.verification_reference
+            == "urn:continucare:test:formal-reviewer-verifier-fixture"
+            and identity.authorizes(role=role, scope=scope, at=at)
+        )
+
+    def issue_review_attestation(
+        self,
+        identity,
+        *,
+        role,
+        scope,
+        event_claim_sha256,
+        issued_at,
+    ):
+        if not self.verify_identity_authorization(
+            identity, role=role, scope=scope, at=issued_at
+        ):
+            return None
+        attestation_id = f"fixture-{event_claim_sha256[:32]}"
+        verifier_reference = "urn:continucare:test:review-attestation-fixture"
+        valid_until = identity.authorization_valid_until
+        return ReviewEventAttestation(
+            attestation_id=attestation_id,
+            event_claim_sha256=event_claim_sha256,
+            issued_at=issued_at,
+            valid_until=valid_until,
+            verifier_reference=verifier_reference,
+            attestation_sha256=self._digest(
+                identity.identity_id,
+                attestation_id,
+                event_claim_sha256,
+                issued_at,
+                valid_until,
+                verifier_reference,
+            ),
+            synthetic=False,
+        )
+
+    def verify_review_attestation(
+        self,
+        identity,
+        *,
+        role,
+        scope,
+        event_claim_sha256,
+        attestation,
+        evaluated_at,
+    ) -> bool:
+        if (
+            not self.verify_identity_authorization(
+                identity, role=role, scope=scope, at=evaluated_at
+            )
+            or attestation.synthetic
+            or attestation.event_claim_sha256 != event_claim_sha256
+            or attestation.issued_at > evaluated_at
+            or attestation.valid_until <= evaluated_at
+            or attestation.valid_until > identity.authorization_valid_until
+        ):
+            return False
+        expected = self._digest(
+            identity.identity_id,
+            attestation.attestation_id,
+            event_claim_sha256,
+            attestation.issued_at,
+            attestation.valid_until,
+            attestation.verifier_reference,
+        )
+        return hmac.compare_digest(expected, attestation.attestation_sha256)
+
+    def _digest(
+        self,
+        identity_id,
+        attestation_id,
+        event_claim_sha256,
+        issued_at,
+        valid_until,
+        verifier_reference,
+    ) -> str:
+        payload = "|".join(
+            (
+                identity_id,
+                attestation_id,
+                event_claim_sha256,
+                issued_at.isoformat(),
+                valid_until.isoformat(),
+                verifier_reference,
+            )
+        ).encode("utf-8")
+        return hmac.new(self._key, payload, hashlib.sha256).hexdigest()
+
+
+def _formal_reviewer(role, scope, *, identity_suffix=None) -> ReviewerIdentity:
+    now = datetime.now(timezone.utc)
+    suffix = identity_suffix or role
+    return ReviewerIdentity(
+        identity_id=f"formal-fixture-{suffix}",
+        principal_id=f"formal-fixture-principal-{suffix}",
+        display_name=f"Formal verifier mechanism fixture {suffix}",
+        roles=(role,),
+        authorized_jurisdictions=scope.jurisdictions,
+        authorized_scopes=(scope,),
+        authorization_valid_from=now - timedelta(days=365),
+        authorization_valid_until=now + timedelta(days=365),
+        assurance="formally_verified",
+        synthetic=False,
+        verification_reference=(
+            "urn:continucare:test:formal-reviewer-verifier-fixture"
+        ),
+        verification_evidence_sha256=hashlib.sha256(
+            f"formal-fixture:{suffix}".encode("utf-8")
+        ).hexdigest(),
+        verified_by="test:formal-reviewer-verifier-fixture",
+        verified_at=now,
+    )
 
 
 def _manifest_evidence(bundle):
@@ -146,6 +297,160 @@ def _payload(
     )
 
 
+def _formal_payload(*, scope=None) -> ReviewDecisionPayload:
+    return ReviewDecisionPayload(
+        checklist=(
+            ReviewCheck(
+                check_id="formal-verifier-mechanism-check",
+                result="pass",
+                note=(
+                    "Verifier mechanism fixture only; this is not a clinical "
+                    "approval or a production reviewer assertion."
+                ),
+            ),
+        ),
+        confirmed_scope=scope,
+        limitations=(
+            "Formal identity is supplied only by an explicit test verifier fixture.",
+        ),
+    )
+
+
+def _updated_identity(identity: ReviewerIdentity, **updates) -> ReviewerIdentity:
+    return ReviewerIdentity.model_validate(
+        {**identity.model_dump(mode="python"), **updates}
+    )
+
+
+def _formal_claim_review_context(tmp_path):
+    bundle = load_builtin_ops_bundle()
+    profile = next(
+        item
+        for item in bundle.coverage_profiles
+        if item.profile_id == "fixture-medication-followup"
+    )
+    ledger = AppendOnlyLedger(tmp_path / "formal-review-ledger")
+    authored_at = datetime.now(timezone.utc)
+    claim_ref = ledger.append(
+        LedgerCollection.CLAIM,
+        "formal-verifier-mechanism-claim",
+        payload_type="claim_review_mechanism_fixture",
+        payload={
+            "claim_id": "formal-verifier-mechanism-claim",
+            "statement": (
+                "No clinical assertion; identity and gate verification mechanism only."
+            ),
+            "author_provenance": {
+                "author_identity_id": "fixture-author-identity",
+                "author_principal_id": "fixture-author-principal",
+                "authored_at": authored_at.isoformat(),
+                "provenance_reference": "urn:continucare:test:fixture-author",
+                "synthetic": False,
+            },
+        },
+        recorded_by="test:formal-verifier-mechanism",
+        recorded_at=authored_at,
+        synthetic=False,
+    ).ref
+    packet_ref = ReviewPacketBuilder(bundle=bundle, ledger=ledger).build(
+        subject_kind="clinical_claim",
+        subject_ref=claim_ref,
+        gate="clinical_claim_approval",
+        scope=profile.scope,
+        generated_by="test:formal-verifier-mechanism",
+        known_limitations=(
+            "Identity verifier mechanism fixture only; no clinical conclusion.",
+        ),
+    )
+    clinical = _formal_reviewer("clinical_reviewer", profile.scope)
+    curator = _formal_reviewer("knowledge_curator", profile.scope)
+    verifier = _FormalReviewerVerifierFixture(clinical, curator)
+    service = ReviewEventService(
+        bundle=bundle, ledger=ledger, reviewers=verifier
+    )
+    clinical_ref = service.record(
+        packet_ref=packet_ref,
+        reviewer_identity_id=clinical.identity_id,
+        reviewer_role="clinical_reviewer",
+        axis="clinical",
+        decision="approved",
+        rationale="Formal verifier mechanism fixture clinical-axis event.",
+        decision_payload=_formal_payload(scope=profile.scope),
+    )
+    curator_ref = service.record(
+        packet_ref=packet_ref,
+        reviewer_identity_id=curator.identity_id,
+        reviewer_role="knowledge_curator",
+        axis="metadata_quality",
+        decision="approved",
+        rationale="Formal verifier mechanism fixture curator-axis event.",
+        decision_payload=_formal_payload(),
+    )
+    provider = ReviewLedgerDecisionProvider(
+        bundle=bundle, ledger=ledger, reviewers=verifier
+    )
+    return {
+        "bundle": bundle,
+        "profile": profile,
+        "ledger": ledger,
+        "claim_ref": claim_ref,
+        "packet_ref": packet_ref,
+        "clinical_ref": clinical_ref,
+        "curator_ref": curator_ref,
+        "clinical": clinical,
+        "curator": curator,
+        "verifier": verifier,
+        "provider": provider,
+    }
+
+
+def _append_direct_formal_successor(
+    context,
+    event_ref,
+    *,
+    counts_toward_release: bool,
+    valid_attestation: bool,
+):
+    ledger = context["ledger"]
+    event = ReviewEvent.model_validate(ledger.get(event_ref).payload)
+    identity = context["verifier"].resolve(event.reviewer_identity_id)
+    assert identity is not None
+    timestamp = event.decided_at + timedelta(microseconds=1)
+    payload = event.model_dump(mode="json")
+    payload.update(
+        {
+            "event_id": f"direct-{hashlib.sha256(timestamp.isoformat().encode()).hexdigest()[:20]}",
+            "decided_at": timestamp.isoformat().replace("+00:00", "Z"),
+            "expected_predecessor_sha256": event_ref.entry_sha256,
+            "counts_toward_release": counts_toward_release,
+        }
+    )
+    event_claim_sha256 = review_module._review_event_claim_sha256(payload)
+    attestation = context["verifier"].issue_review_attestation(
+        identity,
+        role=event.reviewer_role,
+        scope=context["profile"].scope,
+        event_claim_sha256=event_claim_sha256,
+        issued_at=timestamp,
+    )
+    assert attestation is not None
+    if not valid_attestation:
+        attestation = attestation.model_copy(
+            update={"attestation_sha256": "0" * 64}
+        )
+    payload["review_attestation"] = attestation.model_dump(mode="json")
+    direct_event = ReviewEvent.model_validate(payload)
+    return ledger.append(
+        LedgerCollection.REVIEW_EVENT,
+        event_ref.record_id,
+        payload_type="review_event_v3",
+        payload=direct_event,
+        recorded_by=event.reviewer_identity_id,
+        recorded_at=timestamp,
+        synthetic=False,
+    ).ref
+
+
 def _source_review_packet(bundle, profile, ledger, acquisition):
     return ReviewPacketBuilder(bundle=bundle, ledger=ledger).build(
         subject_kind=ReviewSubjectKind.SOURCE_CANDIDATE,
@@ -161,9 +466,11 @@ def _source_review_packet(bundle, profile, ledger, acquisition):
     )
 
 
-def _approve_source_synthetically(bundle, profile, ledger, acquisition):
+def _approve_source_synthetically(
+    bundle, profile, ledger, acquisition, directory=None
+):
     packet_ref = _source_review_packet(bundle, profile, ledger, acquisition)
-    directory = _reviewers("knowledge_curator", "rights_officer")
+    directory = directory or _reviewers("knowledge_curator", "rights_officer")
     service = ReviewEventService(
         bundle=bundle, ledger=ledger, reviewers=directory
     )
@@ -185,7 +492,9 @@ def _approve_source_synthetically(bundle, profile, ledger, acquisition):
         rationale="Synthetic rights mechanism check passed only for fixture flow.",
         decision_payload=_payload(operation="register_link_metadata"),
     )
-    decisions = ReviewLedgerDecisionProvider(bundle=bundle, ledger=ledger)
+    decisions = ReviewLedgerDecisionProvider(
+        bundle=bundle, ledger=ledger, reviewers=directory
+    )
     gate_decision = decisions.resolve_gate(
         acquisition.candidate_refs[0], GovernanceGate.SOURCE_PROMOTION
     )
@@ -202,7 +511,7 @@ def _approve_source_synthetically(bundle, profile, ledger, acquisition):
         snapshot_ref=acquisition.snapshot_refs[0],
         promoted_by="system:synthetic-review-flow",
     )
-    return packet_ref, (curator_ref, rights_ref), decisions, source_ref
+    return packet_ref, (curator_ref, rights_ref), decisions, source_ref, directory
 
 
 def test_review_packet_pins_exact_subject_scope_gaps_and_safety_boundary(tmp_path):
@@ -352,7 +661,7 @@ def test_packet_builder_rejects_stale_subject(tmp_path):
 
 def test_synthetic_review_events_are_append_only_and_never_count_toward_release(tmp_path):
     bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
-    packet_ref, event_refs, decisions, _ = _approve_source_synthetically(
+    packet_ref, event_refs, decisions, _, _ = _approve_source_synthetically(
         bundle, profile, ledger, acquisition
     )
 
@@ -374,7 +683,9 @@ def test_synthetic_review_events_are_append_only_and_never_count_toward_release(
 
 def test_gate_decision_rejects_packet_from_different_governance_bundle(tmp_path):
     bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
-    _approve_source_synthetically(bundle, profile, ledger, acquisition)
+    _, _, _, _, directory = _approve_source_synthetically(
+        bundle, profile, ledger, acquisition
+    )
     changed_bundle = replace(
         bundle,
         index=bundle.index.model_copy(
@@ -383,7 +694,7 @@ def test_gate_decision_rejects_packet_from_different_governance_bundle(tmp_path)
     )
 
     assert ReviewLedgerDecisionProvider(
-        bundle=changed_bundle, ledger=ledger
+        bundle=changed_bundle, ledger=ledger, reviewers=directory
     ).resolve_gate(
         acquisition.candidate_refs[0], GovernanceGate.SOURCE_PROMOTION
     ) is None
@@ -430,7 +741,7 @@ def test_review_event_revalidates_direct_packet_bypass(tmp_path, updates, messag
 
 def test_gate_decision_revalidates_direct_event_payload_bypass(tmp_path):
     bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
-    _, event_refs, decisions, _ = _approve_source_synthetically(
+    _, event_refs, decisions, _, _ = _approve_source_synthetically(
         bundle, profile, ledger, acquisition
     )
     rights_entry = ledger.get(event_refs[1])
@@ -502,7 +813,9 @@ def test_latest_review_event_head_controls_gate_without_history_rewrite(tmp_path
         rationale="Synthetic rights decision.",
         decision_payload=_payload(operation="register_link_metadata"),
     )
-    decisions = ReviewLedgerDecisionProvider(bundle=bundle, ledger=ledger)
+    decisions = ReviewLedgerDecisionProvider(
+        bundle=bundle, ledger=ledger, reviewers=directory
+    )
 
     assert first.record_version == 1
     assert second.record_version == 2
@@ -528,7 +841,7 @@ def test_latest_review_event_head_controls_gate_without_history_rewrite(tmp_path
 
 def test_new_related_gap_invalidates_existing_gate_decision(tmp_path):
     bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
-    _, _, decisions, _ = _approve_source_synthetically(
+    _, _, decisions, _, _ = _approve_source_synthetically(
         bundle, profile, ledger, acquisition
     )
     assert decisions.resolve_gate(
@@ -608,17 +921,21 @@ def test_review_service_rejects_role_axis_mismatch(tmp_path):
 def test_multi_role_gate_requires_distinct_reviewer_identities(tmp_path):
     bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
     packet_ref = _source_review_packet(bundle, profile, ledger, acquisition)
-    reviewer = ReviewerIdentity(
-        identity_id="synthetic-multi-role",
-        display_name="Synthetic multi-role fixture",
-        roles=("knowledge_curator", "rights_officer"),
-        assurance="synthetic_test",
-        synthetic=True,
+    base_reviewer = _synthetic_reviewer("knowledge_curator")
+    reviewer = ReviewerIdentity.model_validate(
+        {
+            **base_reviewer.model_dump(),
+            "identity_id": "synthetic-multi-role",
+            "principal_id": "synthetic-principal-multi-role",
+            "display_name": "Synthetic multi-role fixture",
+            "roles": ("knowledge_curator", "rights_officer"),
+        }
     )
+    directory = InMemoryReviewerDirectory((reviewer,))
     service = ReviewEventService(
         bundle=bundle,
         ledger=ledger,
-        reviewers=InMemoryReviewerDirectory((reviewer,)),
+        reviewers=directory,
     )
     service.record(
         packet_ref=packet_ref,
@@ -640,7 +957,48 @@ def test_multi_role_gate_requires_distinct_reviewer_identities(tmp_path):
     )
 
     assert ReviewLedgerDecisionProvider(
-        bundle=bundle, ledger=ledger
+        bundle=bundle, ledger=ledger, reviewers=directory
+    ).resolve_gate(
+        acquisition.candidate_refs[0], GovernanceGate.SOURCE_PROMOTION
+    ) is None
+
+
+def test_multi_role_gate_rejects_distinct_accounts_for_same_principal(tmp_path):
+    bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
+    packet_ref = _source_review_packet(bundle, profile, ledger, acquisition)
+    curator = _synthetic_reviewer("knowledge_curator")
+    rights_base = _synthetic_reviewer("rights_officer")
+    rights = ReviewerIdentity.model_validate(
+        {
+            **rights_base.model_dump(mode="python"),
+            "principal_id": curator.principal_id,
+        }
+    )
+    directory = InMemoryReviewerDirectory((curator, rights))
+    service = ReviewEventService(
+        bundle=bundle, ledger=ledger, reviewers=directory
+    )
+    service.record(
+        packet_ref=packet_ref,
+        reviewer_identity_id=curator.identity_id,
+        reviewer_role="knowledge_curator",
+        axis="metadata_quality",
+        decision="approved",
+        rationale="Synthetic curator account fixture.",
+        decision_payload=_payload(),
+    )
+    service.record(
+        packet_ref=packet_ref,
+        reviewer_identity_id=rights.identity_id,
+        reviewer_role="rights_officer",
+        axis="rights",
+        decision="approved",
+        rationale="Synthetic second account for the same principal fixture.",
+        decision_payload=_payload(operation="register_link_metadata"),
+    )
+
+    assert ReviewLedgerDecisionProvider(
+        bundle=bundle, ledger=ledger, reviewers=directory
     ).resolve_gate(
         acquisition.candidate_refs[0], GovernanceGate.SOURCE_PROMOTION
     ) is None
@@ -651,8 +1009,13 @@ def test_unverified_real_identity_cannot_approve(tmp_path):
     packet_ref = _source_review_packet(bundle, profile, ledger, acquisition)
     reviewer = ReviewerIdentity(
         identity_id="unverified-curator",
+        principal_id="unverified-principal-curator",
         display_name="Unverified curator",
         roles=("knowledge_curator",),
+        authorized_jurisdictions=profile.scope.jurisdictions,
+        authorized_scopes=(profile.scope,),
+        authorization_valid_from=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        authorization_valid_until=datetime(2100, 1, 1, tzinfo=timezone.utc),
         assurance="identity_unverified",
         synthetic=False,
     )
@@ -675,21 +1038,33 @@ def test_unverified_real_identity_cannot_approve(tmp_path):
 
 
 def test_formal_identity_contract_requires_auditable_verification_evidence():
+    scope = load_builtin_ops_bundle().coverage_profiles[0].scope
     with pytest.raises(ValidationError, match="formal reviewer requires"):
         ReviewerIdentity(
             identity_id="not-a-formal-reviewer",
+            principal_id="not-a-formal-principal",
             display_name="No formal reviewer available",
             roles=("clinical_reviewer",),
+            authorized_jurisdictions=scope.jurisdictions,
+            authorized_scopes=(scope,),
+            authorization_valid_from=datetime(2020, 1, 1, tzinfo=timezone.utc),
+            authorization_valid_until=datetime(2100, 1, 1, tzinfo=timezone.utc),
             assurance="formally_verified",
             synthetic=False,
         )
 
 
 def test_readiness_directory_cannot_assert_a_formal_production_reviewer():
+    scope = load_builtin_ops_bundle().coverage_profiles[0].scope
     reviewer = ReviewerIdentity(
         identity_id="formal-mechanism-fixture",
+        principal_id="formal-mechanism-principal",
         display_name="Mechanism-only formal identity fixture",
         roles=("clinical_reviewer",),
+        authorized_jurisdictions=scope.jurisdictions,
+        authorized_scopes=(scope,),
+        authorization_valid_from=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        authorization_valid_until=datetime(2100, 1, 1, tzinfo=timezone.utc),
         assurance="formally_verified",
         synthetic=False,
         verification_reference="urn:continucare:test:identity-proof",
@@ -700,6 +1075,125 @@ def test_readiness_directory_cannot_assert_a_formal_production_reviewer():
 
     with pytest.raises(KnowledgeOpsPolicyError, match="cannot assert formal"):
         InMemoryReviewerDirectory((reviewer,))
+
+
+def test_decision_provider_requires_a_trusted_reviewer_verifier(tmp_path):
+    bundle = load_builtin_ops_bundle()
+    ledger = AppendOnlyLedger(tmp_path / "ledger")
+
+    with pytest.raises(TypeError, match="reviewers"):
+        ReviewLedgerDecisionProvider(bundle=bundle, ledger=ledger)
+
+
+def test_fake_formal_event_appended_directly_cannot_resolve_gate(tmp_path):
+    context = _formal_claim_review_context(tmp_path)
+    initial = context["provider"].resolve_gate(
+        context["claim_ref"], "clinical_claim_approval"
+    )
+    assert initial is not None
+    assert initial.production_eligible is True
+
+    _append_direct_formal_successor(
+        context,
+        context["clinical_ref"],
+        counts_toward_release=True,
+        valid_attestation=False,
+    )
+
+    assert context["provider"].resolve_gate(
+        context["claim_ref"], "clinical_claim_approval"
+    ) is None
+
+
+def test_event_identity_fields_must_match_current_trusted_identity(tmp_path):
+    context = _formal_claim_review_context(tmp_path)
+    clinical = context["clinical"]
+    changed = _updated_identity(
+        clinical,
+        verification_evidence_sha256=hashlib.sha256(
+            b"changed-current-formal-evidence"
+        ).hexdigest(),
+    )
+    context["verifier"].replace(changed)
+
+    assert context["provider"].resolve_gate(
+        context["claim_ref"], "clinical_claim_approval"
+    ) is None
+
+
+def test_current_inactive_reviewer_invalidates_prior_decision(tmp_path):
+    context = _formal_claim_review_context(tmp_path)
+    context["verifier"].replace(
+        _updated_identity(context["clinical"], active=False)
+    )
+
+    assert context["provider"].resolve_gate(
+        context["claim_ref"], "clinical_claim_approval"
+    ) is None
+
+
+def test_expired_reviewer_authorization_fails_closed_at_resolution(tmp_path):
+    context = _formal_claim_review_context(tmp_path)
+    expiration = context["clinical"].authorization_valid_until
+
+    assert context["provider"].resolve_gate(
+        context["claim_ref"],
+        "clinical_claim_approval",
+        evaluated_at=expiration,
+    ) is None
+
+
+def test_current_reviewer_role_mismatch_invalidates_prior_decision(tmp_path):
+    context = _formal_claim_review_context(tmp_path)
+    context["verifier"].replace(
+        _updated_identity(context["clinical"], roles=("rights_officer",))
+    )
+
+    assert context["provider"].resolve_gate(
+        context["claim_ref"], "clinical_claim_approval"
+    ) is None
+
+
+def test_current_reviewer_jurisdiction_and_scope_mismatch_fails_closed(tmp_path):
+    context = _formal_claim_review_context(tmp_path)
+    scope_payload = context["profile"].scope.model_dump(mode="python")
+    other_scope = type(context["profile"].scope).model_validate(
+        {
+            **scope_payload,
+            "jurisdictions": ({"system": "iso3166_1", "code": "US"},),
+        }
+    )
+    context["verifier"].replace(
+        _updated_identity(
+            context["clinical"],
+            authorized_jurisdictions=other_scope.jurisdictions,
+            authorized_scopes=(other_scope,),
+        )
+    )
+
+    assert context["provider"].resolve_gate(
+        context["claim_ref"], "clinical_claim_approval"
+    ) is None
+
+
+def test_provider_recomputes_production_eligibility_and_ignores_event_count(tmp_path):
+    context = _formal_claim_review_context(tmp_path)
+    successor_ref = _append_direct_formal_successor(
+        context,
+        context["clinical_ref"],
+        counts_toward_release=False,
+        valid_attestation=True,
+    )
+    successor = ReviewEvent.model_validate(
+        context["ledger"].get(successor_ref).payload
+    )
+    decision = context["provider"].resolve_gate(
+        context["claim_ref"], "clinical_claim_approval"
+    )
+
+    assert successor.counts_toward_release is False
+    assert decision is not None
+    assert decision.production_eligible is True
 
 
 def test_rights_approval_requires_exact_operation_decisions(tmp_path):
@@ -759,7 +1253,7 @@ def test_approved_checklist_cannot_contain_failure(tmp_path):
 
 def test_synthetic_review_provider_drives_only_synthetic_source_promotion(tmp_path):
     bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
-    _, _, _, source_ref = _approve_source_synthetically(
+    _, _, _, source_ref, _ = _approve_source_synthetically(
         bundle, profile, ledger, acquisition
     )
     source = GovernedSourceV2.model_validate(ledger.get(source_ref).payload)
@@ -775,8 +1269,11 @@ def test_synthetic_review_provider_drives_only_synthetic_source_promotion(tmp_pa
 
 def _synthetic_release_context(tmp_path):
     bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
-    _, _, decisions, source_ref = _approve_source_synthetically(
-        bundle, profile, ledger, acquisition
+    reviewers = _reviewers(
+        "knowledge_curator", "rights_officer", "clinical_reviewer", "pharmacist"
+    )
+    _, _, decisions, source_ref, _ = _approve_source_synthetically(
+        bundle, profile, ledger, acquisition, reviewers
     )
     candidate = KnowledgeReleaseCandidate(
         release_candidate_id="synthetic-cn-zh-release",
@@ -817,9 +1314,6 @@ def _synthetic_release_context(tmp_path):
         ),
         additional_required_roles=("pharmacist",),
         open_gap_refs=acquisition.gap_refs,
-    )
-    reviewers = _reviewers(
-        "knowledge_curator", "rights_officer", "clinical_reviewer", "pharmacist"
     )
     event_service = ReviewEventService(
         bundle=bundle, ledger=ledger, reviewers=reviewers
@@ -887,7 +1381,9 @@ def test_finalize_records_blocked_report_but_never_creates_release(tmp_path):
 def test_empty_release_intent_is_explicitly_not_ready(tmp_path):
     bundle = load_builtin_ops_bundle()
     ledger = AppendOnlyLedger(tmp_path / "ledger")
-    decisions = ReviewLedgerDecisionProvider(bundle=bundle, ledger=ledger)
+    decisions = ReviewLedgerDecisionProvider(
+        bundle=bundle, ledger=ledger, reviewers=_reviewers()
+    )
     readiness = ReleaseReadinessService(
         bundle=bundle, ledger=ledger, decisions=decisions
     )
@@ -918,7 +1414,7 @@ def test_empty_release_intent_is_explicitly_not_ready(tmp_path):
 
 def test_release_cannot_hide_gaps_carried_by_promoted_source(tmp_path):
     bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
-    _, _, decisions, source_ref = _approve_source_synthetically(
+    _, _, decisions, source_ref, _ = _approve_source_synthetically(
         bundle, profile, ledger, acquisition
     )
     readiness = ReleaseReadinessService(
@@ -976,7 +1472,7 @@ def test_release_cannot_hide_gaps_carried_by_promoted_source(tmp_path):
 
 def test_release_rejects_source_profile_substitution(tmp_path):
     bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
-    _, _, decisions, source_ref = _approve_source_synthetically(
+    _, _, decisions, source_ref, _ = _approve_source_synthetically(
         bundle, profile, ledger, acquisition
     )
     substituted_profile = next(
@@ -1022,7 +1518,9 @@ def test_release_stage_rejects_mismatched_governance_manifest_evidence(tmp_path)
     readiness = ReleaseReadinessService(
         bundle=bundle,
         ledger=ledger,
-        decisions=ReviewLedgerDecisionProvider(bundle=bundle, ledger=ledger),
+        decisions=ReviewLedgerDecisionProvider(
+            bundle=bundle, ledger=ledger, reviewers=_reviewers()
+        ),
     )
     evidence = list(_manifest_evidence(bundle))
     evidence[0] = {**evidence[0], "manifest_sha256": "0" * 64}
@@ -1061,7 +1559,9 @@ def test_release_stage_rejects_mismatched_governance_manifest_evidence(tmp_path)
 def test_release_candidate_personal_data_fails_stage_and_direct_bypass(tmp_path):
     bundle = load_builtin_ops_bundle()
     ledger = AppendOnlyLedger(tmp_path / "ledger")
-    decisions = ReviewLedgerDecisionProvider(bundle=bundle, ledger=ledger)
+    decisions = ReviewLedgerDecisionProvider(
+        bundle=bundle, ledger=ledger, reviewers=_reviewers()
+    )
     readiness = ReleaseReadinessService(
         bundle=bundle,
         ledger=ledger,
@@ -1103,7 +1603,9 @@ def test_synthetic_reviewer_cannot_attach_to_nonsynthetic_release_packet(tmp_pat
     readiness = ReleaseReadinessService(
         bundle=bundle,
         ledger=ledger,
-        decisions=ReviewLedgerDecisionProvider(bundle=bundle, ledger=ledger),
+        decisions=ReviewLedgerDecisionProvider(
+            bundle=bundle, ledger=ledger, reviewers=_reviewers()
+        ),
     )
     candidate = KnowledgeReleaseCandidate(
         release_candidate_id="nonsynthetic-empty",
