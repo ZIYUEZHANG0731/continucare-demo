@@ -35,7 +35,8 @@ from continucare.knowledge.ops.models import (
 )
 
 
-BUILTIN_INDEX_PATH = "bundle_index_v2.json"
+LEGACY_INDEX_PATH = "bundle_index_v2.json"
+BUILTIN_INDEX_PATH = "bundle_index_v2_2.json"
 _PAYLOAD_ADAPTER = TypeAdapter(PayloadEnvelope)
 
 
@@ -129,13 +130,13 @@ class KnowledgeOpsBundle:
 
 def load_builtin_ops_bundle() -> KnowledgeOpsBundle:
     source = TraversableBundleSource(files("continucare.knowledge.manifests_v2"))
-    return load_ops_bundle(source)
+    return load_ops_bundle(source, index_path=BUILTIN_INDEX_PATH)
 
 
 def load_ops_bundle(
     source: BundleSource,
     *,
-    index_path: str = BUILTIN_INDEX_PATH,
+    index_path: str = LEGACY_INDEX_PATH,
 ) -> KnowledgeOpsBundle:
     """Load a complete v2 governance bundle or return no partial state."""
 
@@ -211,7 +212,10 @@ def load_ops_bundle(
             "coverage profile, review policy, and release intent file"
         )
 
-    source_policies = source_files[0].policies
+    source_policies = _materialize_source_policies(
+        current=source_files[0],
+        envelopes=envelopes,
+    )
     coverage_profiles = profile_files[0].profiles
     review_gates = review_files[0].gates
     _validate_unique_versions(
@@ -219,6 +223,7 @@ def load_ops_bundle(
         lambda item: (item.policy_id, item.policy_version),
         "SourcePolicy",
     )
+    _validate_source_policy_versions(source_policies)
     _validate_unique_versions(
         coverage_profiles,
         lambda item: (item.profile_id, item.profile_version),
@@ -271,3 +276,48 @@ def _validate_unique_versions(items, key, label: str) -> None:
     keys = [key(item) for item in items]
     if len(keys) != len(set(keys)):
         raise KnowledgeOpsManifestError(f"duplicate {label} identity")
+
+
+def _materialize_source_policies(
+    *,
+    current: SourcePolicyManifest,
+    envelopes: list[PayloadEnvelope],
+) -> tuple[SourcePolicy, ...]:
+    manifests = {
+        item.ref.key(): item
+        for item in envelopes
+        if isinstance(item, SourcePolicyManifest)
+    }
+    chain: list[SourcePolicyManifest] = []
+    cursor = current
+    seen: set[tuple[str, int]] = set()
+    while True:
+        key = cursor.ref.key()
+        if key in seen:
+            raise KnowledgeOpsManifestError("source policy manifest extension cycle")
+        seen.add(key)
+        chain.append(cursor)
+        if cursor.extends is None:
+            break
+        predecessor = manifests.get(cursor.extends.key())
+        if predecessor is None:
+            raise KnowledgeOpsManifestError(
+                "source policy manifest predecessor is not pinned"
+            )
+        cursor = predecessor
+    policies: list[SourcePolicy] = []
+    for manifest in reversed(chain):
+        policies.extend(manifest.policies)
+    return tuple(policies)
+
+
+def _validate_source_policy_versions(policies: tuple[SourcePolicy, ...]) -> None:
+    by_id: dict[str, list[int]] = {}
+    for policy in policies:
+        by_id.setdefault(policy.policy_id, []).append(policy.policy_version)
+    for policy_id, versions in by_id.items():
+        ordered = sorted(versions)
+        if ordered != list(range(1, ordered[-1] + 1)):
+            raise KnowledgeOpsManifestError(
+                f"SourcePolicy {policy_id} versions must be contiguous"
+            )

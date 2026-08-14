@@ -83,7 +83,7 @@ def test_builtin_v2_bundle_is_complete_and_fail_closed():
     assert bundle.boundary.live_network_default_enabled is False
     assert bundle.boundary.automatic_clinical_approval_allowed is False
     assert bundle.boundary.synthetic_approvals_count_toward_release is False
-    assert len(bundle.source_policies) == 8
+    assert len(bundle.source_policies) == 13
     assert len(bundle.coverage_profiles) == 5
     assert len(bundle.review_gates) == 8
 

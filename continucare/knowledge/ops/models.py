@@ -263,6 +263,30 @@ class SourcePolicyOperationRule(StrictModel):
     rationale: NonBlank
 
 
+class SourceRightsEvidence(StrictModel):
+    evidence_id: SafeId
+    official_document_url: AnyHttpUrl
+    retrieved_at: datetime
+    document_sha256: Sha256
+    digest_scope: Literal["official_document_bytes"] = "official_document_bytes"
+    recorded_by: NonBlank
+    reviewed_by: Literal["none-formal-rights-officer-unavailable"] = (
+        "none-formal-rights-officer-unavailable"
+    )
+    conclusion: Literal["metadata_discovery_only_rights_unresolved"] = (
+        "metadata_discovery_only_rights_unresolved"
+    )
+    known_limitations: tuple[NonBlank, ...] = Field(min_length=1)
+    formal_rights_review_completed: Literal[False] = False
+
+    @field_validator("retrieved_at")
+    @classmethod
+    def retrieved_at_has_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("rights evidence retrieval time must include a timezone")
+        return value
+
+
 class SourcePolicy(StrictModel):
     policy_id: SafeId
     policy_version: int = Field(ge=1)
@@ -274,10 +298,12 @@ class SourcePolicy(StrictModel):
     allowed_origins: tuple[AnyHttpUrl, ...] = Field(min_length=1)
     allow_subdomains: bool = False
     allowed_query_parameters: tuple[SafeId, ...] = Field(default_factory=tuple)
+    allowed_path_templates: tuple[NonBlank, ...] = Field(default_factory=tuple)
     allowed_content_types: tuple[NonBlank, ...] = Field(min_length=1)
     maximum_response_bytes: int = Field(gt=0, le=50_000_000)
     license_posture: LicensePosture
     terms_uri: AnyHttpUrl | None = None
+    rights_evidence: tuple[SourceRightsEvidence, ...] = Field(default_factory=tuple)
     operation_rules: tuple[SourcePolicyOperationRule, ...] = Field(min_length=1)
     live_network_enabled: Literal[False] = False
     status: Literal["active", "retired"] = "active"
@@ -325,6 +351,20 @@ class SourcePolicy(StrictModel):
         operations = [item.operation for item in self.operation_rules]
         if len(operations) != len(set(operations)):
             raise ValueError("source policy operation rules must be unique")
+        if len(self.allowed_path_templates) != len(set(self.allowed_path_templates)):
+            raise ValueError("source policy path templates must be unique")
+        for template in self.allowed_path_templates:
+            if (
+                not template.startswith("/")
+                or "\\" in template
+                or "?" in template
+                or "#" in template
+                or any(part in {"", ".", ".."} for part in template.split("/")[1:])
+            ):
+                raise ValueError("source policy path template is not canonical")
+        evidence_ids = [item.evidence_id for item in self.rights_evidence]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("source policy rights evidence IDs must be unique")
         automatically_safe = {
             SourceOperation.REGISTER_LINK_METADATA,
             SourceOperation.DISCOVER_METADATA,
@@ -488,7 +528,21 @@ class SafetyBoundaryManifest(EnvelopeBase):
 
 class SourcePolicyManifest(EnvelopeBase):
     file_kind: Literal["source_policy_registry"] = "source_policy_registry"
+    extends: FileRef | None = None
     policies: tuple[SourcePolicy, ...]
+
+    @model_validator(mode="after")
+    def validate_extension(self) -> "SourcePolicyManifest":
+        if self.file_version == 1 and self.extends is not None:
+            raise ValueError("source policy file version 1 cannot extend a predecessor")
+        if self.file_version > 1 and self.extends != FileRef(
+            file_id=self.file_id,
+            file_version=self.file_version - 1,
+        ):
+            raise ValueError("source policy successor must extend its immediate predecessor")
+        if not self.policies:
+            raise ValueError("source policy manifest requires at least one policy")
+        return self
 
 
 class CoverageProfileManifest(EnvelopeBase):

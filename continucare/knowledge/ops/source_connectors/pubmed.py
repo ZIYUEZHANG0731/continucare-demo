@@ -82,7 +82,7 @@ class PmcOpenAccessBatch(StrictModel):
 PUBMED_ESUMMARY_ENDPOINT = EndpointPolicy(
     endpoint_id="pubmed-esummary-json",
     source_id="pubmed",
-    source_policy_id="source-pubmed-metadata",
+    source_policy_id="nlm-pubmed-metadata",
     source_policy_version=2,
     official_documentation_url="https://www.ncbi.nlm.nih.gov/books/NBK25499/",
     hostname="eutils.ncbi.nlm.nih.gov",
