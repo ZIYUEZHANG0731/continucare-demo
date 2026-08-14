@@ -30,6 +30,29 @@ DEMO_GUIDE_STEPS = (
 )
 
 
+PATIENT_DECISION_ACTIONS = (
+    ("accept", "对，就是这个意思"),
+    ("unsure", "我还不确定"),
+    ("reject", "不是这个意思"),
+)
+
+
+PATIENT_CONSEQUENCE = (
+    "如果这一轮的内容全部选择“不是这个意思”，本轮会结束，当前不能立即重新表述。"
+)
+
+
+PATIENT_DECISION_BOUNDARY = (
+    "确认的是您说的话有没有记对，不是确认诊断。本演示不会发送消息。"
+)
+
+
+PATIENT_EMERGENCY_NOTICE = (
+    "这里不是急救通道。如情况紧急，请立即联系当地急救服务或前往急诊，"
+    "不要在这里等待回复。"
+)
+
+
 @dataclass(frozen=True, slots=True)
 class DemoGuideProjection:
     """Human-language home projection derived only from persisted progress."""
@@ -45,6 +68,253 @@ class DemoGuideProjection:
     next_page: str | None
     next_label: str | None
     tone: str
+
+
+@dataclass(frozen=True, slots=True)
+class PatientFollowupProjection:
+    """Patient-language view derived from the persisted competition story."""
+
+    state: str
+    tone: str
+    notice_title: str | None
+    notice_detail: str | None
+    original_quote: str | None
+    recorded_meanings: tuple[str, ...]
+    question: str | None
+    consequence: str | None
+    decision_actions: tuple[tuple[str, str], ...]
+    boundary: str
+    produced: tuple[str, ...]
+    not_produced: tuple[str, ...]
+    show_record_link: bool
+    show_home_link: bool
+    show_nurse_demo_link: bool
+
+
+def patient_recorded_meaning(candidate) -> str:
+    """Return one restrained patient-facing meaning from a real candidate.
+
+    The projection deliberately avoids ``patient_message`` because that field can
+    contain terminology and implementation language intended for the technical
+    demo.  The persisted candidate still remains the sole source of the displayed
+    concept, timing and polarity.
+    """
+
+    value = (
+        candidate.model_dump(mode="python")
+        if hasattr(candidate, "model_dump")
+        else dict(candidate)
+    )
+    terminology_match = value.get("terminology_match") or {}
+    preferred = str(terminology_match.get("preferred_zh") or "").strip()
+    evidence = str(value.get("evidence_text") or "").strip()
+    expression = str(
+        (value.get("effective_time") or {}).get("expression") or ""
+    ).strip()
+    answer = value.get("answer")
+
+    if preferred and isinstance(answer, bool):
+        verb = "有" if answer else "没有"
+        if expression:
+            return f"{expression}{verb}{preferred}"
+        return f"{verb}{preferred}"
+    if preferred:
+        return preferred
+    if evidence:
+        return evidence
+    return "这段待确认内容"
+
+
+def project_patient_followup(
+    progress,
+    *,
+    original_quote: str | None = None,
+    recorded_meanings: tuple[str, ...] = (),
+    has_round_record: bool = False,
+) -> PatientFollowupProjection:
+    """Translate persisted facts into the patient page without a second state."""
+
+    stage = getattr(progress.stage, "value", str(progress.stage))
+    quote = original_quote.strip() if original_quote and original_quote.strip() else None
+    meanings = tuple(item.strip() for item in recorded_meanings if item.strip())
+    has_record = bool(has_round_record or progress.generation)
+    read_only_boundary = "这不是诊断或风险判断，本演示不会发送消息。"
+
+    common = {
+        "original_quote": quote,
+        "recorded_meanings": meanings,
+        "question": None,
+        "consequence": None,
+        "decision_actions": (),
+        "boundary": read_only_boundary,
+        "produced": (),
+        "not_produced": (),
+        "show_record_link": has_record,
+        "show_home_link": not has_record,
+        "show_nurse_demo_link": False,
+    }
+
+    if progress.integrity_issue:
+        return PatientFollowupProjection(
+            state="error",
+            tone="error",
+            notice_title="这一轮记录暂时无法读取。",
+            notice_detail=(
+                "页面没有继续保存任何决定，原来的本地记录也没有变化。"
+                "请先刷新；如仍无法读取，请返回合成演示导览。"
+            ),
+            **common,
+        )
+
+    if stage == "not_started" or not progress.generation:
+        return PatientFollowupProjection(
+            state="empty",
+            tone="neutral",
+            notice_title="目前没有需要您确认的内容",
+            notice_detail="新的待确认内容会出现在这里。",
+            **common,
+        )
+
+    if stage in {"candidate_ready", "candidate_unsure"}:
+        unsure = stage == "candidate_unsure"
+        return PatientFollowupProjection(
+            state=stage,
+            tone="caution" if unsure else "active",
+            notice_title="这段记录还没有确认。" if unsure else None,
+            notice_detail=(
+                "您仍可以选择“对，就是这个意思”或“不是这个意思”。"
+                "在您明确决定前，不会生成患者确认记录或护士任务。"
+                if unsure
+                else None
+            ),
+            original_quote=quote,
+            recorded_meanings=meanings,
+            question="这和您想表达的是同一个意思吗？",
+            consequence=PATIENT_CONSEQUENCE,
+            decision_actions=PATIENT_DECISION_ACTIONS,
+            boundary=PATIENT_DECISION_BOUNDARY,
+            produced=(),
+            not_produced=(),
+            show_record_link=True,
+            show_home_link=False,
+            show_nurse_demo_link=False,
+        )
+
+    if stage == "candidate_rejected":
+        return PatientFollowupProjection(
+            state=stage,
+            tone="stopped",
+            notice_title="这一轮到这里结束。",
+            notice_detail="您选择了“不是这个意思”，系统没有形成患者确认记录。",
+            **{
+                **common,
+                "produced": ("患者原话", "本次决定记录"),
+                "not_produced": (
+                    "患者确认记录",
+                    "护士核对任务",
+                    "医生速览",
+                    "任何临床评估或消息发送",
+                ),
+                "show_record_link": True,
+                "show_home_link": False,
+            },
+        )
+
+    if stage in {"patient_confirmed", "task_requested"}:
+        meaning = meanings[0] if meanings else "这段表述"
+        return PatientFollowupProjection(
+            state="confirmed",
+            tone="complete",
+            notice_title="我们已经保存您的确认。",
+            notice_detail=f"您确认的表述：{meaning}。下一步是由护士核对这条记录。",
+            **{
+                **common,
+                "show_record_link": True,
+                "show_home_link": False,
+                "show_nurse_demo_link": True,
+            },
+        )
+
+    terminal_copy = {
+        "task_rejected": (
+            "这条记录没有继续进入后续流程。",
+            "护士没有接受这项记录核对。您已确认的内容和已有记录仍然保留。",
+            "stopped",
+        ),
+        "task_cancelled": (
+            "这条记录的后续流程已经停止。",
+            "这项记录核对已取消。取消前的记录仍然保留。",
+            "stopped",
+        ),
+        "task_failed": (
+            "这条记录没有完成后续核对。",
+            "任务没有完成，系统没有继续生成后续内容。已有记录仍然保留。",
+            "error",
+        ),
+        "task_entered_in_error": (
+            "这项任务已被标记为记录错误。",
+            "历史记录会保留并标明状态；这项任务不会继续作为有效记录处理。",
+            "error",
+        ),
+    }
+    if stage in terminal_copy:
+        title, detail, tone = terminal_copy[stage]
+        return PatientFollowupProjection(
+            state=stage,
+            tone=tone,
+            notice_title=title,
+            notice_detail=detail,
+            **{
+                **common,
+                "produced": ("患者确认记录", "停止前已经留下的记录"),
+                "not_produced": (
+                    "后续沟通文字",
+                    "新的医生速览",
+                    "临床评估或消息发送",
+                ),
+                "show_record_link": True,
+                "show_home_link": False,
+            },
+        )
+
+    if stage == "story_complete":
+        return PatientFollowupProjection(
+            state=stage,
+            tone="complete",
+            notice_title="这一轮记录已经走完。",
+            notice_detail=(
+                "您的确认、护士核对和复诊速览已经保留。"
+                "这不代表已经形成临床评估，也没有发送消息。"
+            ),
+            **{
+                **common,
+                "show_record_link": True,
+                "show_home_link": False,
+            },
+        )
+
+    later_copy = {
+        "nurse_received": "护士已经接手这条记录，后续只进行记录核对。",
+        "nurse_in_progress": "护士正在核对这条记录；这不是风险判断。",
+        "communication_pending": "核对结果已经记录，沟通文字仍待人工核对，并且没有发送。",
+        "doctor_brief_pending": "复诊速览已按当前记录生成；沟通文字仍待核对，也没有发送。",
+        "communication_ready": "沟通文字已经核对；本演示仍然不会发送消息。",
+        "doctor_brief_ready": "复诊速览已按当前记录生成；尚未提供临床评估。",
+    }
+    return PatientFollowupProjection(
+        state="read_only",
+        tone="neutral",
+        notice_title="您的确认记录正在继续处理。",
+        notice_detail=later_copy.get(
+            stage,
+            "当前页面只显示已经留下的记录，没有继续任何患者业务动作。",
+        ),
+        **{
+            **common,
+            "show_record_link": True,
+            "show_home_link": False,
+        },
+    )
 
 
 def _linear_step_states(current_step: int) -> tuple[str, ...]:
@@ -647,6 +917,129 @@ def inject_global_styles(st) -> None:
         }
         .cc-independent-knowledge h2 {margin:0 0 .25rem; font-size:1.1rem; color:var(--cc-text);}
         .cc-independent-knowledge p {margin:0; color:var(--cc-muted); line-height:1.55;}
+        .cc-patient-shell {display:none;}
+        .stApp:has(.cc-patient-shell) [data-testid="stSidebar"],
+        .stApp:has(.cc-patient-shell) [data-testid="stHeader"] {display:none !important;}
+        .stApp:has(.cc-patient-shell) [data-testid="stAppViewContainer"] {margin-left:0 !important;}
+        .stApp:has(.cc-patient-shell) .block-container {
+            max-width:720px; padding:1rem 1.25rem 3rem;
+        }
+        .stApp:has(.cc-patient-shell) h1 {
+            margin:0; padding:.15rem 0 .7rem; border-bottom:1px solid var(--cc-border);
+            color:var(--cc-text); font-size:1.9rem; line-height:1.25; font-weight:720;
+            letter-spacing:-.025em; text-align:center;
+        }
+        .stApp:has(.cc-patient-shell) .st-key-cc_patient_page [data-testid="stVerticalBlock"] {
+            gap:.72rem;
+        }
+        .cc-patient-status {
+            margin:.1rem 0 .2rem; padding:.7rem .85rem; border-left:3px solid var(--cc-accent);
+            background:var(--cc-surface-subtle); color:var(--cc-text);
+        }
+        .cc-patient-status--caution {border-left-color:var(--cc-caution); background:var(--cc-caution-bg);}
+        .cc-patient-status--stopped {border-left-color:var(--cc-caution); background:var(--cc-caution-bg);}
+        .cc-patient-status--error {border-left-color:var(--cc-danger); background:var(--cc-danger-bg);}
+        .cc-patient-status h2 {margin:0 0 .2rem; font-size:1.28rem; line-height:1.4; color:var(--cc-text);}
+        .cc-patient-status p {margin:0; font-size:1rem; line-height:1.6; color:var(--cc-text);}
+        .cc-patient-quote {
+            margin:.05rem 0; padding:.35rem 0 .6rem; text-align:center;
+        }
+        .cc-patient-label {
+            display:block; margin:0 0 .2rem; color:var(--cc-muted);
+            font-family:-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
+                "Noto Sans CJK SC", sans-serif;
+            font-size:.92rem; line-height:1.45; font-weight:560;
+        }
+        .cc-patient-quote blockquote {
+            margin:0; padding:0; border:0; color:#331A1A;
+            font-family:"Songti SC", STSong, "Noto Serif CJK SC", serif;
+            font-size:clamp(1.9rem, 5vw, 2.35rem); line-height:1.55; font-weight:500;
+            letter-spacing:.01em; overflow-wrap:anywhere;
+        }
+        .cc-patient-meaning {
+            margin:0; padding:.55rem 0 .7rem; border-top:1px solid var(--cc-border);
+            border-bottom:1px solid var(--cc-border); text-align:center;
+        }
+        .cc-patient-meaning p {
+            margin:.1rem 0 0; color:var(--cc-text); font-size:1.55rem;
+            line-height:1.45; font-weight:690; overflow-wrap:anywhere;
+        }
+        .cc-patient-question {
+            margin:.1rem 0 0; color:var(--cc-text); font-size:1.25rem;
+            line-height:1.5; font-weight:690; text-align:center;
+        }
+        .cc-patient-consequence {
+            margin:0; padding:.65rem .75rem; border:1px solid #D97706; border-radius:5px;
+            background:var(--cc-caution-bg); color:#7A3E00; font-size:.96rem;
+            line-height:1.58; font-weight:560;
+        }
+        .st-key-cc_patient_decisions,
+        .st-key-cc_patient_decisions_unsure {margin:.05rem 0;}
+        .st-key-cc_patient_decisions [data-testid="stVerticalBlock"],
+        .st-key-cc_patient_decisions_unsure [data-testid="stVerticalBlock"] {gap:.5rem;}
+        .st-key-cc_patient_decisions button,
+        .st-key-cc_patient_decisions_unsure button {
+            width:100%; min-height:48px !important; height:auto !important; padding:.6rem .8rem;
+            border:1px solid var(--cc-accent) !important; border-radius:5px !important;
+            background:var(--cc-bg) !important; color:var(--cc-accent-strong) !important;
+            font-size:1rem !important; line-height:1.35 !important; font-weight:650 !important;
+            box-shadow:none !important;
+        }
+        .st-key-cc_patient_decisions button:hover,
+        .st-key-cc_patient_decisions_unsure button:hover {
+            background:var(--cc-surface-subtle) !important; border-color:var(--cc-accent-strong) !important;
+        }
+        .stApp:has(.cc-patient-unsure) .st-key-cc_patient_decision_unsure button {
+            border-color:var(--cc-caution) !important; background:var(--cc-caution-bg) !important;
+            color:#7A3E00 !important;
+        }
+        .cc-patient-boundary {
+            margin:0; padding:.65rem .75rem; border:1px solid var(--cc-border); border-radius:5px;
+            background:var(--cc-surface-subtle); color:var(--cc-text);
+            font-size:.95rem; line-height:1.58; text-align:center;
+        }
+        .cc-patient-loading {
+            margin:.1rem 0; padding:.65rem .75rem; border-left:3px solid var(--cc-accent);
+            background:var(--cc-surface-subtle); color:var(--cc-text); line-height:1.55;
+        }
+        .cc-patient-outcomes {
+            display:grid; grid-template-columns:1fr 1fr; gap:1rem;
+            margin:.15rem 0; padding:.75rem 0; border-top:1px solid var(--cc-border);
+            border-bottom:1px solid var(--cc-border);
+        }
+        .cc-patient-outcomes h3 {margin:0 0 .25rem; font-size:1rem; color:var(--cc-text);}
+        .cc-patient-outcomes ul {margin:0; padding-left:1.15rem; color:var(--cc-text); line-height:1.6;}
+        .cc-patient-fixed-note {
+            margin:.15rem 0; padding:.65rem 0; color:var(--cc-text);
+            border-bottom:1px solid var(--cc-border); line-height:1.6;
+        }
+        .cc-patient-secondary {
+            margin:.1rem 0; padding-top:.25rem;
+        }
+        .cc-patient-secondary h2 {
+            margin:0 0 .25rem; color:var(--cc-text); font-size:1rem; line-height:1.45;
+        }
+        .cc-patient-secondary p {margin:0; color:var(--cc-muted); font-size:.9rem; line-height:1.55;}
+        .st-key-cc_patient_record_link a,
+        .st-key-cc_patient_home_link a,
+        .st-key-cc_patient_nurse_link a {
+            min-height:2.75rem; display:flex; align-items:center; justify-content:flex-start;
+            border:0 !important; border-bottom:1px solid var(--cc-border) !important;
+            border-radius:0 !important; background:transparent !important;
+            color:var(--cc-accent-strong) !important; font-size:.98rem !important;
+            font-weight:620 !important; text-decoration:none !important;
+        }
+        .st-key-cc_patient_record_link a *,
+        .st-key-cc_patient_home_link a *,
+        .st-key-cc_patient_nurse_link a * {color:var(--cc-accent-strong) !important;}
+        .cc-patient-emergency {
+            margin:.2rem 0 0; padding:.55rem 0 0; border-top:1px solid var(--cc-text);
+            color:var(--cc-text); font-size:.9rem; line-height:1.6;
+        }
+        .st-key-cc_patient_other_methods {margin-top:.55rem; padding-top:.55rem; border-top:1px solid var(--cc-border);}
+        .st-key-cc_patient_other_methods [data-testid="stCheckbox"] label {
+            color:var(--cc-muted); font-size:.92rem; font-weight:580;
+        }
         :where(a, button, input, select, textarea, [tabindex]):focus-visible {
             outline:3px solid color-mix(in srgb, var(--cc-accent) 45%, white) !important;
             outline-offset:3px !important;
@@ -696,6 +1089,24 @@ def inject_global_styles(st) -> None:
             .cc-guide-meta > div {grid-template-columns:max-content minmax(0, 1fr); gap:.45rem;}
             .cc-guide-proof {border-left:0; border-top:1px solid var(--cc-border); padding:1rem 0 0;}
             .cc-negative-path {grid-template-columns:1fr; gap:.45rem;}
+            .stApp:has(.cc-patient-shell) .block-container {padding:.35rem 1rem 2.5rem;}
+            .stApp:has(.cc-patient-shell) h1 {
+                padding:.1rem 0 .5rem; font-size:1.65rem !important; line-height:1.25 !important;
+            }
+            .stApp:has(.cc-patient-shell) .st-key-cc_patient_page [data-testid="stVerticalBlock"] {
+                gap:.55rem;
+            }
+            .cc-patient-status {padding:.55rem .7rem;}
+            .cc-patient-status h2 {font-size:1.12rem !important;}
+            .cc-patient-status p {font-size:.94rem; line-height:1.52;}
+            .cc-patient-quote {padding:.05rem 0 .2rem;}
+            .cc-patient-quote blockquote {font-size:1.8rem; line-height:1.4;}
+            .cc-patient-meaning {padding:.25rem 0 .35rem;}
+            .cc-patient-meaning p {font-size:1.35rem; line-height:1.4;}
+            .cc-patient-question {font-size:1.12rem; line-height:1.42;}
+            .cc-patient-consequence {padding:.42rem .65rem; font-size:.88rem; line-height:1.42;}
+            .cc-patient-boundary {padding:.45rem .65rem; font-size:.88rem; line-height:1.42;}
+            .cc-patient-outcomes {grid-template-columns:1fr; gap:.65rem;}
         }
         </style>
         """,
