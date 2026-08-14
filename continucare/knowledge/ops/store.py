@@ -24,6 +24,7 @@ from continucare.knowledge.ops.models import (
 
 
 class LedgerCollection(StrEnum):
+    ACQUISITION_RUN = "acquisition_run"
     SOURCE = "source"
     SNAPSHOT = "snapshot"
     CHANGE_SET = "change_set"
@@ -32,6 +33,13 @@ class LedgerCollection(StrEnum):
     REVIEW_PACKET = "review_packet"
     REVIEW_EVENT = "review_event"
     RELEASE = "release"
+
+
+class LedgerRef(StrictModel):
+    collection: LedgerCollection
+    record_id: SafeId
+    record_version: int = Field(ge=1)
+    entry_sha256: Sha256
 
 
 class LedgerEntry(StrictModel):
@@ -60,6 +68,15 @@ class LedgerEntry(StrictModel):
         if self.record_version > 1 and self.supersedes_entry_sha256 is None:
             raise ValueError("ledger successor requires predecessor SHA-256")
         return self
+
+    @property
+    def ref(self) -> LedgerRef:
+        return LedgerRef(
+            collection=self.collection,
+            record_id=self.record_id,
+            record_version=self.record_version,
+            entry_sha256=self.entry_sha256,
+        )
 
 
 class AppendOnlyLedger:
@@ -160,6 +177,15 @@ class AppendOnlyLedger:
     ) -> LedgerEntry | None:
         history = self.history(collection, record_id)
         return history[-1] if history else None
+
+    def get(self, reference: LedgerRef) -> LedgerEntry:
+        history = self.history(reference.collection, reference.record_id)
+        if reference.record_version > len(history):
+            raise KnowledgeOpsIntegrityError("ledger reference version is unknown")
+        entry = history[reference.record_version - 1]
+        if entry.entry_sha256 != reference.entry_sha256:
+            raise KnowledgeOpsIntegrityError("ledger reference SHA-256 mismatch")
+        return entry
 
     def verify_all(self) -> int:
         verified = 0
