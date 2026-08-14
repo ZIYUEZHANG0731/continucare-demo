@@ -73,6 +73,7 @@ from continucare.knowledge.ops.source_connectors.pubmed import (
     parse_pubmed_summary,
 )
 from continucare.knowledge.ops.source_connectors.transport import (
+    ProcessSharedRateLimiter,
     SecureMetadataTransport,
 )
 
@@ -121,6 +122,7 @@ __all__ = [
     "PubMedMetadata",
     "PubMedMetadataBatch",
     "PubMedPmcConnector",
+    "ProcessSharedRateLimiter",
     "SecureMetadataTransport",
     "XmlNode",
     "build_dailymed_history_request",

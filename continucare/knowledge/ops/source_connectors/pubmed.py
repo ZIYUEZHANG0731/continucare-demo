@@ -101,7 +101,8 @@ PUBMED_ESUMMARY_ENDPOINT = EndpointPolicy(
     },
     allowed_media_types=("application/json",),
     maximum_response_bytes=512_000,
-    minimum_interval_seconds=0.35,
+    minimum_interval_seconds=0.4,
+    rate_limit_key="ncbi",
     rights_status="rights_unresolved",
 )
 
@@ -119,7 +120,8 @@ PMC_OA_ENDPOINT = EndpointPolicy(
     query_value_patterns={"id": r"^PMC[1-9][0-9]{0,9}$"},
     allowed_media_types=("application/xml", "text/xml"),
     maximum_response_bytes=512_000,
-    minimum_interval_seconds=0.35,
+    minimum_interval_seconds=0.4,
+    rate_limit_key="ncbi",
     rights_status="rights_unresolved",
 )
 

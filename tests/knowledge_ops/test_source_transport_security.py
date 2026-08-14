@@ -8,13 +8,22 @@ from collections.abc import Mapping
 import pytest
 
 from continucare.knowledge.ops.source_connectors import (
+    PMC_OA_ENDPOINT,
+    PUBMED_ESUMMARY_ENDPOINT,
     ConnectorErrorCode,
     ConnectorFailure,
     ControlledRequest,
     EndpointPolicy,
+    Pmcid,
+    Pmid,
+    ProcessSharedRateLimiter,
+    PubMedPmcConnector,
     SecureMetadataTransport,
     issue_knowledge_egress_permit,
     knowledge_live_validation_enabled,
+)
+from continucare.knowledge.ops.source_connectors.transport import (
+    _PROCESS_SHARED_RATE_LIMITER,
 )
 
 
@@ -54,12 +63,26 @@ class FakeContext:
         self.check_hostname = False
         self.verify_mode = ssl.CERT_NONE
         self.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+        self.maximum_version = ssl.TLSVersion.MAXIMUM_SUPPORTED
         self.server_names: list[str] = []
         self._sockets = sockets
 
     def wrap_socket(self, _raw: FakeRawSocket, *, server_hostname: str) -> FakeTlsSocket:
         self.server_names.append(server_hostname)
         return self._sockets.pop(0)
+
+
+class FakeClock:
+    def __init__(self, initial: float = 100.0) -> None:
+        self.value = initial
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.value
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.value += seconds
 
 
 def _permit():
@@ -120,6 +143,9 @@ def _transport(
     peer_ips: list[str] | None = None,
     resolver=None,
     sleeps: list[float] | None = None,
+    clock=None,
+    sleeper=None,
+    rate_limiter: ProcessSharedRateLimiter | None = None,
 ):
     tls_sockets = [
         FakeTlsSocket(response, peer_ip=(peer_ips or [PUBLIC_IP] * len(responses))[index])
@@ -142,11 +168,19 @@ def _transport(
         resolver=resolver or _resolver(PUBLIC_IP),
         tcp_connector=connect,
         context_factory=lambda: context,  # type: ignore[arg-type]
-        sleeper=(sleeps if sleeps is not None else []).append,
-        clock=lambda: 100.0,
+        sleeper=sleeper or (sleeps if sleeps is not None else []).append,
+        clock=clock or (lambda: 100.0),
         jitter=lambda: 0.0,
+        rate_limiter=rate_limiter,
     )
     return transport, context, all_sockets, raw_sockets
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_shared_rate_limiter():
+    _PROCESS_SHARED_RATE_LIMITER.reset_for_testing()
+    yield
+    _PROCESS_SHARED_RATE_LIMITER.reset_for_testing()
 
 
 @pytest.mark.parametrize(
@@ -188,6 +222,7 @@ def test_transport_binds_dns_socket_tls_peer_and_original_host() -> None:
     assert context.check_hostname is True
     assert context.verify_mode == ssl.CERT_REQUIRED
     assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+    assert context.maximum_version == ssl.TLSVersion.MAXIMUM_SUPPORTED
     assert context.server_names == ["example.com"]
     assert b"Host: example.com\r\n" in sockets[0].sent
     assert b"Accept-Encoding: identity\r\n" in sockets[0].sent
@@ -224,7 +259,8 @@ def test_tls_peer_mismatch_rejects_before_http_send() -> None:
         (301, ConnectorErrorCode.REDIRECT_NOT_FOLLOWED),
         (401, ConnectorErrorCode.UNAUTHORIZED),
         (403, ConnectorErrorCode.FORBIDDEN),
-        (404, ConnectorErrorCode.NOT_FOUND),
+        (404, ConnectorErrorCode.CONTRACT_CHANGED),
+        (410, ConnectorErrorCode.CONTRACT_CHANGED),
         (501, ConnectorErrorCode.REMOTE_5XX),
     ],
 )
@@ -234,6 +270,75 @@ def test_non_success_statuses_are_stable_and_not_retried(status: int, expected) 
         transport.execute(_request(), _endpoint())
     assert raised.value.code == expected
     assert len(raw) == 1
+
+
+def test_pubmed_and_pmc_share_process_rate_budget_across_instances() -> None:
+    fake_time = FakeClock()
+    pubmed_body = (
+        b'{"result":{"uids":["12345"],"12345":'
+        b'{"title":"Synthetic bibliographic title"}}}'
+    )
+    pmc_body = (
+        b'<OA><records><record id="PMC12345" license="CC BY" retracted="no">'
+        b'<link format="tgz" href="https://example.invalid/synthetic.tar.gz"/>'
+        b"</record></records></OA>"
+    )
+    pubmed_transport, _context, _sockets, _raw = _transport(
+        [_wire_response(body=pubmed_body)],
+        clock=fake_time,
+        sleeper=fake_time.sleep,
+    )
+    pmc_transport, _context, _sockets, _raw = _transport(
+        [
+            _wire_response(
+                body=pmc_body,
+                headers={"Content-Type": "application/xml; charset=UTF-8"},
+            )
+        ],
+        clock=fake_time,
+        sleeper=fake_time.sleep,
+    )
+
+    pubmed = PubMedPmcConnector().discover_pubmed(
+        Pmid(value="12345"), transport=pubmed_transport
+    )
+    pmc = PubMedPmcConnector().discover_pmc_license_locator(
+        Pmcid(value="PMC12345"), transport=pmc_transport
+    )
+
+    assert pubmed.records[0].pmid == "12345"
+    assert pmc.records[0].pmcid == "PMC12345"
+    assert PUBMED_ESUMMARY_ENDPOINT.rate_limit_key == "ncbi"
+    assert PMC_OA_ENDPOINT.rate_limit_key == "ncbi"
+    assert fake_time.sleeps == [pytest.approx(0.4)]
+
+
+def test_non_ncbi_sources_keep_separate_rate_buckets() -> None:
+    fake_time = FakeClock()
+    limiter = ProcessSharedRateLimiter()
+    source_a = _endpoint().model_copy(
+        update={"source_id": "source-a", "minimum_interval_seconds": 0.4}
+    )
+    source_b = _endpoint().model_copy(
+        update={"source_id": "source-b", "minimum_interval_seconds": 0.4}
+    )
+    transport_a, _context, _sockets, _raw = _transport(
+        [_wire_response()],
+        clock=fake_time,
+        sleeper=fake_time.sleep,
+        rate_limiter=limiter,
+    )
+    transport_b, _context, _sockets, _raw = _transport(
+        [_wire_response()],
+        clock=fake_time,
+        sleeper=fake_time.sleep,
+        rate_limiter=limiter,
+    )
+
+    transport_a.execute(_request(), source_a)
+    transport_b.execute(_request(), source_b)
+
+    assert fake_time.sleeps == []
 
 
 def test_selected_5xx_retries_are_bounded_and_injected() -> None:

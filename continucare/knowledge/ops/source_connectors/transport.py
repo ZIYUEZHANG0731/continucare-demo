@@ -15,6 +15,7 @@ import ssl
 import time
 from collections.abc import Callable, Sequence
 from email.message import Message
+from threading import Lock
 from typing import Any
 
 from continucare.knowledge.ops.source_connectors.contracts import (
@@ -46,6 +47,42 @@ _MAX_RETRY_AFTER_SECONDS = 30.0
 _READ_CHUNK_BYTES = 64 * 1024
 
 
+class ProcessSharedRateLimiter:
+    """Thread-safe request budget shared by every injected transport instance."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._last_request_at: dict[str, float] = {}
+
+    def acquire(
+        self,
+        key: str,
+        minimum_interval_seconds: float,
+        *,
+        clock: Clock,
+        sleeper: Sleeper,
+    ) -> None:
+        if minimum_interval_seconds <= 0:
+            return
+        with self._lock:
+            now = float(clock())
+            previous = self._last_request_at.get(key)
+            if previous is not None:
+                earliest = previous + minimum_interval_seconds
+                remaining = earliest - now
+                if remaining > 0:
+                    sleeper(remaining)
+                    now = max(float(clock()), earliest)
+            self._last_request_at[key] = now
+
+    def reset_for_testing(self) -> None:
+        with self._lock:
+            self._last_request_at.clear()
+
+
+_PROCESS_SHARED_RATE_LIMITER = ProcessSharedRateLimiter()
+
+
 class SecureMetadataTransport:
     """Small, no-proxy, no-redirect, identity-bound metadata GET transport."""
 
@@ -63,6 +100,7 @@ class SecureMetadataTransport:
         jitter: Jitter = lambda: 0.0,
         timeout_seconds: float = 10.0,
         maximum_retries: int = _MAX_RETRIES,
+        rate_limiter: ProcessSharedRateLimiter | None = None,
     ) -> None:
         assert_valid_egress_permit(permit)
         if timeout_seconds <= 0 or timeout_seconds > 60:
@@ -81,7 +119,7 @@ class SecureMetadataTransport:
         self._jitter = jitter
         self._timeout_seconds = timeout_seconds
         self._maximum_retries = maximum_retries
-        self._last_request_at: dict[str, float] = {}
+        self._rate_limiter = rate_limiter or _PROCESS_SHARED_RATE_LIMITER
 
     def execute(
         self,
@@ -97,7 +135,6 @@ class SecureMetadataTransport:
         retry_index = 0
         while True:
             self._respect_rate_limit(endpoint)
-            self._last_request_at[endpoint.source_id] = self._clock()
             try:
                 response = self._execute_once(
                     request=request,
@@ -114,12 +151,12 @@ class SecureMetadataTransport:
             return response
 
     def _respect_rate_limit(self, endpoint: EndpointPolicy) -> None:
-        previous = self._last_request_at.get(endpoint.source_id)
-        if previous is None or endpoint.minimum_interval_seconds == 0:
-            return
-        remaining = endpoint.minimum_interval_seconds - (self._clock() - previous)
-        if remaining > 0:
-            self._sleeper(remaining)
+        self._rate_limiter.acquire(
+            endpoint.rate_limit_key or endpoint.source_id,
+            endpoint.minimum_interval_seconds,
+            clock=self._clock,
+            sleeper=self._sleeper,
+        )
 
     def _sleep_before_retry(
         self,
@@ -335,8 +372,8 @@ def _raise_for_status(status: int, headers: dict[str, str]) -> None:
         code = ConnectorErrorCode.UNAUTHORIZED
     elif status == 403:
         code = ConnectorErrorCode.FORBIDDEN
-    elif status == 404:
-        code = ConnectorErrorCode.NOT_FOUND
+    elif status in {404, 410}:
+        code = ConnectorErrorCode.CONTRACT_CHANGED
     elif status == 429:
         code = ConnectorErrorCode.RATE_LIMITED
     elif 500 <= status < 600:

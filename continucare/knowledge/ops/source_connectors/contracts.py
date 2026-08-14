@@ -33,6 +33,7 @@ class EndpointPolicy(StrictModel):
     ] = Field(min_length=1)
     maximum_response_bytes: int = Field(gt=0, le=50_000_000)
     minimum_interval_seconds: float = Field(default=0, ge=0, le=60)
+    rate_limit_key: SafeId | None = None
     rights_status: Literal["metadata_only", "rights_unresolved"]
 
     @field_validator("hostname")
