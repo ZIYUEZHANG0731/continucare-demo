@@ -61,6 +61,10 @@ _TECHNICAL_VALUE_KEYS = frozenset(
         "validation_profile_id",
     }
 )
+_TECHNICAL_HASH_ID_PATTERNS = {
+    "event_id": re.compile(r"^event-[0-9a-f]{20}$"),
+    "attestation_id": re.compile(r"^(?:attest|fixture)-[0-9a-f]{32}$"),
+}
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _CN_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 _INTERNATIONAL_PHONE = re.compile(r"(?<!\w)\+\d[\d ()-]{7,}\d(?!\w)")
@@ -100,6 +104,11 @@ def assert_no_sensitive_data(value: object, *, path: str = "payload") -> None:
                 )
             if isinstance(item, str) and (
                 normalized_key in _TECHNICAL_VALUE_KEYS
+                or (
+                    normalized_key in _TECHNICAL_HASH_ID_PATTERNS
+                    and _TECHNICAL_HASH_ID_PATTERNS[normalized_key].fullmatch(item)
+                    is not None
+                )
                 or (
                     normalized_key.endswith("_sha256")
                     and re.fullmatch(r"[0-9a-f]{64}", item) is not None
