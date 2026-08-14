@@ -432,6 +432,16 @@ def test_acquisition_revalidates_connector_resources_before_staging(
         },
         {"content_type": "application/xml"},
         {"content_sha256": "0" * 64},
+        {
+            "body": b"Contact user@example.org",
+            "content_sha256": hashlib.sha256(
+                b"Contact user@example.org"
+            ).hexdigest(),
+        },
+        {
+            "body": b"\xff\xfe",
+            "content_sha256": hashlib.sha256(b"\xff\xfe").hexdigest(),
+        },
         {"synthetic": False},
         {"redirect_urls": ("https://www.nmpa.gov.cn/redirect",)},
     ],

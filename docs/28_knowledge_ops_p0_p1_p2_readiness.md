@@ -109,7 +109,8 @@ P1 implements the following offline flow:
 3. validate every URL against its Source Policy before connector access;
 4. create an append-only `SourceCandidate`;
 5. fetch only a hash-pinned synthetic fixture, then independently revalidate
-   connector/resource identity, URL, content type, byte limit, and digest;
+   connector/resource identity, URL, content type, byte limit, digest, UTF-8
+   inspectability, and direct-identifier guard;
 6. place exact bytes in a content-addressed synthetic quarantine;
 7. create an append-only `SourceSnapshot` containing content and metadata
    digests;

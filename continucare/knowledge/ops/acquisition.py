@@ -126,7 +126,14 @@ class SourceCandidate(StrictModel):
     def validate_candidate(self) -> "SourceCandidate":
         if self.discovered_at.tzinfo is None:
             raise ValueError("discovered_at must include a timezone")
-        assert_no_sensitive_data({"title": self.title, "metadata": self.metadata})
+        assert_no_sensitive_data(
+            {
+                "title": self.title,
+                "issuing_authority": self.issuing_authority,
+                "document_version": self.document_version,
+                "metadata": self.metadata,
+            }
+        )
         return self
 
 
@@ -687,6 +694,13 @@ class AcquisitionService:
             )
         if hashlib.sha256(document.body).hexdigest() != document.content_sha256:
             raise KnowledgeOpsIntegrityError("fetched document digest mismatch")
+        try:
+            fixture_text = document.body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise KnowledgeOpsPolicyError(
+                "synthetic fixture bytes must be UTF-8 inspectable"
+            ) from exc
+        assert_no_sensitive_data({"synthetic_fixture_body": fixture_text})
         if document.redirect_urls or document.peer_ips:
             raise KnowledgeOpsPolicyError(
                 "synthetic fixture fetch cannot carry live transport attestations"

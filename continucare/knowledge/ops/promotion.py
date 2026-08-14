@@ -32,7 +32,10 @@ from continucare.knowledge.ops.store import (
     LedgerCollection,
     LedgerRef,
 )
-from continucare.knowledge.ops.security import validate_url_against_policy
+from continucare.knowledge.ops.security import (
+    assert_no_sensitive_data,
+    validate_url_against_policy,
+)
 
 
 class PromotionDecision(StrictModel):
@@ -161,6 +164,8 @@ class SourcePromotionService:
             raise KnowledgeOpsPolicyError("stale SourceSnapshot cannot be promoted")
         candidate = SourceCandidate.model_validate(candidate_entry.payload)
         snapshot = SourceSnapshot.model_validate(snapshot_entry.payload)
+        assert_no_sensitive_data(candidate_entry.payload)
+        assert_no_sensitive_data(snapshot_entry.payload)
         if snapshot.candidate_ref != candidate_ref:
             raise KnowledgeOpsPolicyError("SourceSnapshot does not belong to candidate")
         policy = self._bundle.source_policy(
