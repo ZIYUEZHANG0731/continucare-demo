@@ -49,6 +49,20 @@ from continucare.knowledge.ops.store import (
 )
 
 
+_TYPED_REVIEW_EVIDENCE_DIGEST_PROFILES = {
+    (
+        LedgerCollection.SNAPSHOT.value,
+        "source_snapshot",
+    ): DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+}
+_TYPED_REVIEW_EVIDENCE_COLLECTIONS = frozenset(
+    collection for collection, _ in _TYPED_REVIEW_EVIDENCE_DIGEST_PROFILES
+)
+_TYPED_REVIEW_EVIDENCE_PAYLOAD_TYPES = frozenset(
+    payload_type for _, payload_type in _TYPED_REVIEW_EVIDENCE_DIGEST_PROFILES
+)
+
+
 class ReviewerAssurance(StrEnum):
     SYNTHETIC_TEST = "synthetic_test"
     IDENTITY_UNVERIFIED = "identity_unverified"
@@ -793,8 +807,10 @@ class ReviewPacketBuilder:
 
         synthetic = subject_entry.synthetic
         for reference in evidence_refs:
-            entry = self._ledger.get(reference)
-            assert_no_sensitive_data(entry.payload)
+            entry = _assert_review_evidence_no_sensitive_data(
+                ledger=self._ledger,
+                reference=reference,
+            )
             synthetic = synthetic or entry.synthetic
         for reference in effective_open_gap_refs:
             entry = self._ledger.get(reference)
@@ -942,8 +958,10 @@ class ReviewEventService:
             )
             for check in decision_payload.checklist:
                 for evidence_ref in check.evidence_refs:
-                    evidence_entry = self._ledger.get(evidence_ref)
-                    assert_no_sensitive_data(evidence_entry.payload)
+                    evidence_entry = _assert_review_evidence_no_sensitive_data(
+                        ledger=self._ledger,
+                        reference=evidence_ref,
+                    )
                     supplemental_evidence_synthetic = (
                         supplemental_evidence_synthetic or evidence_entry.synthetic
                     )
@@ -1182,8 +1200,10 @@ class ReviewLedgerDecisionProvider:
                 )
                 for check in event.decision_payload.checklist:
                     for evidence_ref in check.evidence_refs:
-                        evidence_entry = self._ledger.get(evidence_ref)
-                        assert_no_sensitive_data(evidence_entry.payload)
+                        evidence_entry = _assert_review_evidence_no_sensitive_data(
+                            ledger=self._ledger,
+                            reference=evidence_ref,
+                        )
                         supplemental_evidence_synthetic = (
                             supplemental_evidence_synthetic
                             or evidence_entry.synthetic
@@ -1383,8 +1403,10 @@ def _resolve_packet_material(
 
     material_entries = []
     for reference in packet.evidence_refs:
-        entry = ledger.get(reference)
-        assert_no_sensitive_data(entry.payload)
+        entry = _assert_review_evidence_no_sensitive_data(
+            ledger=ledger,
+            reference=reference,
+        )
         material_entries.append(entry)
     for reference in packet.open_gap_refs:
         entry = ledger.get(reference)
@@ -1486,6 +1508,56 @@ def _assert_review_open_text_no_sensitive_data(
     assert_no_sensitive_data(value)
 
 
+def _assert_review_evidence_no_sensitive_data(
+    *,
+    ledger: AppendOnlyLedger,
+    reference: LedgerRef,
+) -> LedgerEntry:
+    """Replay evidence and grant digest trust only for an exact verified type."""
+
+    entry = ledger.get(reference)
+    dispatch_key = (entry.collection, entry.payload_type)
+    profile = _TYPED_REVIEW_EVIDENCE_DIGEST_PROFILES.get(dispatch_key)
+    if profile is None:
+        if (
+            entry.collection in _TYPED_REVIEW_EVIDENCE_COLLECTIONS
+            or entry.payload_type in _TYPED_REVIEW_EVIDENCE_PAYLOAD_TYPES
+        ):
+            raise KnowledgeOpsPolicyError(
+                "typed review evidence collection/payload_type mismatch"
+            )
+        # Unknown and legacy evidence receive no digest trust.
+        assert_no_sensitive_data(entry.payload)
+        return entry
+    if profile == DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT:
+        _assert_source_snapshot_entry_no_sensitive_data(ledger, entry)
+        return entry
+    raise KnowledgeOpsPolicyError("unsupported typed review evidence profile")
+
+
+def _assert_source_snapshot_entry_no_sensitive_data(
+    ledger: AppendOnlyLedger,
+    entry: LedgerEntry,
+) -> None:
+    if (
+        entry.collection != LedgerCollection.SNAPSHOT.value
+        or entry.payload_type != "source_snapshot"
+    ):
+        raise KnowledgeOpsPolicyError(
+            "SourceSnapshot evidence requires snapshot/source_snapshot"
+        )
+    snapshot = SourceSnapshot.model_validate(entry.payload)
+    if snapshot.snapshot_id != entry.record_id:
+        raise KnowledgeOpsPolicyError("SourceSnapshot ledger identity differs")
+    if snapshot.synthetic is not entry.synthetic:
+        raise KnowledgeOpsPolicyError("SourceSnapshot synthetic lineage differs")
+    _verify_source_snapshot_digest_context(ledger, snapshot)
+    assert_no_sensitive_data(
+        snapshot.model_dump(mode="json"),
+        digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+    )
+
+
 def _assert_review_subject_no_sensitive_data(
     *,
     bundle: KnowledgeOpsBundle,
@@ -1507,18 +1579,7 @@ def _assert_review_subject_no_sensitive_data(
         assert_no_sensitive_data(subject.model_dump(mode="json"))
         return
     if kind == ReviewSubjectKind.SOURCE_SNAPSHOT:
-        if entry.payload_type != "source_snapshot":
-            raise KnowledgeOpsPolicyError(
-                "SourceSnapshot review requires the exact source_snapshot payload"
-            )
-        subject = SourceSnapshot.model_validate(entry.payload)
-        if subject.snapshot_id != entry.record_id:
-            raise KnowledgeOpsPolicyError("SourceSnapshot ledger identity differs")
-        _verify_source_snapshot_digest_context(ledger, subject)
-        assert_no_sensitive_data(
-            subject.model_dump(mode="json"),
-            digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
-        )
+        _assert_source_snapshot_entry_no_sensitive_data(ledger, entry)
         return
     if kind == ReviewSubjectKind.SOURCE:
         if entry.payload_type != "governed_source_v2":
@@ -1620,6 +1681,11 @@ def _verify_source_snapshot_digest_context(
     candidate = SourceCandidate.model_validate(candidate_entry.payload)
     if candidate.candidate_id != snapshot.candidate_ref.record_id:
         raise KnowledgeOpsPolicyError("SourceSnapshot candidate identity differs")
+    if (
+        candidate.synthetic is not candidate_entry.synthetic
+        or candidate.synthetic is not snapshot.synthetic
+    ):
+        raise KnowledgeOpsPolicyError("SourceSnapshot candidate lineage differs")
     assert_no_sensitive_data(candidate.model_dump(mode="json"))
 
 

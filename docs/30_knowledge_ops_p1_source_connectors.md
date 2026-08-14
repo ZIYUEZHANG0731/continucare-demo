@@ -131,7 +131,7 @@ inventory has no unclassified production call. Recursive calls inside
 | `connectors.py` | FixtureResource with `content_sha256` removed, before file access | strict FixtureResource after exact fixture bytes are rehashed | none |
 | `evidence.py` | strict SourceCandidate including open metadata | replayed SourceSnapshot, EvidenceCandidate, predecessor MachineDraftClaim, and new MachineDraftClaim | none |
 | `promotion.py` | strict SourceCandidate including open metadata | replayed SourceSnapshot/KnowledgeGap, PromotionDecision after every ref resolves, and GovernedSourceV2 | none |
-| `review.py` | generated-by/known-limitations, untyped packet/supplemental evidence, open review text, strict SourceCandidate, and legacy subject payloads | strict typed subject dispatcher, KnowledgeGap, ReviewPacket after packet-material replay, and ReviewEvent only after identity, predecessor, evidence, and attestation verification | none |
+| `review.py` | generated-by/known-limitations, unknown or legacy packet/supplemental evidence, open review text, strict SourceCandidate, and legacy subject payloads | strict typed subject dispatcher; typed review-evidence dispatcher; KnowledgeGap; ReviewPacket after packet-material replay; ReviewEvent only after identity, predecessor, evidence, and attestation verification | none |
 | `release.py` | release-candidate open projection (including author provenance), strict SourceCandidate, and legacy artifact payloads | strict artifact dispatcher, KnowledgeGap, verified KnowledgeReleaseCandidate, readiness report with base/all-resolved variants, and KnowledgeRelease | none |
 
 Class C is intentionally empty. Every otherwise digest-free strict object in a
@@ -140,6 +140,26 @@ Class A rather than receiving a bypass. Every Class B selection occurs only
 after collection, `payload_type`, strict model, and the relevant digest/ref
 integrity checks. SourceSnapshot reads after acquisition use the same exact
 schema profile only after append-only replay and strict cross-field validation.
+
+Review evidence now has one centralized dispatcher shared by packet creation,
+packet-material replay, ReviewEvent supplemental checklist evidence, and gate
+decision replay. It performs, in order: exact `LedgerRef` replay and ledger
+digest verification; exact `(collection, payload_type)` dispatch; strict model
+validation; record identity and synthetic-lineage checks; nested reference
+replay; type-specific lineage/integrity verification; and only then selection
+of a code-defined digest profile. The current trusted pair is exactly
+`(snapshot, source_snapshot)` with
+`ACQUISITION_SOURCE_SNAPSHOT`. A known collection/type used in the wrong pair
+is rejected; unknown and legacy pairs receive zero trust and normal PII
+scanning.
+
+The deterministic review regression fixes a canonical candidate entry whose
+SHA-256 is
+`5e06fcf272eadac5481501b2a120de788abbb5f6b6dcd9fb30cf15804119261b`;
+it contains the production-boundary CN-mobile shape `15804119261`. The digest
+is accepted only when nested in a fully replayable strict SourceSnapshot.
+The same value in open metadata remains rejected, and wrong pair, strict-model,
+identity, missing-reference, lineage, and partial-write cases all fail closed.
 
 ### Machine-generated value inventory
 
@@ -385,7 +405,7 @@ proof.
 
 ## Final repair blockers and resolution
 
-Two coordination-window blockers were closed without changing any historical
+Three coordination-window blockers were closed without changing any historical
 digest, manifest, fixture, golden file, runtime authority, or clinical content:
 
 1. **Digest trust was not bound to verified context.** Field-name trust could
@@ -403,6 +423,12 @@ digest, manifest, fixture, golden file, runtime authority, or clinical content:
    rejects the persistent readiness Gap for non-synthetic input. Both exact
    error messages are preserved, and both failures prove unchanged ledger row
    count and collection heads.
+3. **Typed review evidence was rescanned without replay context.** A valid
+   SourceSnapshot could carry a ledger-entry SHA-256 containing an accidental
+   phone-shaped digit run inside `candidate_ref.entry_sha256`; generic evidence
+   scans then rejected it. All four review evidence call points now use the
+   centralized typed dispatcher above. No PII pattern, global field exemption,
+   64-hex exemption, payload self-assertion, or legacy trust was added.
 
 Final diff self-review also found and fixed one narrow readiness error-class
 edge: a Gap collection head with the wrong `payload_type` is now recorded as an
@@ -412,7 +438,8 @@ SourceSnapshot, ChangeSet, EvidenceCandidate, MachineDraftClaim,
 GovernedSourceV2, KnowledgeGap, and release subject/artifact context to replay
 successfully before a profile is selected. A phone-bearing but unreplayable ref
 now fails on ledger integrity with no write. Both findings were committed as
-separate fixes, not folded into earlier history.
+separate fixes, not folded into earlier history. The typed review-evidence fix
+is likewise an append-only successor commit.
 
 ## Running validation
 

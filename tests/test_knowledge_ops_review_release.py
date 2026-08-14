@@ -18,6 +18,7 @@ from continucare.knowledge.ops import (
     GovernedSourceV2,
     InMemoryReviewerDirectory,
     KnowledgeGap,
+    KnowledgeOpsIntegrityError,
     KnowledgeOpsPolicyError,
     KnowledgeReleaseBlocked,
     KnowledgeReleaseCandidate,
@@ -38,8 +39,12 @@ from continucare.knowledge.ops import (
     ReviewPacketBuilder,
     ReviewerIdentity,
     ReviewSubjectKind,
+    SourceCandidate,
     SourceOperationReview,
+    SourcePolicyRef,
+    SourceSnapshot,
     SourcePromotionService,
+    assert_no_sensitive_data,
     load_builtin_ops_bundle,
     load_builtin_ops_read_model,
 )
@@ -50,6 +55,10 @@ from continucare.knowledge.ops import review as review_module
 FIXTURE_CATALOG_SHA256 = (
     "e711994018bb783236e050d890783502eaee91e7345e4d4e9808fdf542764a3f"
 )
+PHONE_BEARING_REVIEW_CANDIDATE_SHA256 = (
+    "5e06fcf272eadac5481501b2a120de788abbb5f6b6dcd9fb30cf15804119261b"
+)
+PHONE_BEARING_REVIEW_CANDIDATE_NUMBER = "15804119261"
 
 
 def _fixture_root() -> Path:
@@ -293,6 +302,7 @@ def _payload(
     operation: str | None = None,
     operation_decision: str = "approved",
     result: str = "pass",
+    evidence_refs=(),
 ) -> ReviewDecisionPayload:
     operation_reviews = ()
     if operation is not None:
@@ -308,6 +318,7 @@ def _payload(
             ReviewCheck(
                 check_id="synthetic-check",
                 result=result,
+                evidence_refs=evidence_refs,
                 note="Mechanism-only synthetic review fixture.",
             ),
         ),
@@ -578,6 +589,92 @@ def _source_review_packet(
     )
 
 
+def _phone_bearing_review_evidence_context(tmp_path: Path):
+    bundle = load_builtin_ops_bundle()
+    profile = next(
+        item
+        for item in bundle.coverage_profiles
+        if item.profile_id == "fixture-medication-followup"
+    )
+    ledger = AppendOnlyLedger(tmp_path / "phone-bearing-review-ledger")
+    candidate = SourceCandidate(
+        candidate_id="phone-bearing-review-candidate",
+        request_id="phone-bearing-review-request",
+        validation_profile_id=profile.profile_id,
+        policy=SourcePolicyRef(
+            policy_id="nmpa-cn-regulatory-metadata",
+            policy_version=1,
+        ),
+        connector_id="offline-fixture",
+        stable_source_key="phone-bearing-review-source",
+        canonical_url=(
+            "https://www.nmpa.gov.cn/synthetic-offline-fixture/"
+            "phone-bearing-review-source"
+        ),
+        title="Synthetic phone-bearing digest review source",
+        issuing_authority="ContinuCare synthetic fixture",
+        source_type="regulatory_product_information",
+        jurisdictions=({"system": "iso3166_1", "code": "CN"},),
+        languages=("zh-CN",),
+        document_version="synthetic-v1",
+        metadata={"fixture_domain": "typed_review_digest"},
+        discovered_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+        synthetic=True,
+    )
+    candidate_ref = ledger.append(
+        LedgerCollection.CANDIDATE,
+        candidate.candidate_id,
+        payload_type="source_candidate",
+        payload=candidate,
+        recorded_by="test:phone-digest-20",
+        recorded_at=datetime(2026, 1, 2, 3, 4, 6, tzinfo=timezone.utc),
+        synthetic=True,
+    ).ref
+    assert candidate_ref.entry_sha256 == PHONE_BEARING_REVIEW_CANDIDATE_SHA256
+    assert PHONE_BEARING_REVIEW_CANDIDATE_NUMBER in candidate_ref.entry_sha256
+
+    snapshot = SourceSnapshot(
+        snapshot_id="phone-bearing-review-snapshot",
+        candidate_ref=candidate_ref,
+        canonical_url=candidate.canonical_url,
+        retrieved_at=datetime(2026, 1, 2, 3, 4, 7, tzinfo=timezone.utc),
+        content_type="text/html",
+        content_size=0,
+        content_sha256=hashlib.sha256(b"").hexdigest(),
+        metadata_sha256=hashlib.sha256(
+            b"typed-review-evidence-metadata"
+        ).hexdigest(),
+        storage="metadata_only",
+        synthetic=True,
+    )
+    snapshot_ref = ledger.append(
+        LedgerCollection.SNAPSHOT,
+        snapshot.snapshot_id,
+        payload_type="source_snapshot",
+        payload=snapshot,
+        recorded_by="test:typed-review-evidence",
+        recorded_at=datetime(2026, 1, 2, 3, 4, 8, tzinfo=timezone.utc),
+        synthetic=True,
+    ).ref
+    return bundle, profile, ledger, candidate, candidate_ref, snapshot, snapshot_ref
+
+
+def _append_legacy_phone_evidence(ledger: AppendOnlyLedger, record_id: str):
+    return ledger.append(
+        LedgerCollection.CLAIM,
+        record_id,
+        payload_type="legacy_review_evidence",
+        payload={
+            "metadata": {
+                "entry_sha256": PHONE_BEARING_REVIEW_CANDIDATE_SHA256,
+            }
+        },
+        recorded_by="test:legacy-review-evidence",
+        recorded_at=datetime(2026, 1, 2, 3, 5, tzinfo=timezone.utc),
+        synthetic=True,
+    ).ref
+
+
 def _approve_source_synthetically(
     bundle, profile, ledger, acquisition, directory=None
 ):
@@ -660,6 +757,290 @@ def test_review_packet_pins_exact_subject_scope_gaps_and_safety_boundary(tmp_pat
     assert packet.contains_patient_data is False
     assert packet.knowledge_effect == "informational_only"
     assert packet.runtime_authority == "none"
+
+
+def test_phone_bearing_typed_snapshot_evidence_builds_replays_and_resolves(
+    tmp_path,
+):
+    (
+        bundle,
+        profile,
+        ledger,
+        _,
+        candidate_ref,
+        snapshot,
+        snapshot_ref,
+    ) = _phone_bearing_review_evidence_context(tmp_path)
+    with pytest.raises(
+        KnowledgeOpsPolicyError,
+        match="appears to contain personal data",
+    ):
+        assert_no_sensitive_data(snapshot.model_dump(mode="json"))
+    with pytest.raises(
+        KnowledgeOpsPolicyError,
+        match="appears to contain personal data",
+    ):
+        assert_no_sensitive_data(
+            {"metadata": {"entry_sha256": PHONE_BEARING_REVIEW_CANDIDATE_SHA256}}
+        )
+
+    packet_ref = ReviewPacketBuilder(bundle=bundle, ledger=ledger).build(
+        subject_kind="source_candidate",
+        subject_ref=candidate_ref,
+        gate="source_promotion",
+        scope=profile.scope,
+        generated_by="test:typed-review-evidence",
+        known_limitations=("Synthetic typed evidence verifier fixture only.",),
+        evidence_refs=(snapshot_ref,),
+        generated_at=datetime(2026, 1, 2, 3, 5, tzinfo=timezone.utc),
+    )
+    packet = ReviewPacket.model_validate(ledger.get(packet_ref).payload)
+    subject_entry, material_entries = review_module._resolve_packet_material(
+        bundle=bundle,
+        ledger=ledger,
+        packet=packet,
+    )
+    assert subject_entry.ref == candidate_ref
+    assert tuple(item.ref for item in material_entries) == (snapshot_ref,)
+
+    reviewers = _reviewers("knowledge_curator", "rights_officer")
+    service = ReviewEventService(
+        bundle=bundle,
+        ledger=ledger,
+        reviewers=reviewers,
+    )
+    decision_time = datetime(2026, 1, 2, 3, 5, 1, tzinfo=timezone.utc)
+    service.record(
+        packet_ref=packet_ref,
+        reviewer_identity_id="synthetic-knowledge_curator",
+        reviewer_role="knowledge_curator",
+        axis="metadata_quality",
+        decision="approved",
+        rationale="Synthetic typed evidence replay for curator axis.",
+        decision_payload=_payload(evidence_refs=(snapshot_ref,)),
+        decided_at=decision_time,
+    )
+    service.record(
+        packet_ref=packet_ref,
+        reviewer_identity_id="synthetic-rights_officer",
+        reviewer_role="rights_officer",
+        axis="rights",
+        decision="approved",
+        rationale="Synthetic typed evidence replay for rights axis.",
+        decision_payload=_payload(
+            operation="register_link_metadata",
+            evidence_refs=(snapshot_ref,),
+        ),
+        decided_at=decision_time,
+    )
+    decision = ReviewLedgerDecisionProvider(
+        bundle=bundle,
+        ledger=ledger,
+        reviewers=reviewers,
+    ).resolve_gate(
+        candidate_ref,
+        "source_promotion",
+        evaluated_at=decision_time + timedelta(seconds=1),
+    )
+    assert decision is not None
+    assert decision.synthetic is True
+    assert decision.production_eligible is False
+    assert ledger.verify_all() == 5
+
+
+@pytest.mark.parametrize(
+    "failure_mode",
+    (
+        "wrong_collection",
+        "wrong_payload_type",
+        "strict_model",
+        "record_identity",
+        "missing_candidate",
+        "lineage_mismatch",
+        "legacy_open_metadata",
+    ),
+)
+def test_typed_review_evidence_failures_precede_packet_append(
+    tmp_path,
+    failure_mode,
+):
+    (
+        bundle,
+        profile,
+        ledger,
+        candidate,
+        candidate_ref,
+        snapshot,
+        _,
+    ) = _phone_bearing_review_evidence_context(tmp_path)
+    snapshot_payload = snapshot.model_dump(mode="json")
+    recorded_at = datetime(2026, 1, 2, 3, 5, 1, tzinfo=timezone.utc)
+
+    if failure_mode == "wrong_collection":
+        record_id = "wrong-collection-snapshot"
+        snapshot_payload["snapshot_id"] = record_id
+        evidence_ref = ledger.append(
+            LedgerCollection.CLAIM,
+            record_id,
+            payload_type="source_snapshot",
+            payload=snapshot_payload,
+            recorded_by="test:wrong-typed-evidence-pair",
+            recorded_at=recorded_at,
+            synthetic=True,
+        ).ref
+    elif failure_mode == "wrong_payload_type":
+        record_id = "wrong-payload-snapshot"
+        snapshot_payload["snapshot_id"] = record_id
+        evidence_ref = ledger.append(
+            LedgerCollection.SNAPSHOT,
+            record_id,
+            payload_type="legacy_snapshot",
+            payload=snapshot_payload,
+            recorded_by="test:wrong-typed-evidence-pair",
+            recorded_at=recorded_at,
+            synthetic=True,
+        ).ref
+    elif failure_mode == "strict_model":
+        record_id = "invalid-model-snapshot"
+        snapshot_payload["snapshot_id"] = record_id
+        snapshot_payload["unexpected_open_field"] = "must fail strict validation"
+        evidence_ref = ledger.append(
+            LedgerCollection.SNAPSHOT,
+            record_id,
+            payload_type="source_snapshot",
+            payload=snapshot_payload,
+            recorded_by="test:invalid-typed-evidence-model",
+            recorded_at=recorded_at,
+            synthetic=True,
+        ).ref
+    elif failure_mode == "record_identity":
+        evidence_ref = ledger.append(
+            LedgerCollection.SNAPSHOT,
+            "different-snapshot-ledger-identity",
+            payload_type="source_snapshot",
+            payload=snapshot_payload,
+            recorded_by="test:wrong-snapshot-identity",
+            recorded_at=recorded_at,
+            synthetic=True,
+        ).ref
+    elif failure_mode == "missing_candidate":
+        record_id = "missing-candidate-snapshot"
+        snapshot_payload["snapshot_id"] = record_id
+        snapshot_payload["candidate_ref"] = {
+            "collection": "candidate",
+            "record_id": "missing-review-candidate",
+            "record_version": 1,
+            "entry_sha256": "a" * 64,
+        }
+        evidence_ref = ledger.append(
+            LedgerCollection.SNAPSHOT,
+            record_id,
+            payload_type="source_snapshot",
+            payload=snapshot_payload,
+            recorded_by="test:missing-candidate-lineage",
+            recorded_at=recorded_at,
+            synthetic=True,
+        ).ref
+    elif failure_mode == "lineage_mismatch":
+        lineage_candidate = SourceCandidate.model_validate(
+            {
+                **candidate.model_dump(mode="json"),
+                "candidate_id": "non-synthetic-lineage-candidate",
+                "synthetic": False,
+            }
+        )
+        lineage_ref = ledger.append(
+            LedgerCollection.CANDIDATE,
+            lineage_candidate.candidate_id,
+            payload_type="source_candidate",
+            payload=lineage_candidate,
+            recorded_by="test:lineage-mismatch",
+            recorded_at=datetime(2026, 1, 2, 3, 5, tzinfo=timezone.utc),
+            synthetic=False,
+        ).ref
+        record_id = "lineage-mismatch-snapshot"
+        snapshot_payload["snapshot_id"] = record_id
+        snapshot_payload["candidate_ref"] = lineage_ref.model_dump(mode="json")
+        evidence_ref = ledger.append(
+            LedgerCollection.SNAPSHOT,
+            record_id,
+            payload_type="source_snapshot",
+            payload=snapshot_payload,
+            recorded_by="test:lineage-mismatch",
+            recorded_at=recorded_at,
+            synthetic=True,
+        ).ref
+    else:
+        evidence_ref = _append_legacy_phone_evidence(
+            ledger,
+            "legacy-open-metadata-evidence",
+        )
+
+    entry_count = ledger.verify_all()
+    packet_heads = ledger.list_heads(LedgerCollection.REVIEW_PACKET)
+    with pytest.raises(
+        (KnowledgeOpsIntegrityError, KnowledgeOpsPolicyError, ValidationError)
+    ):
+        ReviewPacketBuilder(bundle=bundle, ledger=ledger).build(
+            subject_kind="source_candidate",
+            subject_ref=candidate_ref,
+            gate="source_promotion",
+            scope=profile.scope,
+            generated_by="test:typed-review-evidence-failure",
+            known_limitations=("Failure must precede packet append.",),
+            evidence_refs=(evidence_ref,),
+            generated_at=datetime(2026, 1, 2, 3, 6, tzinfo=timezone.utc),
+        )
+    assert ledger.verify_all() == entry_count
+    assert ledger.list_heads(LedgerCollection.REVIEW_PACKET) == packet_heads == ()
+
+
+def test_invalid_supplemental_evidence_precedes_review_event_append(tmp_path):
+    (
+        bundle,
+        profile,
+        ledger,
+        _,
+        candidate_ref,
+        _,
+        snapshot_ref,
+    ) = _phone_bearing_review_evidence_context(tmp_path)
+    packet_ref = ReviewPacketBuilder(bundle=bundle, ledger=ledger).build(
+        subject_kind="source_candidate",
+        subject_ref=candidate_ref,
+        gate="source_promotion",
+        scope=profile.scope,
+        generated_by="test:typed-review-evidence",
+        known_limitations=("Supplemental failure ordering fixture.",),
+        evidence_refs=(snapshot_ref,),
+        generated_at=datetime(2026, 1, 2, 3, 5, tzinfo=timezone.utc),
+    )
+    bad_ref = _append_legacy_phone_evidence(
+        ledger,
+        "legacy-supplemental-evidence",
+    )
+    service = ReviewEventService(
+        bundle=bundle,
+        ledger=ledger,
+        reviewers=_reviewers("knowledge_curator"),
+    )
+    entry_count = ledger.verify_all()
+    with pytest.raises(
+        KnowledgeOpsPolicyError,
+        match="appears to contain personal data",
+    ):
+        service.record(
+            packet_ref=packet_ref,
+            reviewer_identity_id="synthetic-knowledge_curator",
+            reviewer_role="knowledge_curator",
+            axis="metadata_quality",
+            decision="approved",
+            rationale="Invalid supplemental evidence must fail before append.",
+            decision_payload=_payload(evidence_refs=(bad_ref,)),
+            decided_at=datetime(2026, 1, 2, 3, 5, 1, tzinfo=timezone.utc),
+        )
+    assert ledger.verify_all() == entry_count
+    assert ledger.list_heads(LedgerCollection.REVIEW_EVENT) == ()
 
 
 def test_review_packet_contract_rejects_subject_digest_mismatch(tmp_path):
