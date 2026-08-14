@@ -36,7 +36,10 @@ from continucare.knowledge.ops.models import (
     StrictModel,
 )
 from continucare.knowledge.ops.promotion import GovernedSourceV2, PromotionDecision
-from continucare.knowledge.ops.security import assert_no_sensitive_data
+from continucare.knowledge.ops.security import (
+    assert_no_sensitive_data,
+    digest_derived_internal_id,
+)
 from continucare.knowledge.ops.store import (
     AppendOnlyLedger,
     LedgerCollection,
@@ -288,7 +291,7 @@ class InMemoryReviewerDirectory:
             identity, role=role, scope=scope, at=issued_at
         ):
             return None
-        attestation_id = f"attest-{event_claim_sha256[:32]}"
+        attestation_id = _attestation_id(event_claim_sha256)
         valid_until = identity.authorization_valid_until
         verifier_reference = "urn:continucare:readiness:ephemeral-review-verifier"
         digest = _review_attestation_digest(
@@ -1536,18 +1539,21 @@ def _chain_id(prefix: str, subject_ref: LedgerRef, discriminator: str) -> str:
         f"{prefix}-{subject_ref.collection}-{subject_ref.record_id}-"
         f"{subject_ref.record_version}-{subject_ref.entry_sha256[:12]}-{discriminator}"
     )
-    safe = "".join(character if character.isalnum() or character in "._-" else "-" for character in raw)
-    if len(safe) <= 128:
-        return safe
-    digest = hashlib.sha256(safe.encode("utf-8")).hexdigest()[:20]
-    return f"{safe[:107]}-{digest}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return digest_derived_internal_id(prefix, digest, digest_characters=32)
 
 
 def _event_id(record_id: str, timestamp: datetime) -> str:
     digest = hashlib.sha256(
         f"{record_id}|{timestamp.isoformat()}".encode("utf-8")
-    ).hexdigest()[:20]
-    return f"event-{digest}"
+    ).hexdigest()
+    return digest_derived_internal_id("event", digest, digest_characters=20)
+
+
+def _attestation_id(event_claim_sha256: str) -> str:
+    return digest_derived_internal_id(
+        "attest", event_claim_sha256, digest_characters=32
+    )
 
 
 def _canonical_model_key(value: StrictModel) -> str:

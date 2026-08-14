@@ -3,16 +3,24 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from continucare.knowledge.ops import AppendOnlyLedger, LedgerCollection
+from continucare.knowledge.ops import AppendOnlyLedger, LedgerCollection, LedgerRef
+from continucare.knowledge.ops import acquisition as acquisition_module
+from continucare.knowledge.ops import release as release_module
+from continucare.knowledge.ops import review as review_module
 from continucare.knowledge.ops.models import KnowledgeOpsPolicyError
 from continucare.knowledge.ops.security import (
     AUDITED_SHA256_FIELDS,
     AUDITED_SHA256_FIELD_EVIDENCE,
+    NUMERIC_SENSITIVE_PATTERNS,
     assert_no_sensitive_data,
+    digest_derived_internal_id,
+    maximum_unseparated_digit_run,
+    min_sensitive_unseparated_digit_run,
 )
 
 
@@ -30,13 +38,109 @@ def _walk(value: object, path: str = "$"):
         yield path, value
 
 
-def test_internal_review_ids_do_not_trigger_phone_number_false_positives() -> None:
-    assert_no_sensitive_data(
-        {
-            "event_id": "event-17255792435b1b6f15e5",
-            "attestation_id": "attest-17255792435b1b6f15e5aabbccddeeff",
-        }
+def test_numeric_sensitive_patterns_expose_stable_separation_metadata() -> None:
+    by_name = {item.name: item for item in NUMERIC_SENSITIVE_PATTERNS}
+    assert by_name["cn_phone"].minimum_unseparated_digit_run == 11
+    assert by_name["cn_national_id"].minimum_unseparated_digit_run == 18
+    assert by_name["international_phone"].requires_leading_plus is True
+    assert by_name["international_phone"].minimum_unseparated_digit_run is None
+    assert min_sensitive_unseparated_digit_run == 11
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "event-13800138000aabbccdde",
+        "attest-13800138000aabbccddeeff0011223344",
+        "fixture-13800138000aabbccddeeff0011223344",
+        "13800138000",
+    ],
+)
+def test_ungrouped_phone_bearing_internal_ids_and_raw_phone_are_rejected(
+    value: str,
+) -> None:
+    with pytest.raises(KnowledgeOpsPolicyError, match="appears to contain personal data"):
+        assert_no_sensitive_data({"internal_id": value})
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected_hex_characters", "generator"),
+    [
+        (
+            "event",
+            20,
+            lambda seed, digest, reference: review_module._event_id(
+                f"review-seed-{seed}", datetime(2026, 8, 14, tzinfo=timezone.utc)
+            ),
+        ),
+        (
+            "attest",
+            32,
+            lambda seed, digest, reference: review_module._attestation_id(digest),
+        ),
+        (
+            "fixture",
+            32,
+            lambda seed, digest, reference: digest_derived_internal_id(
+                "fixture", digest, digest_characters=32
+            ),
+        ),
+        (
+            "packet",
+            32,
+            lambda seed, digest, reference: review_module._chain_id(
+                "packet", reference, f"gate-{seed}"
+            ),
+        ),
+        (
+            "snapshot",
+            32,
+            lambda seed, digest, reference: acquisition_module._derived_id(
+                "snapshot", f"source-{seed}"
+            ),
+        ),
+        (
+            "readiness",
+            32,
+            lambda seed, digest, reference: release_module._derived_id(
+                "readiness", reference
+            ),
+        ),
+    ],
+)
+def test_digest_derived_internal_id_generators_are_phone_safe_for_10000_seeds(
+    prefix: str, expected_hex_characters: int, generator
+) -> None:
+    for seed in range(10_000):
+        digest = hashlib.sha256(f"deterministic-seed-{seed}".encode()).hexdigest()
+        reference = LedgerRef(
+            collection=LedgerCollection.CANDIDATE,
+            record_id=f"subject-{seed}",
+            record_version=1,
+            entry_sha256=digest,
+        )
+        identifier = generator(seed, digest, reference)
+        assert identifier == generator(seed, digest, reference)
+        assert maximum_unseparated_digit_run(identifier) < (
+            min_sensitive_unseparated_digit_run
+        )
+        digest_groups = identifier.removeprefix(f"{prefix}-").split("-")
+        assert all(1 <= len(group) <= 8 for group in digest_groups)
+        assert all(re.fullmatch(r"[0-9a-f]+", group) for group in digest_groups)
+        assert sum(len(group) for group in digest_groups) == expected_hex_characters
+        assert_no_sensitive_data({"internal_id": identifier})
+
+
+def test_valid_grouped_event_attestation_and_fixture_ids_require_no_exemption() -> None:
+    digest = hashlib.sha256(b"phone-safe-id-regression").hexdigest()
+    values = (
+        digest_derived_internal_id("event", digest, digest_characters=20),
+        digest_derived_internal_id("attest", digest, digest_characters=32),
+        digest_derived_internal_id("fixture", digest, digest_characters=32),
     )
+    assert values[0].count("-") == 3
+    assert all(maximum_unseparated_digit_run(item) < 11 for item in values)
+    assert_no_sensitive_data({"internal_ids": values})
 
 
 def test_only_exact_audited_lowercase_sha256_fields_receive_digest_treatment() -> None:

@@ -36,6 +36,7 @@ from continucare.knowledge.ops.models import (
 from continucare.knowledge.ops.security import (
     assert_deidentified_query_terms,
     assert_no_sensitive_data,
+    digest_derived_internal_id,
     validate_url_against_policy,
 )
 from continucare.knowledge.ops.store import (
@@ -846,12 +847,8 @@ def _stable_failure_code(exc: Exception) -> str:
 
 
 def _derived_id(prefix: str, value: str) -> str:
-    candidate = f"{prefix}-{value}"
-    if len(candidate) <= 128:
-        return candidate
-    digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:16]
-    available = 128 - len(prefix) - len(digest) - 2
-    return f"{prefix}-{value[:available]}-{digest}"
+    digest = hashlib.sha256(f"{prefix}|{value}".encode("utf-8")).hexdigest()
+    return digest_derived_internal_id(prefix, digest, digest_characters=32)
 
 
 def _atomic_blob_create(target: Path, payload: bytes) -> None:

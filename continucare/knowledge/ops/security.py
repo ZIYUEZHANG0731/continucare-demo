@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from types import MappingProxyType
 from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
@@ -93,18 +94,48 @@ AUDITED_SHA256_FIELD_EVIDENCE = MappingProxyType(
 )
 AUDITED_SHA256_FIELDS = frozenset(AUDITED_SHA256_FIELD_EVIDENCE)
 _LOWER_SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_TECHNICAL_HASH_ID_PATTERNS = {
-    "event_id": re.compile(r"^event-[0-9a-f]{20}$"),
-    "attestation_id": re.compile(r"^(?:attest|fixture)-[0-9a-f]{32}$"),
-}
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
-_CN_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
-_INTERNATIONAL_PHONE = re.compile(r"(?<!\w)\+\d[\d ()-]{7,}\d(?!\w)")
-_CN_NATIONAL_ID = re.compile(r"(?<!\d)\d{17}[0-9Xx](?!\w)")
 _LABELED_IDENTIFIER = re.compile(
     r"(?i)(?:patient|patient[ _-]?id|mrn|medical[ _-]?record|身份证|病历号|患者)\s*[:=]"
 )
 _INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_DIGEST_ID_GROUP_SIZE = 8
+
+
+@dataclass(frozen=True, slots=True)
+class NumericSensitivePattern:
+    name: str
+    expression: re.Pattern[str]
+    minimum_unseparated_digit_run: int | None
+    requires_leading_plus: bool = False
+
+
+NUMERIC_SENSITIVE_PATTERNS = (
+    NumericSensitivePattern(
+        name="cn_phone",
+        expression=re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"),
+        minimum_unseparated_digit_run=11,
+    ),
+    NumericSensitivePattern(
+        name="cn_national_id",
+        expression=re.compile(r"(?<!\d)\d{17}[0-9Xx](?!\w)"),
+        minimum_unseparated_digit_run=18,
+    ),
+    NumericSensitivePattern(
+        name="international_phone",
+        expression=re.compile(r"(?<!\w)\+\d[\d ()-]{7,}\d(?!\w)"),
+        minimum_unseparated_digit_run=None,
+        requires_leading_plus=True,
+    ),
+)
+min_sensitive_unseparated_digit_run = min(
+    item.minimum_unseparated_digit_run
+    for item in NUMERIC_SENSITIVE_PATTERNS
+    if item.minimum_unseparated_digit_run is not None
+    and not item.requires_leading_plus
+)
+if _DIGEST_ID_GROUP_SIZE >= min_sensitive_unseparated_digit_run:
+    raise RuntimeError("digest ID grouping must stay below every unseparated numeric PII run")
 
 
 def assert_deidentified_query_terms(terms: Sequence[str]) -> None:
@@ -136,11 +167,6 @@ def assert_no_sensitive_data(value: object, *, path: str = "payload") -> None:
                 )
             if isinstance(item, str) and (
                 normalized_key in _TECHNICAL_VALUE_KEYS
-                or (
-                    normalized_key in _TECHNICAL_HASH_ID_PATTERNS
-                    and _TECHNICAL_HASH_ID_PATTERNS[normalized_key].fullmatch(item)
-                    is not None
-                )
                 or (
                     normalized_key in AUDITED_SHA256_FIELDS
                     and _LOWER_SHA256.fullmatch(item) is not None
@@ -286,16 +312,45 @@ def validate_transport_route(
 
 
 def _contains_sensitive_text(value: str) -> bool:
-    return any(
-        pattern.search(value)
-        for pattern in (
-            _EMAIL,
-            _CN_PHONE,
-            _INTERNATIONAL_PHONE,
-            _CN_NATIONAL_ID,
-            _LABELED_IDENTIFIER,
-        )
+    return (
+        _EMAIL.search(value) is not None
+        or _LABELED_IDENTIFIER.search(value) is not None
+        or any(item.expression.search(value) for item in NUMERIC_SENSITIVE_PATTERNS)
     )
+
+
+def digest_derived_internal_id(
+    prefix: str,
+    digest_hex: str,
+    *,
+    digest_characters: int,
+) -> str:
+    """Format real digest material as a SafeId without long numeric runs."""
+
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]{0,63}", prefix):
+        raise ValueError("digest-derived ID prefix is not safe")
+    if (
+        isinstance(digest_characters, bool)
+        or not isinstance(digest_characters, int)
+        or digest_characters < 1
+        or digest_characters > 64
+        or len(digest_hex) < digest_characters
+        or re.fullmatch(r"[0-9a-f]+", digest_hex) is None
+    ):
+        raise ValueError("digest-derived ID requires lower-case hexadecimal digest material")
+    selected = digest_hex[:digest_characters]
+    grouped = "-".join(
+        selected[index : index + _DIGEST_ID_GROUP_SIZE]
+        for index in range(0, len(selected), _DIGEST_ID_GROUP_SIZE)
+    )
+    candidate = f"{prefix}-{grouped}"
+    if maximum_unseparated_digit_run(candidate) >= min_sensitive_unseparated_digit_run:
+        raise ValueError("digest-derived ID violates the numeric PII separation threshold")
+    return candidate
+
+
+def maximum_unseparated_digit_run(value: str) -> int:
+    return max((len(item) for item in re.findall(r"\d+", value)), default=0)
 
 
 def _fully_unquote(value: str, *, component: str) -> str:

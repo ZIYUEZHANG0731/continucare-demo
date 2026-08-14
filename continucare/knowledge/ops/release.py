@@ -26,7 +26,10 @@ from continucare.knowledge.ops.models import (
 )
 from continucare.knowledge.ops.promotion import GovernedSourceV2
 from continucare.knowledge.ops.review import ReviewLedgerDecisionProvider
-from continucare.knowledge.ops.security import assert_no_sensitive_data
+from continucare.knowledge.ops.security import (
+    assert_no_sensitive_data,
+    digest_derived_internal_id,
+)
 from continucare.knowledge.ops.store import (
     AppendOnlyLedger,
     LedgerCollection,
@@ -758,7 +761,5 @@ def _derived_id(prefix: str, reference: LedgerRef) -> str:
         f"{prefix}-{reference.record_id}-{reference.record_version}-"
         f"{reference.entry_sha256[:16]}"
     )
-    if len(raw) <= 128:
-        return raw
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
-    return f"{raw[:107]}-{digest}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return digest_derived_internal_id(prefix, digest, digest_characters=32)

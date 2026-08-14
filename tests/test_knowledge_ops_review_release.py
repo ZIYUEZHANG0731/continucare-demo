@@ -43,6 +43,7 @@ from continucare.knowledge.ops import (
     load_builtin_ops_bundle,
     load_builtin_ops_read_model,
 )
+from continucare.knowledge.ops.security import digest_derived_internal_id
 from continucare.knowledge.ops import review as review_module
 
 
@@ -118,7 +119,9 @@ class _FormalReviewerVerifierFixture:
             identity, role=role, scope=scope, at=issued_at
         ):
             return None
-        attestation_id = f"fixture-{event_claim_sha256[:32]}"
+        attestation_id = digest_derived_internal_id(
+            "fixture", event_claim_sha256, digest_characters=32
+        )
         verifier_reference = "urn:continucare:test:review-attestation-fixture"
         valid_until = identity.authorization_valid_until
         return ReviewEventAttestation(
@@ -446,7 +449,11 @@ def _append_direct_formal_successor(
     payload = event.model_dump(mode="json")
     payload.update(
         {
-            "event_id": f"direct-{hashlib.sha256(timestamp.isoformat().encode()).hexdigest()[:20]}",
+            "event_id": digest_derived_internal_id(
+                "direct",
+                hashlib.sha256(timestamp.isoformat().encode()).hexdigest(),
+                digest_characters=20,
+            ),
             "decided_at": timestamp.isoformat().replace("+00:00", "Z"),
             "expected_predecessor_sha256": event_ref.entry_sha256,
             "counts_toward_release": counts_toward_release,
