@@ -32,6 +32,13 @@ class LedgerCollection(StrEnum):
     GAP = "gap"
     REVIEW_PACKET = "review_packet"
     REVIEW_EVENT = "review_event"
+    CLAIM = "claim"
+    BINDING = "binding"
+    PATIENT_CONTENT = "patient_content"
+    TRANSLATION = "translation"
+    TERMINOLOGY_MAPPING = "terminology_mapping"
+    RELEASE_CANDIDATE = "release_candidate"
+    READINESS_REPORT = "readiness_report"
     RELEASE = "release"
 
 
@@ -186,6 +193,28 @@ class AppendOnlyLedger:
         if entry.entry_sha256 != reference.entry_sha256:
             raise KnowledgeOpsIntegrityError("ledger reference SHA-256 mismatch")
         return entry
+
+    def list_heads(
+        self, collection: LedgerCollection | str
+    ) -> tuple[LedgerEntry, ...]:
+        collection_value = LedgerCollection(collection)
+        collection_dir = self._records_root / collection_value.value
+        if not collection_dir.exists():
+            return ()
+        if collection_dir.is_symlink() or not collection_dir.is_dir():
+            raise KnowledgeOpsIntegrityError("invalid ledger collection directory")
+        heads: list[LedgerEntry] = []
+        for record_dir in sorted(collection_dir.iterdir()):
+            if (
+                record_dir.is_symlink()
+                or not record_dir.is_dir()
+                or not _safe_id(record_dir.name)
+            ):
+                raise KnowledgeOpsIntegrityError("invalid ledger record directory")
+            history = self.history(collection_value, record_dir.name)
+            if history:
+                heads.append(history[-1])
+        return tuple(heads)
 
     def verify_all(self) -> int:
         verified = 0

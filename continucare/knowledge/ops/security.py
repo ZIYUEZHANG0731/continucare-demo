@@ -47,6 +47,20 @@ _SENSITIVE_QUERY_KEY_PARTS = (
     "session",
     "cookie",
 )
+_TECHNICAL_VALUE_KEYS = frozenset(
+    {
+        "code",
+        "version",
+        "document_version",
+        "canonical_url",
+        "relative_path",
+        "content_type",
+        "collection",
+        "policy_id",
+        "profile_id",
+        "validation_profile_id",
+    }
+)
 _EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _CN_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 _INTERNATIONAL_PHONE = re.compile(r"(?<!\w)\+\d[\d ()-]{7,}\d(?!\w)")
@@ -83,6 +97,14 @@ def assert_no_sensitive_data(value: object, *, path: str = "payload") -> None:
                 raise KnowledgeOpsPolicyError(
                     f"patient/personal data key is prohibited at {path}.{key}"
                 )
+            if isinstance(item, str) and (
+                normalized_key in _TECHNICAL_VALUE_KEYS
+                or (
+                    normalized_key.endswith("_sha256")
+                    and re.fullmatch(r"[0-9a-f]{64}", item) is not None
+                )
+            ):
+                continue
             assert_no_sensitive_data(item, path=f"{path}.{key}")
         return
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):

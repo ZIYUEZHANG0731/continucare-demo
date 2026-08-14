@@ -39,6 +39,15 @@
       "relative_path": "review_policy_v2.json",
       "manifest_sha256": "e6013664d1b126b60dec78522d988e296755ebe096c108f49d5862455a30709f",
       "size": 3261
+    },
+    {
+      "ref": {
+        "file_id": "knowledge-ops-release-intent",
+        "file_version": 1
+      },
+      "relative_path": "release_intent_v2.json",
+      "manifest_sha256": "edc2fcd5d191d1fd6ccf2bd44b626fc4a82ff2f81dff783e5d39e38f8a517c6f",
+      "size": 908
     }
   ],
   "current_file_refs": [
@@ -56,6 +65,10 @@
     },
     {
       "file_id": "knowledge-ops-review-policy",
+      "file_version": 1
+    },
+    {
+      "file_id": "knowledge-ops-release-intent",
       "file_version": 1
     }
   ]

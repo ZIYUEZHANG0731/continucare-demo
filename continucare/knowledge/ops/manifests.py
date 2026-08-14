@@ -19,10 +19,12 @@ from continucare.knowledge.ops.models import (
     FileRef,
     GovernanceGate,
     KnowledgeOpsBundleIndex,
+    KnowledgeReleaseIntent,
     KnowledgeOpsManifestError,
     PayloadEnvelope,
     ReviewGatePolicy,
     ReviewPolicyManifest,
+    ReleaseIntentManifest,
     SafetyBoundary,
     SafetyBoundaryManifest,
     SourcePolicy,
@@ -87,6 +89,7 @@ class KnowledgeOpsBundle:
     source_policies: tuple[SourcePolicy, ...]
     coverage_profiles: tuple[CoverageValidationProfile, ...]
     review_gates: tuple[ReviewGatePolicy, ...]
+    release_intent: KnowledgeReleaseIntent
     manifest_digests: Mapping[tuple[str, int], str]
 
     def source_policy(self, policy_id: str, policy_version: int = 1) -> SourcePolicy:
@@ -157,10 +160,20 @@ def load_ops_bundle(
     source_files = [item for item in envelopes if isinstance(item, SourcePolicyManifest)]
     profile_files = [item for item in envelopes if isinstance(item, CoverageProfileManifest)]
     review_files = [item for item in envelopes if isinstance(item, ReviewPolicyManifest)]
-    if not all(len(items) == 1 for items in (boundary_files, source_files, profile_files, review_files)):
+    release_files = [item for item in envelopes if isinstance(item, ReleaseIntentManifest)]
+    if not all(
+        len(items) == 1
+        for items in (
+            boundary_files,
+            source_files,
+            profile_files,
+            review_files,
+            release_files,
+        )
+    ):
         raise KnowledgeOpsManifestError(
             "current v2 bundle requires exactly one boundary, source policy, "
-            "coverage profile, and review policy file"
+            "coverage profile, review policy, and release intent file"
         )
 
     source_policies = source_files[0].policies
@@ -196,6 +209,7 @@ def load_ops_bundle(
         source_policies=source_policies,
         coverage_profiles=coverage_profiles,
         review_gates=review_gates,
+        release_intent=release_files[0].intent,
         manifest_digests=MappingProxyType(digests),
     )
 

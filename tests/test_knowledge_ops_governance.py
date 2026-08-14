@@ -212,6 +212,10 @@ def test_incremental_read_model_has_no_release_or_runtime_authority():
     invalid["boundary"]["runtime_authority"] = "clinical"
     with pytest.raises(ValidationError):
         model.__class__.model_validate(invalid)
+    invalid = model.model_dump(mode="json")
+    invalid["production_releases"] = ["fake-release"]
+    with pytest.raises(ValidationError):
+        model.__class__.model_validate(invalid)
 
 
 def test_v2_package_does_not_change_the_v1_public_read_api():
@@ -299,6 +303,37 @@ def test_append_only_ledger_builds_a_contiguous_hash_chain(tmp_path):
     assert ledger.history(LedgerCollection.CANDIDATE, "candidate-1") == (first, second)
     assert ledger.head(LedgerCollection.CANDIDATE, "candidate-1") == second
     assert ledger.verify_all() == 2
+
+
+def test_append_only_ledger_lists_only_verified_collection_heads(tmp_path):
+    ledger = AppendOnlyLedger(tmp_path / "ledger")
+    ledger.append(
+        LedgerCollection.GAP,
+        "gap-1",
+        payload_type="knowledge_gap",
+        payload={"lifecycle": "open"},
+        recorded_by="system:test",
+        synthetic=True,
+    )
+    latest = ledger.append(
+        LedgerCollection.GAP,
+        "gap-1",
+        payload_type="knowledge_gap",
+        payload={"lifecycle": "resolved"},
+        recorded_by="system:test",
+        synthetic=True,
+    )
+    second = ledger.append(
+        LedgerCollection.GAP,
+        "gap-2",
+        payload_type="knowledge_gap",
+        payload={"lifecycle": "open"},
+        recorded_by="system:test",
+        synthetic=True,
+    )
+
+    assert ledger.list_heads(LedgerCollection.GAP) == (latest, second)
+    assert ledger.list_heads(LedgerCollection.RELEASE) == ()
 
 
 def test_append_only_ledger_detects_tampering_before_next_append(tmp_path):

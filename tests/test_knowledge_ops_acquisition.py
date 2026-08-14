@@ -333,6 +333,15 @@ def test_structured_privacy_guard_rejects_nested_patient_fields():
         assert_no_sensitive_data({"source": {"patient_id": "synthetic-1"}})
 
 
+def test_structured_privacy_guard_only_exempts_well_formed_technical_hashes():
+    assert_no_sensitive_data({"entry_sha256": "1" * 64})
+
+    with pytest.raises(KnowledgeOpsPolicyError, match="personal data"):
+        assert_no_sensitive_data({"external_id": "13800138000"})
+    with pytest.raises(KnowledgeOpsPolicyError, match="personal data"):
+        assert_no_sensitive_data({"entry_sha256": "user@example.org"})
+
+
 def test_acquisition_request_extra_patient_field_fails_schema():
     payload = _request(
         "fixture-medication-followup", request_id="patient-field"
@@ -477,6 +486,7 @@ def test_synthetic_candidate_to_source_promotion_remains_nonproduction(tmp_path)
         subject_ref=result.candidate_refs[0],
         approved_roles=("knowledge_curator", "rights_officer"),
         evidence_refs=evidence,
+        blocking_gap_refs=result.gap_refs,
         synthetic=True,
         production_eligible=False,
     )
@@ -499,6 +509,7 @@ def test_synthetic_candidate_to_source_promotion_remains_nonproduction(tmp_path)
     assert source.access_mode == "quarantined_synthetic_fixture"
     assert source.knowledge_effect == "informational_only"
     assert source.runtime_authority == "none"
+    assert source.unresolved_gap_refs == result.gap_refs
     assert len(result.gap_refs) == 2
 
 

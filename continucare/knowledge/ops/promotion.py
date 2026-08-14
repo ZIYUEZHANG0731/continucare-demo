@@ -9,6 +9,7 @@ from pydantic import AnyHttpUrl, Field, field_validator, model_validator
 
 from continucare.knowledge.ops.acquisition import (
     AcquisitionEnvironment,
+    KnowledgeGap,
     SourceCandidate,
     SourcePolicyRef,
     SourceSnapshot,
@@ -38,6 +39,7 @@ class PromotionDecision(StrictModel):
     gate: Literal["source_promotion"] = "source_promotion"
     approved_roles: tuple[ReviewerRole, ...] = Field(min_length=1)
     evidence_refs: tuple[LedgerRef, ...] = Field(min_length=1)
+    blocking_gap_refs: tuple[LedgerRef, ...] = ()
     synthetic: bool
     production_eligible: bool
 
@@ -45,6 +47,14 @@ class PromotionDecision(StrictModel):
     def validate_decision(self) -> "PromotionDecision":
         if len(self.approved_roles) != len(set(self.approved_roles)):
             raise ValueError("promotion approval roles must be unique")
+        if len(self.evidence_refs) != len(
+            {_ref_key(item) for item in self.evidence_refs}
+        ):
+            raise ValueError("promotion evidence refs must be unique")
+        if len(self.blocking_gap_refs) != len(
+            {_ref_key(item) for item in self.blocking_gap_refs}
+        ):
+            raise ValueError("promotion blocking gap refs must be unique")
         if self.synthetic and self.production_eligible:
             raise ValueError("synthetic decision cannot be production eligible")
         return self
@@ -71,6 +81,7 @@ class GovernedSourceV2(StrictModel):
     content_sha256: Sha256
     access_mode: Literal["link_only", "quarantined_synthetic_fixture"]
     promotion_evidence_refs: tuple[LedgerRef, ...] = Field(min_length=1)
+    unresolved_gap_refs: tuple[LedgerRef, ...] = ()
     promoted_at: datetime
     promoted_by: NonBlank
     registry_status: Literal["synthetic_fixture", "registered"]
@@ -88,6 +99,16 @@ class GovernedSourceV2(StrictModel):
 
     @model_validator(mode="after")
     def validate_synthetic_boundary(self) -> "GovernedSourceV2":
+        if len(self.promotion_evidence_refs) != len(
+            {_ref_key(item) for item in self.promotion_evidence_refs}
+        ):
+            raise ValueError("Source promotion evidence refs must be unique")
+        if len(self.unresolved_gap_refs) != len(
+            {_ref_key(item) for item in self.unresolved_gap_refs}
+        ):
+            raise ValueError("Source unresolved gap refs must be unique")
+        if self.production_eligible and self.unresolved_gap_refs:
+            raise ValueError("production-eligible Source cannot carry unresolved gaps")
         if self.synthetic:
             if self.production_eligible:
                 raise ValueError("synthetic Source cannot be production eligible")
@@ -97,6 +118,10 @@ class GovernedSourceV2(StrictModel):
                 raise ValueError("synthetic Source cannot claim production registration")
         elif self.registry_status != "registered":
             raise ValueError("non-synthetic Source must use registered status")
+        elif not self.production_eligible or self.access_mode != "link_only":
+            raise ValueError(
+                "registered non-synthetic Source must be production eligible and link-only"
+            )
         return self
 
 
@@ -162,6 +187,17 @@ class SourcePromotionService:
                 raise KnowledgeOpsPolicyError(
                     "promotion decision evidence must reference review events"
                 )
+        for gap_ref in decision.blocking_gap_refs:
+            gap_entry = self._ledger.get(gap_ref)
+            if gap_entry.collection != LedgerCollection.GAP.value:
+                raise KnowledgeOpsPolicyError(
+                    "promotion blocking gaps must reference KnowledgeGap records"
+                )
+            gap = KnowledgeGap.model_validate(gap_entry.payload)
+            if gap.lifecycle != "open":
+                raise KnowledgeOpsPolicyError(
+                    "promotion decision may only carry current open gaps"
+                )
 
         if self._environment == AcquisitionEnvironment.SYNTHETIC_TEST:
             if not candidate.synthetic or not snapshot.synthetic or not decision.synthetic:
@@ -184,6 +220,10 @@ class SourcePromotionService:
                 raise KnowledgeOpsPolicyError(
                     "production promotion requires formally verified decision evidence"
                 )
+            if decision.blocking_gap_refs:
+                raise KnowledgeOpsPolicyError(
+                    "production Source promotion is blocked by unresolved gaps"
+                )
             access_mode = "link_only"
             production_eligible = True
             registry_status = "registered"
@@ -204,6 +244,7 @@ class SourcePromotionService:
             content_sha256=snapshot.content_sha256,
             access_mode=access_mode,
             promotion_evidence_refs=decision.evidence_refs,
+            unresolved_gap_refs=decision.blocking_gap_refs,
             promoted_at=timestamp,
             promoted_by=promoted_by,
             registry_status=registry_status,
@@ -219,3 +260,12 @@ class SourcePromotionService:
             recorded_at=timestamp,
             synthetic=source.synthetic,
         ).ref
+
+
+def _ref_key(reference: LedgerRef) -> tuple[str, str, int, str]:
+    return (
+        str(reference.collection),
+        reference.record_id,
+        reference.record_version,
+        reference.entry_sha256,
+    )

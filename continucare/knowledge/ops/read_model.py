@@ -10,7 +10,9 @@ from continucare.knowledge.ops.manifests import KnowledgeOpsBundle, load_builtin
 from continucare.knowledge.ops.models import (
     KNOWLEDGE_OPS_CONTRACT_VERSION,
     CoverageValidationProfile,
+    KnowledgeReleaseIntent,
     ReviewGatePolicy,
+    SafeId,
     SafetyBoundary,
     SourcePolicy,
     StrictModel,
@@ -19,14 +21,15 @@ from continucare.knowledge.ops.models import (
 
 class KnowledgeOpsReadModel(StrictModel):
     contract_version: Literal[KNOWLEDGE_OPS_CONTRACT_VERSION]
-    bundle_id: str
+    bundle_id: SafeId
     bundle_version: int = Field(ge=1)
     boundary: SafetyBoundary
     source_policies: tuple[SourcePolicy, ...]
     validation_profiles: tuple[CoverageValidationProfile, ...]
     review_gates: tuple[ReviewGatePolicy, ...]
-    operational_state: str = "readiness_only"
-    production_releases: tuple[str, ...] = ()
+    release_intent: KnowledgeReleaseIntent
+    operational_state: Literal["readiness_only"] = "readiness_only"
+    production_releases: tuple[None, ...] = Field(default_factory=tuple, max_length=0)
 
 
 def build_ops_read_model(bundle: KnowledgeOpsBundle) -> KnowledgeOpsReadModel:
@@ -38,6 +41,7 @@ def build_ops_read_model(bundle: KnowledgeOpsBundle) -> KnowledgeOpsReadModel:
         source_policies=bundle.source_policies,
         validation_profiles=bundle.coverage_profiles,
         review_gates=bundle.review_gates,
+        release_intent=bundle.release_intent,
     )
 
 

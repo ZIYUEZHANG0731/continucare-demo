@@ -474,11 +474,42 @@ class ReviewPolicyManifest(EnvelopeBase):
     gates: tuple[ReviewGatePolicy, ...]
 
 
+class KnowledgeReleaseIntent(StrictModel):
+    release_intent_id: SafeId
+    release_intent_version: int = Field(ge=1)
+    target_jurisdiction: Literal["CN"] = "CN"
+    target_language: Literal["zh-CN"] = "zh-CN"
+    intended_uses: tuple[IntendedUse, ...] = Field(min_length=3, max_length=3)
+    artifact_selection: Literal["none_until_formal_review"] = (
+        "none_until_formal_review"
+    )
+    selected_artifact_count: Literal[0] = 0
+    formal_reviewers_available: Literal[False] = False
+    formal_license_decisions_available: Literal[False] = False
+    release_ready: Literal[False] = False
+    status: Literal["readiness_only_blocked"] = "readiness_only_blocked"
+    reason: NonBlank
+    knowledge_effect: Literal["informational_only"] = "informational_only"
+    runtime_authority: Literal["none"] = "none"
+
+    @model_validator(mode="after")
+    def validate_intended_uses(self) -> "KnowledgeReleaseIntent":
+        if set(self.intended_uses) != {item.value for item in IntendedUse}:
+            raise ValueError("release intent must enumerate the exact safe intended uses")
+        return self
+
+
+class ReleaseIntentManifest(EnvelopeBase):
+    file_kind: Literal["knowledge_release_intent"] = "knowledge_release_intent"
+    intent: KnowledgeReleaseIntent
+
+
 PayloadEnvelope = Annotated[
     SafetyBoundaryManifest
     | SourcePolicyManifest
     | CoverageProfileManifest
-    | ReviewPolicyManifest,
+    | ReviewPolicyManifest
+    | ReleaseIntentManifest,
     Field(discriminator="file_kind"),
 ]
 
