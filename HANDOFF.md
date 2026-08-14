@@ -1,6 +1,48 @@
 # HANDOFF
 
-> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。**最新权威状态：2026-08-14，A++ UI-1 至 UI-6 已完成并通过 Full Validation。** 最终测试代码基线是 `cad99d98f5cc13947d6075d62a628e6fc410d873`；完整证据见 [`docs/ui_a_plus_plus_full_validation_report_2026-08-14.md`](docs/ui_a_plus_plus_full_validation_report_2026-08-14.md)。后续不得再按本文件旧历史中“UI-1 尚未开始”或“A++ 尚未实施”的描述执行。旧节保留仅为历史；如 UI 状态冲突，以本节 `UI-6` 为准，运行时安全边界仍以 M1–M5 Baseline Repair 及后续已完成切片为准。
+> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。**最新权威状态：2026-08-14，A++ UI-1 至 UI-6 已完成 Full Validation，Knowledge v2 alias readiness 也已以保留 38 个历史提交的 `--no-ff` merge 合入主线并通过完整集成验证。** Knowledge v2 merge commit 为 `88c85b3fb103e13f0770f385f01a0f1916a135ff`；完整证据见 [`docs/knowledge_v2_mainline_integration_validation_2026-08-14.md`](docs/knowledge_v2_mainline_integration_validation_2026-08-14.md)。A++ UI 最终测试代码基线是 `cad99d98f5cc13947d6075d62a628e6fc410d873`，其证据见 [`docs/ui_a_plus_plus_full_validation_report_2026-08-14.md`](docs/ui_a_plus_plus_full_validation_report_2026-08-14.md)。后续不得再按旧历史中“A++ 尚未实施”或“Knowledge v2 尚未合入”的描述执行。
+
+## K2. Knowledge v2 主线集成最新权威交接（2026-08-14，已完成）
+
+### K2.1 合入与精确提交
+
+- 目标分支：`codex/docs-collaboration-init`；
+- 合入前主线：`f315a6b6bf69d6c01927c53115a266d144ed09ab`；
+- Knowledge 源分支 tip：`0110c319a58e2de7baa92e83788a56113bc62a0c`；
+- merge commit：`88c85b3fb103e13f0770f385f01a0f1916a135ff`；
+- merge parents 依次为上述主线基线与 Knowledge tip；
+- 使用普通 `git merge --no-ff --no-commit`，保留 Knowledge 的 38 个历史提交；没有 squash、rebase、cherry-pick、force push 或历史改写；
+- 合入精确为 66 个新增 Knowledge/terminology/manifest/文档/fixture/测试文件，`22,859 insertions`，零删除、零现有 UI 文件覆盖。
+
+### K2.2 完整验证
+
+```text
+Knowledge targeted: 448 passed
+UI targeted: 228 passed
+关键业务回归: 35 passed
+全量: 891 passed, 3 skipped
+compileall: 通过
+cached/worktree diff check: 通过
+```
+
+三个 skip 仍且仅因未配置官方 `FHIR_R4_SCHEMA_ZIP`，没有新增 skip。in-app Browser 使用隔离数据库完成六页 `1280×720` / `390×844` 冷加载和真实 `0/9 → story_complete`；console error/warn=0，无水平溢出或错误 overlay，页面资源仅来自 localhost。标准终态保持 QR 1、Observation 1、Task 历史 5、Communication 历史 2、Summary 历史 2、AuditEvent 12、Alert 0、approved ClinicalRule 0、sent/received Communication 0，`SEND_ENABLED=False`。
+
+### K2.3 数据与工作区保护
+
+- 工作区 `data/continucare.db` 前后保持 SHA-256 `0d0b35a97d96faee19015d8917b6b5e42a65ff40a2dd99dca967d5b02e6ef585`、size `311296`、mtime epoch `1786644509`，17 张表行数逐项不变，且无 journal/WAL/SHM；
+- 受保护 brief `docs/ui_product_design_brief_2026-08-13.md` 保持未跟踪、未修改、未暂存，SHA-256 仍为 `e9e03bde1051f43ec8dbca2695716a70588b448e47b37e434015934121be03a6`；
+- Knowledge 终态浏览前后隔离 Browser 数据库 SHA-256/size/mtime 完全不变，证明现有 Knowledge 页仍是离线只读展示。
+
+### K2.4 当前能力边界与后续
+
+- `knowledge_effect=informational_only`，`runtime_authority=none`；
+- 不诊断、不治疗、不分诊、不做自动临床决策；
+- P1b 仍为 `not_attempted`，rights/live/socket/alias Gap 仍 fail closed；
+- 没有真实患者数据、真实来源采集、真实网络请求、正式 reviewer、正式 rights decision 或正式 KnowledgeRelease；
+- `approved_match_aliases` 仍为空，`consumer_integration_ready=false`；
+- 当前 A++ Knowledge UI 没有导入 v2 alias API，仍展示既有四主题离线 bundle；
+- 本次没有实施 UI v2 consumer 适配。任何 successor manifest/DTO、正式 alias 解除或 UI 适配都必须单独授权并独立审核；
+- 后续还会由队友完成一次独立验证；本次没有调用 Claude、Sonnet、Opus、ImageGen 或子 Agent。
 
 ## UI-6. A++ UI Full Validation 最新权威交接（2026-08-14，已完成）
 
@@ -62,13 +104,13 @@ git diff --check: 通过
 - 无真实患者数据、无模型调用、无真实发送、无真实外部系统写入、无部署；
 - 工作区 `data/continucare.db` 在验收前后保持 SHA-256 `0d0b35a97d96faee19015d8917b6b5e42a65ff40a2dd99dca967d5b02e6ef585`、size `311296`、mtime `1786644509`，且无 journal/WAL/SHM；
 - `docs/ui_product_design_brief_2026-08-13.md` 仍是受保护未跟踪输入，SHA-256 `e9e03bde1051f43ec8dbca2695716a70588b448e47b37e434015934121be03a6`，不得自动暂存或修改；
-- 当前 UI 继续使用主分支既有离线 Knowledge bundle；`codex/knowledge-v2-alias-readiness` tip `0110c319a58e2de7baa92e83788a56113bc62a0c` 已 push 但未合入，后续 merge/cherry-pick 需单独授权；
+- UI-6 验收当时主线仍只有既有离线 Knowledge bundle；后续 K2 已将 `codex/knowledge-v2-alias-readiness` tip `0110c319a58e2de7baa92e83788a56113bc62a0c` 合入。当前 UI 仍未导入 v2 alias API，以上历史状态不得用来否定 K2 合入事实；
 - 本轮使用 frontend testing/debugging skill 与 in-app Browser；没有使用 ImageGen，没有调用 Claude、Sonnet、Opus 或任何子 Agent；
 - IAB 合成键盘事件不能作为真实键盘/屏幕阅读器结果；已验证原生语义、可聚焦性、ARIA、焦点 CSS 和真实点击状态。未运行 VoiceOver/NVDA，也未做 OS 级 reduced-motion 模拟；这些限制已在报告明确记录。
 
 ### UI-6.6 后续动作
 
-A++ UI 当前没有待执行的默认代码切片。任何进一步 UI 优化、Knowledge v2/ops 合入、真实集成、部署、生产化或临床能力工作，都必须由用户另行明确授权。下面 `UI-0A`、`UI-0` 及其他旧“下一步”只保留历史，不得覆盖本节。
+A++ UI 当前没有待执行的默认代码切片。Knowledge v2/ops 合入已由 K2 完成；任何进一步 UI 优化、v2 alias consumer 适配、真实集成、部署、生产化或临床能力工作，都必须由用户另行明确授权。下面 `UI-0A`、`UI-0` 及其他旧“下一步”只保留历史，不得覆盖本节或 K2。
 
 ## UI-0A. A++ 暂定执行规格当前交接（2026-08-14，文档收口；UI-1 已获后续授权）
 
