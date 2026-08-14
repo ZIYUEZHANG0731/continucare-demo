@@ -19,7 +19,9 @@ from continucare.knowledge.ops import (
     EvidenceDerivationProvenance,
     EvidenceLimitationCode,
     InMemoryReviewerDirectory,
+    KnowledgeOpsIntegrityError,
     LedgerCollection,
+    LedgerRef,
     MachineDraftClaim,
     OfflineFixtureConnector,
     QuarantineBlobStore,
@@ -275,6 +277,50 @@ def test_verified_phone_bearing_snapshot_digest_survives_machine_lineage(
         created_at=NOW + timedelta(minutes=4),
     )
     assert MachineDraftClaim.model_validate(ledger.get(claim_ref).payload)
+
+
+def test_digest_profile_does_not_trust_an_unreplayable_nested_ledger_ref(
+    tmp_path: Path,
+) -> None:
+    _bundle, _profile, ledger, _acquisition, author, evidence_ref = _stage(tmp_path)
+    candidate = EvidenceCandidate.model_validate(ledger.get(evidence_ref).payload)
+    digest = hashlib.sha256(VERIFIED_DIGEST_PAYLOAD).hexdigest()
+    assert digest == VERIFIED_DIGEST_SHA256
+    forged = candidate.model_copy(
+        update={
+            "candidate_version": 2,
+            "source_snapshot_ref": LedgerRef(
+                collection=LedgerCollection.SNAPSHOT,
+                record_id="missing-phone-bearing-snapshot",
+                record_version=1,
+                entry_sha256=digest,
+            ),
+        }
+    )
+    forged_ref = ledger.append(
+        LedgerCollection.EVIDENCE_CANDIDATE,
+        candidate.candidate_id,
+        payload_type="evidence_candidate_v2",
+        payload=forged,
+        recorded_by=author.author_identity_id,
+        recorded_at=NOW + timedelta(minutes=8),
+        synthetic=True,
+        expected_record_version=2,
+    ).ref
+    before = _ledger_state(ledger)
+
+    with pytest.raises(KnowledgeOpsIntegrityError, match="unknown"):
+        EvidenceCandidatePromotionService(ledger=ledger).promote_to_draft_claim(
+            evidence_candidate_ref=forged_ref,
+            claim_id="dcl-unreplayable-nested-ref",
+            author_provenance=author.model_copy(
+                update={"authored_at": NOW + timedelta(minutes=9)}
+            ),
+            created_by=author.author_identity_id,
+            created_at=NOW + timedelta(minutes=10),
+        )
+
+    assert _ledger_state(ledger) == before
 
 
 @pytest.mark.parametrize(

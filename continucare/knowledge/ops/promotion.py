@@ -177,12 +177,16 @@ class SourcePromotionService:
         candidate = SourceCandidate.model_validate(candidate_entry.payload)
         snapshot = SourceSnapshot.model_validate(snapshot_entry.payload)
         assert_no_sensitive_data(candidate.model_dump(mode="json"))
+        if (
+            candidate.candidate_id != candidate_ref.record_id
+            or snapshot.snapshot_id != snapshot_ref.record_id
+            or snapshot.candidate_ref != candidate_ref
+        ):
+            raise KnowledgeOpsPolicyError("SourceSnapshot does not belong to candidate")
         assert_no_sensitive_data(
             snapshot.model_dump(mode="json"),
             digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
         )
-        if snapshot.candidate_ref != candidate_ref:
-            raise KnowledgeOpsPolicyError("SourceSnapshot does not belong to candidate")
         policy = self._bundle.source_policy(
             candidate.policy.policy_id, candidate.policy.policy_version
         )
@@ -248,10 +252,6 @@ class SourcePromotionService:
                     "promotion blocking gaps must reference KnowledgeGap records"
                 )
             gap = KnowledgeGap.model_validate(gap_entry.payload)
-            assert_no_sensitive_data(
-                gap.model_dump(mode="json"),
-                digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
-            )
             if gap.lifecycle != "open":
                 raise KnowledgeOpsPolicyError(
                     "promotion decision may only carry current open gaps"
@@ -260,6 +260,12 @@ class SourcePromotionService:
                 raise KnowledgeOpsPolicyError(
                     "promotion decision uses a stale KnowledgeGap"
                 )
+            if gap.subject_ref is not None:
+                self._ledger.get(gap.subject_ref)
+            assert_no_sensitive_data(
+                gap.model_dump(mode="json"),
+                digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
+            )
         assert_no_sensitive_data(
             decision.model_dump(mode="json"),
             digest_trust_profile=DigestTrustProfile.PROMOTION_DECISION,

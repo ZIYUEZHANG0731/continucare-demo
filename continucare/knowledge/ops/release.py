@@ -9,7 +9,11 @@ from typing import Literal
 
 from pydantic import Field, ValidationError, field_validator, model_validator
 
-from continucare.knowledge.ops.acquisition import KnowledgeGap, SourceCandidate
+from continucare.knowledge.ops.acquisition import (
+    KnowledgeGap,
+    SourceCandidate,
+    SourceSnapshot,
+)
 from continucare.knowledge.ops.manifests import KnowledgeOpsBundle
 from continucare.knowledge.ops.models import (
     AuthorProvenance,
@@ -258,7 +262,7 @@ class ReleaseReadinessService:
                 raise KnowledgeOpsPolicyError(
                     "release artifact kind does not match its ledger collection"
                 )
-            _assert_release_artifact_no_sensitive_data(artifact, entry)
+            _assert_release_artifact_no_sensitive_data(self._ledger, artifact, entry)
         for gap_ref in candidate.blocking_gap_refs:
             gap_entry = self._ledger.get(gap_ref)
             if (
@@ -269,6 +273,7 @@ class ReleaseReadinessService:
                     "release blocking gap must reference an exact KnowledgeGap"
                 )
             gap = KnowledgeGap.model_validate(gap_entry.payload)
+            _verify_gap_digest_context(self._ledger, gap)
             assert_no_sensitive_data(
                 gap.model_dump(mode="json"),
                 digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
@@ -468,7 +473,9 @@ class ReleaseReadinessService:
                     )
                 )
             try:
-                _assert_release_artifact_no_sensitive_data(artifact, entry)
+                _assert_release_artifact_no_sensitive_data(
+                    self._ledger, artifact, entry
+                )
             except KnowledgeOpsPolicyError:
                 blockers.append(
                     _blocker(
@@ -477,7 +484,7 @@ class ReleaseReadinessService:
                         artifact.object_ref,
                     )
                 )
-            except (ValidationError, ValueError):
+            except (KnowledgeOpsIntegrityError, ValidationError, ValueError):
                 blockers.append(
                     _blocker(
                         ReadinessBlockerCode.UNKNOWN_OR_STALE_ARTIFACT,
@@ -630,6 +637,7 @@ class ReleaseReadinessService:
                 if gap_entry.payload_type != "knowledge_gap":
                     raise ValueError("wrong gap payload type")
                 gap = KnowledgeGap.model_validate(gap_entry.payload)
+                _verify_gap_digest_context(self._ledger, gap)
                 assert_no_sensitive_data(
                     gap.model_dump(mode="json"),
                     digest_trust_profile=(
@@ -645,7 +653,7 @@ class ReleaseReadinessService:
                     )
                 )
                 continue
-            except (ValidationError, ValueError):
+            except (KnowledgeOpsIntegrityError, ValidationError, ValueError):
                 blockers.append(
                     _blocker(
                         ReadinessBlockerCode.INVALID_GAP_REFERENCE,
@@ -671,6 +679,7 @@ class ReleaseReadinessService:
                 ):
                     raise ValueError("wrong collection")
                 gap = KnowledgeGap.model_validate(gap_entry.payload)
+                _verify_gap_digest_context(self._ledger, gap)
                 assert_no_sensitive_data(
                     gap.model_dump(mode="json"),
                     digest_trust_profile=(
@@ -694,6 +703,7 @@ class ReleaseReadinessService:
                     if gap_entry.payload_type != "knowledge_gap":
                         raise ValueError("wrong gap payload type")
                     gap = KnowledgeGap.model_validate(gap_entry.payload)
+                    _verify_gap_digest_context(self._ledger, gap)
                     assert_no_sensitive_data(
                         gap.model_dump(mode="json"),
                         digest_trust_profile=(
@@ -761,16 +771,11 @@ class ReleaseReadinessService:
             inspected_artifact_count=len(candidate.artifacts),
             production_review_count=production_reviews,
         )
-        report_profile = DigestTrustProfile.RELEASE_READINESS_REPORT_BASE
-        if all(
-            blocker.subject_ref is None
-            or _ledger_ref_resolves(self._ledger, blocker.subject_ref)
-            for blocker in report.blockers
-        ):
-            report_profile = DigestTrustProfile.RELEASE_READINESS_REPORT
         assert_no_sensitive_data(
             report.model_dump(mode="json"),
-            digest_trust_profile=report_profile,
+            digest_trust_profile=_readiness_report_digest_profile(
+                self._ledger, report
+            ),
         )
         return self._ledger.append(
             LedgerCollection.READINESS_REPORT,
@@ -806,7 +811,9 @@ class ReleaseReadinessService:
         report = ReleaseReadinessReport.model_validate(report_entry.payload)
         assert_no_sensitive_data(
             report.model_dump(mode="json"),
-            digest_trust_profile=DigestTrustProfile.RELEASE_READINESS_REPORT,
+            digest_trust_profile=_readiness_report_digest_profile(
+                self._ledger, report
+            ),
         )
         if not report.ready:
             raise KnowledgeReleaseBlocked(
@@ -880,6 +887,7 @@ def _assert_release_candidate_open_material_no_sensitive_data(
 
 
 def _assert_release_artifact_no_sensitive_data(
+    ledger: AppendOnlyLedger,
     artifact: ReleaseArtifact,
     entry: LedgerEntry,
 ) -> None:
@@ -889,6 +897,9 @@ def _assert_release_artifact_no_sensitive_data(
         if entry.payload_type != "governed_source_v2":
             raise ValueError("Source artifact has an unexpected payload type")
         source = GovernedSourceV2.model_validate(entry.payload)
+        if source.source_id != entry.record_id:
+            raise ValueError("Source artifact ledger identity differs")
+        _verify_governed_source_digest_context(ledger, source)
         assert_no_sensitive_data(
             source.model_dump(mode="json"),
             digest_trust_profile=DigestTrustProfile.GOVERNED_SOURCE,
@@ -901,6 +912,9 @@ def _assert_release_artifact_no_sensitive_data(
         from continucare.knowledge.ops.evidence import MachineDraftClaim
 
         claim = MachineDraftClaim.model_validate(entry.payload)
+        if claim.claim_id != entry.record_id:
+            raise ValueError("Claim artifact ledger identity differs")
+        _verify_machine_draft_digest_context(ledger, claim)
         assert_no_sensitive_data(
             claim.model_dump(mode="json"),
             digest_trust_profile=DigestTrustProfile.MACHINE_DRAFT_CLAIM,
@@ -908,6 +922,137 @@ def _assert_release_artifact_no_sensitive_data(
         return
     # Other artifact kinds have no strict digest-bearing v2 model in this slice.
     assert_no_sensitive_data(entry.payload)
+
+
+def _replay_typed_entry(
+    ledger: AppendOnlyLedger,
+    reference: LedgerRef,
+    *,
+    collection: LedgerCollection,
+    payload_type: str,
+) -> LedgerEntry:
+    entry = ledger.get(reference)
+    if entry.collection != collection.value or entry.payload_type != payload_type:
+        raise ValueError(f"expected {collection.value}/{payload_type}")
+    return entry
+
+
+def _verify_gap_digest_context(
+    ledger: AppendOnlyLedger,
+    gap: KnowledgeGap,
+) -> None:
+    if gap.subject_ref is not None:
+        ledger.get(gap.subject_ref)
+
+
+def _verify_governed_source_digest_context(
+    ledger: AppendOnlyLedger,
+    source: GovernedSourceV2,
+) -> None:
+    candidate_entry = _replay_typed_entry(
+        ledger,
+        source.candidate_ref,
+        collection=LedgerCollection.CANDIDATE,
+        payload_type="source_candidate",
+    )
+    snapshot_entry = _replay_typed_entry(
+        ledger,
+        source.snapshot_ref,
+        collection=LedgerCollection.SNAPSHOT,
+        payload_type="source_snapshot",
+    )
+    candidate = SourceCandidate.model_validate(candidate_entry.payload)
+    snapshot = SourceSnapshot.model_validate(snapshot_entry.payload)
+    if (
+        candidate.candidate_id != source.candidate_ref.record_id
+        or snapshot.snapshot_id != source.snapshot_ref.record_id
+        or snapshot.candidate_ref != source.candidate_ref
+        or snapshot.content_sha256 != source.content_sha256
+    ):
+        raise ValueError("governed Source digest lineage differs")
+    assert_no_sensitive_data(candidate.model_dump(mode="json"))
+    assert_no_sensitive_data(
+        snapshot.model_dump(mode="json"),
+        digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+    )
+    for reference in source.promotion_evidence_refs:
+        evidence_entry = ledger.get(reference)
+        if evidence_entry.collection != LedgerCollection.REVIEW_EVENT.value:
+            raise ValueError("Source promotion evidence is not a ReviewEvent")
+    for reference in source.unresolved_gap_refs:
+        gap_entry = _replay_typed_entry(
+            ledger,
+            reference,
+            collection=LedgerCollection.GAP,
+            payload_type="knowledge_gap",
+        )
+        gap = KnowledgeGap.model_validate(gap_entry.payload)
+        _verify_gap_digest_context(ledger, gap)
+        assert_no_sensitive_data(
+            gap.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
+        )
+
+
+def _verify_machine_draft_digest_context(
+    ledger: AppendOnlyLedger,
+    claim,
+) -> None:
+    from continucare.knowledge.ops.evidence import EvidenceCandidate
+
+    evidence_entry = _replay_typed_entry(
+        ledger,
+        claim.evidence_candidate_ref,
+        collection=LedgerCollection.EVIDENCE_CANDIDATE,
+        payload_type="evidence_candidate_v2",
+    )
+    source_entry = _replay_typed_entry(
+        ledger,
+        claim.source_candidate_ref,
+        collection=LedgerCollection.CANDIDATE,
+        payload_type="source_candidate",
+    )
+    snapshot_entry = _replay_typed_entry(
+        ledger,
+        claim.source_snapshot_ref,
+        collection=LedgerCollection.SNAPSHOT,
+        payload_type="source_snapshot",
+    )
+    evidence = EvidenceCandidate.model_validate(evidence_entry.payload)
+    source = SourceCandidate.model_validate(source_entry.payload)
+    snapshot = SourceSnapshot.model_validate(snapshot_entry.payload)
+    if (
+        evidence.candidate_id != claim.evidence_candidate_ref.record_id
+        or source.candidate_id != claim.source_candidate_ref.record_id
+        or snapshot.snapshot_id != claim.source_snapshot_ref.record_id
+        or evidence.source_candidate_ref != claim.source_candidate_ref
+        or evidence.source_snapshot_ref != claim.source_snapshot_ref
+        or snapshot.candidate_ref != claim.source_candidate_ref
+        or evidence.whole_record_sha256 != snapshot.content_sha256
+    ):
+        raise ValueError("machine draft Claim digest lineage differs")
+    assert_no_sensitive_data(source.model_dump(mode="json"))
+    assert_no_sensitive_data(
+        snapshot.model_dump(mode="json"),
+        digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+    )
+    assert_no_sensitive_data(
+        evidence.model_dump(mode="json"),
+        digest_trust_profile=DigestTrustProfile.EVIDENCE_CANDIDATE,
+    )
+
+
+def _readiness_report_digest_profile(
+    ledger: AppendOnlyLedger,
+    report: ReleaseReadinessReport,
+) -> DigestTrustProfile:
+    if all(
+        blocker.subject_ref is None
+        or _ledger_ref_resolves(ledger, blocker.subject_ref)
+        for blocker in report.blockers
+    ):
+        return DigestTrustProfile.RELEASE_READINESS_REPORT
+    return DigestTrustProfile.RELEASE_READINESS_REPORT_BASE
 
 
 def _release_candidate_digest_context_verified(

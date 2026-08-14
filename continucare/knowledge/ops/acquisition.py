@@ -491,6 +491,7 @@ class AcquisitionService:
                         previous_snapshot = SourceSnapshot.model_validate(
                             previous_snapshot_entry.payload
                         )
+                        self._ledger.get(previous_snapshot.candidate_ref)
                         assert_no_sensitive_data(
                             previous_snapshot.model_dump(mode="json"),
                             digest_trust_profile=(
@@ -797,6 +798,8 @@ class AcquisitionService:
             observed_at=observed_at,
             synthetic=True,
         )
+        if gap.subject_ref is not None:
+            self._ledger.get(gap.subject_ref)
         assert_no_sensitive_data(
             gap.model_dump(mode="json"),
             digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,

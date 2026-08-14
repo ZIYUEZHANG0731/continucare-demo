@@ -325,7 +325,11 @@ class EvidenceCandidateService:
             raise KnowledgeOpsPolicyError("stale SourceSnapshot cannot stage evidence")
         source = SourceCandidate.model_validate(source_entry.payload)
         snapshot = SourceSnapshot.model_validate(snapshot_entry.payload)
-        if snapshot.candidate_ref != source_candidate_ref:
+        if (
+            source.candidate_id != source_candidate_ref.record_id
+            or snapshot.snapshot_id != source_snapshot_ref.record_id
+            or snapshot.candidate_ref != source_candidate_ref
+        ):
             raise KnowledgeOpsPolicyError("SourceSnapshot does not belong to SourceCandidate")
         if source.synthetic != source_entry.synthetic or snapshot.synthetic != snapshot_entry.synthetic:
             raise KnowledgeOpsPolicyError("source payload and ledger synthetic status differ")
@@ -371,10 +375,6 @@ class EvidenceCandidatePromotionService:
             raise KnowledgeOpsPolicyError(
                 "P1 promotion accepts synthetic EvidenceCandidate lineage only"
             )
-        assert_no_sensitive_data(
-            candidate.model_dump(mode="json"),
-            digest_trust_profile=DigestTrustProfile.EVIDENCE_CANDIDATE,
-        )
         if (
             author_provenance.author_identity_id
             != candidate.author_provenance.author_identity_id
@@ -390,8 +390,7 @@ class EvidenceCandidatePromotionService:
         if (
             snapshot_entry.collection != LedgerCollection.SNAPSHOT.value
             or source_entry.collection != LedgerCollection.CANDIDATE.value
-            or
-            snapshot_entry.payload_type != "source_snapshot"
+            or snapshot_entry.payload_type != "source_snapshot"
             or source_entry.payload_type != "source_candidate"
             or not snapshot_entry.synthetic
             or not source_entry.synthetic
@@ -399,13 +398,23 @@ class EvidenceCandidatePromotionService:
             raise KnowledgeOpsPolicyError("draft Claim source lineage is invalid")
         snapshot = SourceSnapshot.model_validate(snapshot_entry.payload)
         source = SourceCandidate.model_validate(source_entry.payload)
+        if (
+            source.candidate_id != candidate.source_candidate_ref.record_id
+            or snapshot.snapshot_id != candidate.source_snapshot_ref.record_id
+            or snapshot.candidate_ref != candidate.source_candidate_ref
+        ):
+            raise KnowledgeOpsPolicyError("draft Claim source lineage is invalid")
         assert_no_sensitive_data(source.model_dump(mode="json"))
+        if snapshot.content_sha256 != candidate.whole_record_sha256:
+            raise KnowledgeOpsPolicyError("EvidenceCandidate whole-record digest changed")
         assert_no_sensitive_data(
             snapshot.model_dump(mode="json"),
             digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
         )
-        if snapshot.content_sha256 != candidate.whole_record_sha256:
-            raise KnowledgeOpsPolicyError("EvidenceCandidate whole-record digest changed")
+        assert_no_sensitive_data(
+            candidate.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.EVIDENCE_CANDIDATE,
+        )
 
         head = self._ledger.head(LedgerCollection.CLAIM, claim_id)
         next_version = 1 if head is None else head.record_version + 1
@@ -415,14 +424,18 @@ class EvidenceCandidatePromotionService:
                     "draft Claim successor must preserve typed synthetic lineage"
                 )
             previous = MachineDraftClaim.model_validate(head.payload)
+            if (
+                previous.evidence_candidate_ref != evidence_candidate_ref
+                or previous.source_candidate_ref != candidate.source_candidate_ref
+                or previous.source_snapshot_ref != candidate.source_snapshot_ref
+            ):
+                raise KnowledgeOpsPolicyError(
+                    "draft Claim successor cannot substitute its EvidenceCandidate"
+                )
             assert_no_sensitive_data(
                 previous.model_dump(mode="json"),
                 digest_trust_profile=DigestTrustProfile.MACHINE_DRAFT_CLAIM,
             )
-            if previous.evidence_candidate_ref != evidence_candidate_ref:
-                raise KnowledgeOpsPolicyError(
-                    "draft Claim successor cannot substitute its EvidenceCandidate"
-                )
         timestamp = created_at or datetime.now(timezone.utc)
         claim = MachineDraftClaim(
             claim_id=claim_id,

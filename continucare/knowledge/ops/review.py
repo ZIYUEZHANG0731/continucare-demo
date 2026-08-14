@@ -698,6 +698,8 @@ class ReviewPacketBuilder:
         if self._ledger.head(subject_ref.collection, subject_ref.record_id).ref != subject_ref:
             raise KnowledgeOpsPolicyError("Review Packet cannot target a stale subject")
         _assert_review_subject_no_sensitive_data(
+            bundle=self._bundle,
+            ledger=self._ledger,
             subject_kind=subject_kind_value,
             entry=subject_entry,
         )
@@ -802,6 +804,7 @@ class ReviewPacketBuilder:
             ):
                 raise KnowledgeOpsPolicyError("open_gap_refs must reference KnowledgeGap")
             gap = KnowledgeGap.model_validate(entry.payload)
+            _verify_gap_digest_context(self._ledger, gap)
             assert_no_sensitive_data(
                 gap.model_dump(mode="json"),
                 digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
@@ -1305,6 +1308,8 @@ def _resolve_packet_material(
             "EvidenceCandidate cannot be used as a Claim review subject"
         )
     _assert_review_subject_no_sensitive_data(
+        bundle=bundle,
+        ledger=ledger,
         subject_kind=subject_kind,
         entry=subject_entry,
     )
@@ -1389,6 +1394,7 @@ def _resolve_packet_material(
         ):
             raise KnowledgeOpsPolicyError("Review Packet open gap ref is not a KnowledgeGap")
         gap = KnowledgeGap.model_validate(entry.payload)
+        _verify_gap_digest_context(ledger, gap)
         assert_no_sensitive_data(
             gap.model_dump(mode="json"),
             digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
@@ -1482,6 +1488,8 @@ def _assert_review_open_text_no_sensitive_data(
 
 def _assert_review_subject_no_sensitive_data(
     *,
+    bundle: KnowledgeOpsBundle,
+    ledger: AppendOnlyLedger,
     subject_kind: ReviewSubjectKind,
     entry: LedgerEntry,
 ) -> None:
@@ -1494,6 +1502,8 @@ def _assert_review_subject_no_sensitive_data(
                 "SourceCandidate review requires the exact source_candidate payload"
             )
         subject = SourceCandidate.model_validate(entry.payload)
+        if subject.candidate_id != entry.record_id:
+            raise KnowledgeOpsPolicyError("SourceCandidate ledger identity differs")
         assert_no_sensitive_data(subject.model_dump(mode="json"))
         return
     if kind == ReviewSubjectKind.SOURCE_SNAPSHOT:
@@ -1502,6 +1512,9 @@ def _assert_review_subject_no_sensitive_data(
                 "SourceSnapshot review requires the exact source_snapshot payload"
             )
         subject = SourceSnapshot.model_validate(entry.payload)
+        if subject.snapshot_id != entry.record_id:
+            raise KnowledgeOpsPolicyError("SourceSnapshot ledger identity differs")
+        _verify_source_snapshot_digest_context(ledger, subject)
         assert_no_sensitive_data(
             subject.model_dump(mode="json"),
             digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
@@ -1513,6 +1526,9 @@ def _assert_review_subject_no_sensitive_data(
                 "Source review requires the exact governed_source_v2 payload"
             )
         subject = GovernedSourceV2.model_validate(entry.payload)
+        if subject.source_id != entry.record_id:
+            raise KnowledgeOpsPolicyError("governed Source ledger identity differs")
+        _verify_governed_source_digest_context(ledger, subject)
         assert_no_sensitive_data(
             subject.model_dump(mode="json"),
             digest_trust_profile=DigestTrustProfile.GOVERNED_SOURCE,
@@ -1524,6 +1540,9 @@ def _assert_review_subject_no_sensitive_data(
                 "ChangeSet review requires the exact change_set payload"
             )
         subject = ChangeSet.model_validate(entry.payload)
+        if subject.change_set_id != entry.record_id:
+            raise KnowledgeOpsPolicyError("ChangeSet ledger identity differs")
+        _verify_change_set_digest_context(ledger, subject)
         assert_no_sensitive_data(
             subject.model_dump(mode="json"),
             digest_trust_profile=DigestTrustProfile.ACQUISITION_CHANGE_SET,
@@ -1536,6 +1555,9 @@ def _assert_review_subject_no_sensitive_data(
         from continucare.knowledge.ops.evidence import MachineDraftClaim
 
         subject = MachineDraftClaim.model_validate(entry.payload)
+        if subject.claim_id != entry.record_id:
+            raise KnowledgeOpsPolicyError("machine draft Claim ledger identity differs")
+        _verify_machine_draft_digest_context(ledger, subject)
         assert_no_sensitive_data(
             subject.model_dump(mode="json"),
             digest_trust_profile=DigestTrustProfile.MACHINE_DRAFT_CLAIM,
@@ -1549,6 +1571,9 @@ def _assert_review_subject_no_sensitive_data(
         from continucare.knowledge.ops.release import KnowledgeReleaseCandidate
 
         subject = KnowledgeReleaseCandidate.model_validate(entry.payload)
+        if subject.release_candidate_id != entry.record_id:
+            raise KnowledgeOpsPolicyError("release candidate ledger identity differs")
+        _verify_release_candidate_digest_context(bundle, ledger, subject)
         assert_no_sensitive_data(
             subject.model_dump(mode="json"),
             digest_trust_profile=DigestTrustProfile.KNOWLEDGE_RELEASE_CANDIDATE,
@@ -1557,6 +1582,226 @@ def _assert_review_subject_no_sensitive_data(
     # Legacy binding/content/translation/terminology and non-machine Claim payloads
     # have no digest-bearing v2 schema in this slice, so they receive no trust.
     assert_no_sensitive_data(entry.payload)
+
+
+def _replay_typed_entry(
+    ledger: AppendOnlyLedger,
+    reference: LedgerRef,
+    *,
+    collection: LedgerCollection,
+    payload_type: str,
+) -> LedgerEntry:
+    entry = ledger.get(reference)
+    if entry.collection != collection.value or entry.payload_type != payload_type:
+        raise KnowledgeOpsPolicyError(
+            f"verified digest context requires {collection.value}/{payload_type}"
+        )
+    return entry
+
+
+def _verify_gap_digest_context(
+    ledger: AppendOnlyLedger,
+    gap: KnowledgeGap,
+) -> None:
+    if gap.subject_ref is not None:
+        ledger.get(gap.subject_ref)
+
+
+def _verify_source_snapshot_digest_context(
+    ledger: AppendOnlyLedger,
+    snapshot: SourceSnapshot,
+) -> None:
+    candidate_entry = _replay_typed_entry(
+        ledger,
+        snapshot.candidate_ref,
+        collection=LedgerCollection.CANDIDATE,
+        payload_type="source_candidate",
+    )
+    candidate = SourceCandidate.model_validate(candidate_entry.payload)
+    if candidate.candidate_id != snapshot.candidate_ref.record_id:
+        raise KnowledgeOpsPolicyError("SourceSnapshot candidate identity differs")
+    assert_no_sensitive_data(candidate.model_dump(mode="json"))
+
+
+def _verify_governed_source_digest_context(
+    ledger: AppendOnlyLedger,
+    source: GovernedSourceV2,
+) -> None:
+    candidate_entry = _replay_typed_entry(
+        ledger,
+        source.candidate_ref,
+        collection=LedgerCollection.CANDIDATE,
+        payload_type="source_candidate",
+    )
+    snapshot_entry = _replay_typed_entry(
+        ledger,
+        source.snapshot_ref,
+        collection=LedgerCollection.SNAPSHOT,
+        payload_type="source_snapshot",
+    )
+    candidate = SourceCandidate.model_validate(candidate_entry.payload)
+    snapshot = SourceSnapshot.model_validate(snapshot_entry.payload)
+    if (
+        candidate.candidate_id != source.candidate_ref.record_id
+        or snapshot.snapshot_id != source.snapshot_ref.record_id
+        or snapshot.candidate_ref != source.candidate_ref
+        or snapshot.content_sha256 != source.content_sha256
+    ):
+        raise KnowledgeOpsPolicyError("governed Source digest lineage differs")
+    assert_no_sensitive_data(candidate.model_dump(mode="json"))
+    assert_no_sensitive_data(
+        snapshot.model_dump(mode="json"),
+        digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+    )
+    for reference in source.promotion_evidence_refs:
+        evidence_entry = ledger.get(reference)
+        if evidence_entry.collection != LedgerCollection.REVIEW_EVENT.value:
+            raise KnowledgeOpsPolicyError(
+                "governed Source promotion evidence is not a ReviewEvent"
+            )
+    for reference in source.unresolved_gap_refs:
+        gap_entry = _replay_typed_entry(
+            ledger,
+            reference,
+            collection=LedgerCollection.GAP,
+            payload_type="knowledge_gap",
+        )
+        gap = KnowledgeGap.model_validate(gap_entry.payload)
+        _verify_gap_digest_context(ledger, gap)
+        assert_no_sensitive_data(
+            gap.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
+        )
+
+
+def _verify_change_set_digest_context(
+    ledger: AppendOnlyLedger,
+    change: ChangeSet,
+) -> None:
+    candidate_entry = _replay_typed_entry(
+        ledger,
+        change.candidate_ref,
+        collection=LedgerCollection.CANDIDATE,
+        payload_type="source_candidate",
+    )
+    candidate = SourceCandidate.model_validate(candidate_entry.payload)
+    if candidate.candidate_id != change.candidate_ref.record_id:
+        raise KnowledgeOpsPolicyError("ChangeSet candidate identity differs")
+    assert_no_sensitive_data(candidate.model_dump(mode="json"))
+    snapshot_refs = (
+        (change.previous_snapshot_ref,)
+        if change.previous_snapshot_ref is not None
+        else ()
+    ) + (change.current_snapshot_ref,)
+    for reference in snapshot_refs:
+        snapshot_entry = _replay_typed_entry(
+            ledger,
+            reference,
+            collection=LedgerCollection.SNAPSHOT,
+            payload_type="source_snapshot",
+        )
+        snapshot = SourceSnapshot.model_validate(snapshot_entry.payload)
+        if (
+            snapshot.snapshot_id != reference.record_id
+            or snapshot.candidate_ref != change.candidate_ref
+        ):
+            raise KnowledgeOpsPolicyError("ChangeSet snapshot lineage differs")
+        assert_no_sensitive_data(
+            snapshot.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+        )
+
+
+def _verify_machine_draft_digest_context(
+    ledger: AppendOnlyLedger,
+    claim,
+) -> None:
+    from continucare.knowledge.ops.evidence import EvidenceCandidate
+
+    evidence_entry = _replay_typed_entry(
+        ledger,
+        claim.evidence_candidate_ref,
+        collection=LedgerCollection.EVIDENCE_CANDIDATE,
+        payload_type="evidence_candidate_v2",
+    )
+    source_entry = _replay_typed_entry(
+        ledger,
+        claim.source_candidate_ref,
+        collection=LedgerCollection.CANDIDATE,
+        payload_type="source_candidate",
+    )
+    snapshot_entry = _replay_typed_entry(
+        ledger,
+        claim.source_snapshot_ref,
+        collection=LedgerCollection.SNAPSHOT,
+        payload_type="source_snapshot",
+    )
+    evidence = EvidenceCandidate.model_validate(evidence_entry.payload)
+    source = SourceCandidate.model_validate(source_entry.payload)
+    snapshot = SourceSnapshot.model_validate(snapshot_entry.payload)
+    if (
+        evidence.candidate_id != claim.evidence_candidate_ref.record_id
+        or source.candidate_id != claim.source_candidate_ref.record_id
+        or snapshot.snapshot_id != claim.source_snapshot_ref.record_id
+        or evidence.source_candidate_ref != claim.source_candidate_ref
+        or evidence.source_snapshot_ref != claim.source_snapshot_ref
+        or snapshot.candidate_ref != claim.source_candidate_ref
+        or evidence.whole_record_sha256 != snapshot.content_sha256
+    ):
+        raise KnowledgeOpsPolicyError("machine draft Claim digest lineage differs")
+    assert_no_sensitive_data(source.model_dump(mode="json"))
+    assert_no_sensitive_data(
+        snapshot.model_dump(mode="json"),
+        digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+    )
+    assert_no_sensitive_data(
+        evidence.model_dump(mode="json"),
+        digest_trust_profile=DigestTrustProfile.EVIDENCE_CANDIDATE,
+    )
+
+
+def _verify_release_candidate_digest_context(
+    bundle: KnowledgeOpsBundle,
+    ledger: AppendOnlyLedger,
+    candidate,
+) -> None:
+    from continucare.knowledge.ops.release import (
+        _ARTIFACT_COLLECTIONS,
+        _assert_release_artifact_no_sensitive_data,
+    )
+
+    if (
+        candidate.governance_bundle_id != bundle.index.bundle_id
+        or candidate.governance_bundle_version != bundle.index.bundle_version
+        or candidate.governance_index_sha256 != bundle.index_sha256()
+        or candidate.governance_manifests != bundle.manifest_evidence()
+    ):
+        raise KnowledgeOpsPolicyError(
+            "release candidate does not pin the loaded governance bundle"
+        )
+    for artifact in candidate.artifacts:
+        artifact_entry = ledger.get(artifact.object_ref)
+        expected_collection = _ARTIFACT_COLLECTIONS[artifact.artifact_kind]
+        if artifact_entry.collection != expected_collection.value:
+            raise KnowledgeOpsPolicyError(
+                "release artifact kind differs from its exact collection"
+            )
+        _assert_release_artifact_no_sensitive_data(
+            ledger, artifact, artifact_entry
+        )
+    for reference in candidate.blocking_gap_refs:
+        gap_entry = _replay_typed_entry(
+            ledger,
+            reference,
+            collection=LedgerCollection.GAP,
+            payload_type="knowledge_gap",
+        )
+        gap = KnowledgeGap.model_validate(gap_entry.payload)
+        _verify_gap_digest_context(ledger, gap)
+        assert_no_sensitive_data(
+            gap.model_dump(mode="json"),
+            digest_trust_profile=DigestTrustProfile.ACQUISITION_KNOWLEDGE_GAP,
+        )
 
 
 def _subject_author_provenance(
