@@ -553,7 +553,9 @@ def _append_signed_formal_event_direct(
     ).ref
 
 
-def _source_review_packet(bundle, profile, ledger, acquisition):
+def _source_review_packet(
+    bundle, profile, ledger, acquisition, *, generated_at=None
+):
     return ReviewPacketBuilder(bundle=bundle, ledger=ledger).build(
         subject_kind=ReviewSubjectKind.SOURCE_CANDIDATE,
         subject_ref=acquisition.candidate_refs[0],
@@ -565,13 +567,22 @@ def _source_review_packet(bundle, profile, ledger, acquisition):
         ),
         evidence_refs=(acquisition.snapshot_refs[0],),
         open_gap_refs=acquisition.gap_refs,
+        generated_at=generated_at,
     )
 
 
 def _approve_source_synthetically(
     bundle, profile, ledger, acquisition, directory=None
 ):
-    packet_ref = _source_review_packet(bundle, profile, ledger, acquisition)
+    fixture_clock = datetime.now(timezone.utc) - timedelta(seconds=2)
+    packet_ref = _source_review_packet(
+        bundle,
+        profile,
+        ledger,
+        acquisition,
+        generated_at=fixture_clock,
+    )
+    decision_time = fixture_clock + timedelta(seconds=1)
     directory = directory or _reviewers("knowledge_curator", "rights_officer")
     service = ReviewEventService(
         bundle=bundle, ledger=ledger, reviewers=directory
@@ -584,6 +595,7 @@ def _approve_source_synthetically(
         decision="approved",
         rationale="Synthetic metadata mechanism check passed.",
         decision_payload=_payload(),
+        decided_at=decision_time,
     )
     rights_ref = service.record(
         packet_ref=packet_ref,
@@ -593,6 +605,7 @@ def _approve_source_synthetically(
         decision="approved",
         rationale="Synthetic rights mechanism check passed only for fixture flow.",
         decision_payload=_payload(operation="register_link_metadata"),
+        decided_at=decision_time,
     )
     decisions = ReviewLedgerDecisionProvider(
         bundle=bundle, ledger=ledger, reviewers=directory
