@@ -407,7 +407,12 @@ digest, manifest, fixture, golden file, runtime authority, or clinical content:
 Final diff self-review also found and fixed one narrow readiness error-class
 edge: a Gap collection head with the wrong `payload_type` is now recorded as an
 `invalid_gap_reference` blocker rather than allowing `ValueError` to escape.
-This was committed as a separate fix, not folded into earlier history.
+The final trust audit then required every nested LedgerRef in strict
+SourceSnapshot, ChangeSet, EvidenceCandidate, MachineDraftClaim,
+GovernedSourceV2, KnowledgeGap, and release subject/artifact context to replay
+successfully before a profile is selected. A phone-bearing but unreplayable ref
+now fails on ledger integrity with no write. Both findings were committed as
+separate fixes, not folded into earlier history.
 
 ## Running validation
 
@@ -449,12 +454,12 @@ Final offline validation used a temporary `PYTHONPYCACHEPREFIX` and temporary
 - `pytest -q tests/knowledge_ops/test_privacy_guard_technical_ids.py`:
   `49 passed`;
 - `pytest -q tests/knowledge_ops/test_evidence_candidate_promotion.py`:
-  `16 passed`;
-- `pytest -q tests/knowledge_ops`: `165 passed`;
+  `17 passed`;
+- `pytest -q tests/knowledge_ops`: `166 passed`;
 - `pytest -q tests/test_knowledge_ops_acquisition.py`: `67 passed`;
 - `pytest -q tests/test_knowledge_ops_review_release.py`: `49 passed` after
   the final readiness edge test;
-- final `pytest -q`: `774 passed, 3 skipped`; the prior repair state was
+- final `pytest -q`: `775 passed, 3 skipped`; the prior repair state was
   `739 passed, 3 skipped, 1 failed`, and all three unchanged skips only request
   the official `FHIR_R4_SCHEMA_ZIP`;
 - `python -m compileall -q continucare app.py pages`: exit 0;
