@@ -32,7 +32,13 @@ from continucare.services.competition_demo import (
 )
 from continucare.services.confirmed_review import ConfirmedReviewService
 from continucare.services.manual_review_workflow import ManualReviewWorkflowService
-from continucare.ui import COMPETITION_STEP_LABELS, render_competition_progress
+from continucare.ui import (
+    COMPETITION_STEP_LABELS,
+    DEMO_GUIDE_STEPS,
+    project_demo_guide,
+    render_competition_progress,
+    render_demo_guide,
+)
 
 
 def _after(resource, seconds: int = 1) -> str:
@@ -722,8 +728,9 @@ class _ProgressRenderer(_RenderContext):
     def progress(self, value, **kwargs):
         self.messages.append(str(kwargs.get("text", value)))
 
-    def columns(self, count):
-        return [_RenderContext() for _ in range(count)]
+    def columns(self, count, **kwargs):
+        column_count = count if isinstance(count, int) else len(count)
+        return [_RenderContext() for _ in range(column_count)]
 
     def container(self, **kwargs):
         return _RenderContext()
@@ -791,6 +798,152 @@ def test_shared_progress_renderer_and_home_use_terminal_contract(monkeypatch):
     app_source = (__import__("pathlib").Path(__file__).parents[1] / "app.py").read_text(
         "utf-8"
     )
-    assert "if progress.is_terminal:" in app_source
-    assert "st.write(progress.terminal_reason)" in app_source
-    assert 'st.page_link("pages/4_audit_log.py", label="查看终态证据链 →"' in app_source
+    assert "render_competition_progress" not in app_source
+    assert "render_demo_guide(" in app_source
+    assert "当前故事的安全计数" not in app_source
+    assert ".metric(" not in app_source
+
+
+@pytest.mark.parametrize(
+    ("stage", "current_step", "current_role", "tone"),
+    [
+        (CompetitionDemoStage.NOT_STARTED, 1, "演示者", "neutral"),
+        (CompetitionDemoStage.CANDIDATE_READY, 2, "患者", "active"),
+        (CompetitionDemoStage.CANDIDATE_UNSURE, 2, "患者", "caution"),
+        (CompetitionDemoStage.PATIENT_CONFIRMED, 3, "护士", "active"),
+        (CompetitionDemoStage.TASK_REQUESTED, 3, "护士", "active"),
+        (CompetitionDemoStage.NURSE_RECEIVED, 3, "护士", "active"),
+        (CompetitionDemoStage.NURSE_IN_PROGRESS, 3, "护士", "active"),
+        (CompetitionDemoStage.COMMUNICATION_PENDING, 4, "医生", "active"),
+        (CompetitionDemoStage.DOCTOR_BRIEF_PENDING, 4, "护士", "caution"),
+        (CompetitionDemoStage.COMMUNICATION_READY, 4, "医生", "active"),
+        (CompetitionDemoStage.DOCTOR_BRIEF_READY, 5, "审核者", "active"),
+        (CompetitionDemoStage.CANDIDATE_REJECTED, 5, "审核者", "stopped"),
+        (CompetitionDemoStage.TASK_REJECTED, 5, "审核者", "stopped"),
+        (CompetitionDemoStage.TASK_CANCELLED, 5, "审核者", "stopped"),
+        (CompetitionDemoStage.TASK_FAILED, 5, "审核者", "error"),
+        (CompetitionDemoStage.TASK_ENTERED_IN_ERROR, 5, "审核者", "error"),
+        (CompetitionDemoStage.STORY_COMPLETE, 5, "审核者", "complete"),
+    ],
+)
+def test_home_guide_projects_every_supported_story_state(
+    stage, current_step, current_role, tone
+):
+    projection = project_demo_guide(
+        CompetitionDemoProgress(stage=stage, generation="session:run")
+    )
+
+    assert projection.current_step == current_step
+    assert projection.current_role == current_role
+    assert projection.tone == tone
+    assert len(projection.step_states) == len(DEMO_GUIDE_STEPS) == 5
+    assert projection.step_states.count("current") == 1
+    assert projection.status_title
+    assert projection.previous_event
+    assert projection.next_destination
+
+
+def test_integrity_issue_projects_fail_closed_without_a_business_action():
+    projection = project_demo_guide(
+        CompetitionDemoProgress(integrity_issue="raw internal detail")
+    )
+
+    assert projection.current_step == 5
+    assert projection.tone == "error"
+    assert projection.next_page is None
+    assert projection.next_label is None
+    assert "没有继续" in projection.status_detail
+    assert "raw internal detail" not in projection.status_detail
+
+
+def test_home_guide_is_human_language_accessible_and_knowledge_independent():
+    assert DEMO_GUIDE_STEPS == (
+        "患者表达",
+        "患者确认",
+        "护士核对",
+        "医生速览",
+        "记录追溯",
+    )
+    assert all("Knowledge" not in label for label in DEMO_GUIDE_STEPS)
+
+    for stage in CompetitionDemoStage:
+        renderer = _ProgressRenderer(url="http://localhost:8501/")
+        progress = CompetitionDemoProgress(stage=stage, generation="session:run")
+
+        projection = render_demo_guide(renderer, progress)
+        rendered = "\n".join(renderer.messages)
+
+        assert 'aria-current="step"' in rendered
+        assert stage.value not in rendered
+        assert "ready-to-send" not in rendered
+        assert "candidate" not in rendered
+        assert "Layer 3" not in rendered
+        assert "M5-D" not in rendered
+        if projection.next_page:
+            assert renderer.links == [(projection.next_page, projection.next_label)]
+
+
+def test_negative_terminals_only_offer_record_trace_and_complete_is_not_clinical_success():
+    for stage in (
+        CompetitionDemoStage.CANDIDATE_REJECTED,
+        CompetitionDemoStage.TASK_REJECTED,
+        CompetitionDemoStage.TASK_CANCELLED,
+        CompetitionDemoStage.TASK_FAILED,
+        CompetitionDemoStage.TASK_ENTERED_IN_ERROR,
+    ):
+        projection = project_demo_guide(
+            CompetitionDemoProgress(stage=stage, generation="session:run")
+        )
+        assert projection.next_page == "pages/4_audit_log.py"
+        assert projection.next_label == "查看记录追溯"
+        assert "患者" not in projection.next_label
+        assert "护士" not in projection.next_label
+        assert "医生" not in projection.next_label
+
+    renderer = _ProgressRenderer(url="http://localhost:8501/")
+    render_demo_guide(
+        renderer,
+        CompetitionDemoProgress(
+            stage=CompetitionDemoStage.STORY_COMPLETE,
+            generation="session:run",
+            is_terminal=True,
+        ),
+    )
+    rendered = "\n".join(renderer.messages)
+    assert "演示记录链已走完" in rendered
+    assert "临床成功" not in rendered
+    assert "诊疗完成" not in rendered
+
+
+def test_home_guide_render_is_pure_and_does_not_write_database(tmp_path):
+    db_path = tmp_path / "guide-read-only.db"
+    start_competition_demo(db_path)
+    before = _database_snapshot(db_path)
+    progress = read_competition_demo(db_path)
+    renderer = _ProgressRenderer(url="http://localhost:8501/")
+
+    first = render_demo_guide(renderer, progress)
+    second = project_demo_guide(progress)
+
+    assert first == second
+    assert _database_snapshot(db_path) == before
+    assert not any(
+        (tmp_path / f"guide-read-only.db{suffix}").exists()
+        for suffix in ("-journal", "-wal", "-shm")
+    )
+
+
+def test_home_source_keeps_reset_and_technical_details_secondary():
+    app_source = (__import__("pathlib").Path(__file__).parents[1] / "app.py").read_text(
+        "utf-8"
+    )
+
+    assert '"开始一轮合成演示"' in app_source
+    assert '"管理本地演示数据"' in app_source
+    assert '"我知道当前这轮合成演示记录会被替换。"' in app_source
+    assert '"替换并开始新一轮"' in app_source
+    assert "正在准备新的合成演示，请勿重复操作……" in app_source
+    assert "新一轮暂时无法开始，原来的演示记录没有被替换。请重试。" in app_source
+    assert '"技术详情：外部适配器与当前配置"' in app_source
+    assert '"再用 20 秒看负向路径"' in app_source
+    assert "按角色查看同一故事" not in app_source
