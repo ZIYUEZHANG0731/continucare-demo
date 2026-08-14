@@ -37,6 +37,7 @@ from continucare.knowledge.ops.manifests import (
 )
 from continucare.knowledge.ops.models import (
     KNOWLEDGE_OPS_CONTRACT_VERSION,
+    AuthorProvenance,
     ClinicalContextScope,
     CoverageValidationProfile,
     GovernanceManifestEvidence,
@@ -114,6 +115,7 @@ from continucare.knowledge.ops.store import (
 
 __all__ = [
     "AppendOnlyLedger",
+    "AuthorProvenance",
     "AcquisitionEnvironment",
     "AcquisitionRequest",
     "AcquisitionResult",

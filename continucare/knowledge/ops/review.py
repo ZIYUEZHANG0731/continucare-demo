@@ -21,6 +21,7 @@ from continucare.knowledge.ops.acquisition import (
 )
 from continucare.knowledge.ops.manifests import KnowledgeOpsBundle
 from continucare.knowledge.ops.models import (
+    AuthorProvenance,
     ClinicalContextScope,
     GovernanceManifestEvidence,
     GovernanceGate,
@@ -383,6 +384,15 @@ _SUBJECT_GATES = {
     ReviewSubjectKind.KNOWLEDGE_RELEASE: GovernanceGate.KNOWLEDGE_RELEASE,
 }
 
+_AUTHOR_REVIEW_SEPARATION_GATES = {
+    GovernanceGate.CLINICAL_CLAIM_APPROVAL,
+    GovernanceGate.BINDING_APPROVAL,
+    GovernanceGate.TERMINOLOGY_MAPPING_PROMOTION,
+    GovernanceGate.TRANSLATION_PROMOTION,
+    GovernanceGate.PATIENT_CONTENT_APPROVAL,
+    GovernanceGate.KNOWLEDGE_RELEASE,
+}
+
 
 class ReviewSubject(StrictModel):
     subject_kind: ReviewSubjectKind
@@ -406,6 +416,7 @@ class ReviewPacket(StrictModel):
     scope: ClinicalContextScope
     evidence_refs: tuple[LedgerRef, ...] = ()
     open_gap_refs: tuple[LedgerRef, ...] = ()
+    author_provenance: AuthorProvenance | None = None
     known_limitations: tuple[NonBlank, ...] = Field(min_length=1)
     safety_boundary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     generated_at: datetime
@@ -421,6 +432,13 @@ class ReviewPacket(StrictModel):
             raise ValueError("generated_at must include a timezone")
         if self.subject_entry_sha256 != self.subject.object_ref.entry_sha256:
             raise ValueError("Review Packet subject digest must match its exact LedgerRef")
+        if self.gate in _AUTHOR_REVIEW_SEPARATION_GATES:
+            if self.author_provenance is None:
+                raise ValueError(
+                    "Review Packet requires structured author provenance for this gate"
+                )
+            if self.author_provenance.authored_at > self.generated_at:
+                raise ValueError("Review Packet predates its pinned author provenance")
         for values, label in (
             (self.requested_roles, "requested role"),
             (self.requested_source_operations, "requested source operation"),
@@ -671,6 +689,11 @@ class ReviewPacketBuilder:
         if self._ledger.head(subject_ref.collection, subject_ref.record_id).ref != subject_ref:
             raise KnowledgeOpsPolicyError("Review Packet cannot target a stale subject")
         assert_no_sensitive_data(subject_entry.payload)
+        author_provenance = _subject_author_provenance(
+            gate=GovernanceGate(gate),
+            subject_payload=subject_entry.payload,
+            subject_synthetic=subject_entry.synthetic,
+        )
         assert_no_sensitive_data(
             {
                 "known_limitations": known_limitations,
@@ -784,6 +807,7 @@ class ReviewPacketBuilder:
             scope=scope,
             evidence_refs=evidence_refs,
             open_gap_refs=effective_open_gap_refs,
+            author_provenance=author_provenance,
             known_limitations=known_limitations,
             safety_boundary_sha256=_boundary_digest(self._bundle),
             generated_at=timestamp,
@@ -862,6 +886,7 @@ class ReviewEventService:
             raise KnowledgeOpsPolicyError(
                 "reviewer identity is inactive, expired, or outside authorized scope"
             )
+        _assert_author_reviewer_separation(packet, identity)
         if role not in packet.requested_roles:
             raise KnowledgeOpsPolicyError("reviewer role is not authorized for this packet")
         axis_value = ReviewAxis(axis)
@@ -1108,6 +1133,7 @@ class ReviewLedgerDecisionProvider:
                 if (
                     identity is None
                     or not _event_identity_snapshot_matches(event, identity)
+                    or _is_author_reviewer_conflict(packet, identity)
                     or not self._reviewers.verify_identity_authorization(
                         identity,
                         role=ReviewerRole(role),
@@ -1213,6 +1239,15 @@ def _resolve_packet_material(
 
     subject_entry = ledger.get(packet.subject.object_ref)
     assert_no_sensitive_data(subject_entry.payload)
+    current_author_provenance = _subject_author_provenance(
+        gate=GovernanceGate(packet.gate),
+        subject_payload=subject_entry.payload,
+        subject_synthetic=subject_entry.synthetic,
+    )
+    if current_author_provenance != packet.author_provenance:
+        raise KnowledgeOpsPolicyError(
+            "Review Packet author provenance differs from its exact subject"
+        )
     subject_head = ledger.head(
         packet.subject.object_ref.collection,
         packet.subject.object_ref.record_id,
@@ -1329,6 +1364,55 @@ def _validate_approved_payload(
         ReviewerRole.PHARMACIST,
     } and payload.confirmed_scope != packet.scope:
         raise KnowledgeOpsPolicyError("specialist approval must confirm exact packet scope")
+
+
+def _subject_author_provenance(
+    *,
+    gate: GovernanceGate,
+    subject_payload: dict[str, object],
+    subject_synthetic: bool,
+) -> AuthorProvenance | None:
+    if GovernanceGate(gate) not in _AUTHOR_REVIEW_SEPARATION_GATES:
+        return None
+    raw_author = subject_payload.get("author_provenance")
+    if raw_author is None:
+        raise KnowledgeOpsPolicyError(
+            "review subject requires structured author provenance"
+        )
+    try:
+        author = AuthorProvenance.model_validate(raw_author)
+    except ValidationError as exc:
+        raise KnowledgeOpsPolicyError(
+            "review subject author provenance is invalid"
+        ) from exc
+    if author.synthetic != subject_synthetic:
+        raise KnowledgeOpsPolicyError(
+            "review subject and author provenance synthetic status differ"
+        )
+    return author
+
+
+def _is_author_reviewer_conflict(
+    packet: ReviewPacket, identity: ReviewerIdentity
+) -> bool:
+    author = packet.author_provenance
+    return (
+        packet.gate in _AUTHOR_REVIEW_SEPARATION_GATES
+        and author is not None
+        and (
+            identity.identity_id == author.author_identity_id
+            or identity.principal_id == author.author_principal_id
+        )
+    )
+
+
+def _assert_author_reviewer_separation(
+    packet: ReviewPacket, identity: ReviewerIdentity
+) -> None:
+    if _is_author_reviewer_conflict(packet, identity):
+        raise KnowledgeOpsPolicyError(
+            "author and reviewer must be different identities and principals"
+        )
 
 
 def _default_operations_for_gate(

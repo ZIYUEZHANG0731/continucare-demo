@@ -32,6 +32,18 @@ regression tests:
 No production reviewer, license decision, clinical approval, Binding approval,
 patient-content approval, or KnowledgeRelease is asserted in this slice.
 
+The implementation status is intentionally narrower than the phase labels:
+
+- P0 governance foundation: **complete**;
+- P1 offline acquisition foundation: **complete**;
+- P1 source-specific connectors, real parsers, and live API validation: **not
+  started**;
+- P2 review, Review Packet, review-event, and release-readiness mechanisms:
+  **complete**;
+- production reviewer identity integration: **incomplete**;
+- formal P2 clinical approval and KnowledgeRelease: **incomplete**;
+- post-P2 clinical/runtime work: **not started**.
+
 ## 2. Incremental architecture
 
 The dependency direction is one-way:
@@ -132,7 +144,10 @@ persist raw exception messages or credentials.
 ## 6. Connector, SSRF, and privacy boundary
 
 The connector interface separates discovery from fetch. The only enabled
-implementation is the offline fixture connector.
+implementation is `OfflineFixtureConnector`. `GuardedHttpConnector` is present
+only as an inert, default-disabled boundary with no built-in network client.
+There are no DailyMed, EMA, MedlinePlus, or PubMed/PMC source-specific
+connectors in this slice.
 
 `GuardedHttpConnector` has no built-in network client. It remains inert unless
 both the connector and Source Policy enable networking and a reviewed transport
@@ -193,16 +208,22 @@ Supported roles are:
 - clinical reviewer;
 - pharmacist.
 
-`ReviewerIdentity` separates three assurance states:
+`ReviewerIdentity` separates three assurance states and pins a stable principal,
+authorized roles, exact jurisdictions/scopes, and an authorization validity
+interval:
 
 - `synthetic_test`;
 - `identity_unverified`;
 - `formally_verified`.
 
-The built-in in-memory directory rejects formally verified identities. A future
-production identity resolver must supply an external verification reference,
-verification evidence SHA-256, verifier, and timestamp. Unverified identities
-cannot approve. Synthetic identities can act only on synthetic packets.
+The built-in in-memory verifier is ephemeral and readiness/test-only; it rejects
+formally verified identities. A production decision provider cannot be
+constructed without an injected trusted reviewer verifier. A future production
+identity integration must resolve the current identity and authorization and
+supply an external verification reference, verification evidence SHA-256,
+verifier, timestamp, and verifiable event attestation. Unverified identities
+cannot approve. Synthetic identities can act only on synthetic packets and can
+never become production-eligible.
 
 A Review Packet pins:
 
@@ -215,6 +236,8 @@ A Review Packet pins:
 - Source Policy when relevant;
 - clinical context scope;
 - evidence refs and open Gap refs;
+- structured author identity/provenance for Claim, Binding, terminology
+  mapping, translation, patient content, and KnowledgeRelease gates;
 - known limitations;
 - the SafetyBoundary digest;
 - generator and timestamp;
@@ -239,7 +262,23 @@ Events form one append-only ledger chain for each exact subject and role. The
 latest head controls the gate. A new packet invalidates approvals tied to an
 older packet. Synthetic event heads may exercise the mechanism but always have
 `counts_toward_release=false`. A multi-role gate also requires distinct reviewer
-identities, preserving basic separation of duties.
+principals, so two accounts belonging to the same person cannot satisfy two
+roles.
+
+Every event pins the complete reviewer authorization snapshot, expected prior
+event digest, and a verifier-issued attestation over the event claim. Gate
+resolution re-resolves each reviewer, compares the current trusted identity to
+the event snapshot, verifies authorization both at decision time and resolution
+time, and validates the attestation. Missing, inactive, expired, mismatched, or
+unverifiable identities fail closed. `counts_toward_release` remains an audit
+record only; production eligibility is recomputed from current trusted identity
+state and verified attestations.
+
+For Claim, Binding, terminology mapping, translation, patient-content, and
+KnowledgeRelease gates, the service rejects an author who reviews the same
+object. Resolution repeats the identity/principal separation check, so a signed
+event appended directly to the ledger cannot bypass it. This is a mechanism,
+not evidence that any real author or reviewer has been verified.
 
 Event recording and gate resolution independently revalidate the packet's
 current subject, required roles and Source operations, policy/profile scope,
@@ -322,8 +361,12 @@ The following remains outside P0–P2 readiness:
 
 - formal reviewer identity-provider integration;
 - actual license applications, purchases, or legal decisions;
-- real Source discovery, API access, crawling, or bulk download;
+- source-specific DailyMed, EMA, MedlinePlus, and PubMed/PMC connectors;
+- real Source discovery, source parsers, live API validation, crawling, or bulk
+  download;
 - real medical content import or translation;
+- an `EvidenceCandidate` model or `EvidenceCandidate`-to-draft-Claim flow;
+- eight new symptom-benchmark candidates or a core symptom catalog v2;
 - production Claim or Binding authoring and approval;
 - patient-facing content publication;
 - runtime clinical rules, activation, or safety case;

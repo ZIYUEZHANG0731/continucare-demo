@@ -12,6 +12,7 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 from continucare.knowledge.ops.acquisition import KnowledgeGap, SourceCandidate
 from continucare.knowledge.ops.manifests import KnowledgeOpsBundle
 from continucare.knowledge.ops.models import (
+    AuthorProvenance,
     ClinicalContextScope,
     GovernanceManifestEvidence,
     GovernanceGate,
@@ -88,7 +89,8 @@ class KnowledgeReleaseCandidate(StrictModel):
     artifacts: tuple[ReleaseArtifact, ...] = ()
     blocking_gap_refs: tuple[LedgerRef, ...] = ()
     created_at: datetime
-    created_by: NonBlank
+    created_by: SafeId
+    author_provenance: AuthorProvenance
     synthetic: bool
     contains_patient_data: Literal[False] = False
     runtime_activation_requested: Literal[False] = False
@@ -100,6 +102,14 @@ class KnowledgeReleaseCandidate(StrictModel):
     def validate_candidate(self) -> "KnowledgeReleaseCandidate":
         if self.created_at.tzinfo is None:
             raise ValueError("created_at must include a timezone")
+        if self.created_by != self.author_provenance.author_identity_id:
+            raise ValueError("created_by must equal structured author identity")
+        if self.created_at != self.author_provenance.authored_at:
+            raise ValueError("created_at must equal structured authorship time")
+        if self.synthetic != self.author_provenance.synthetic:
+            raise ValueError(
+                "release candidate and author provenance synthetic status differ"
+            )
         if len(self.intended_uses) != len(set(self.intended_uses)):
             raise ValueError("release intended_uses must be unique")
         if any(
@@ -189,6 +199,7 @@ class KnowledgeRelease(StrictModel):
     governance_index_sha256: Sha256
     governance_manifests: tuple[GovernanceManifestEvidence, ...] = Field(min_length=1)
     artifacts: tuple[ReleaseArtifact, ...] = Field(min_length=1)
+    candidate_author_provenance: AuthorProvenance
     finalized_at: datetime
     finalized_by: NonBlank
     release_status: Literal["released_informational"] = "released_informational"
@@ -692,6 +703,7 @@ class ReleaseReadinessService:
             governance_index_sha256=candidate.governance_index_sha256,
             governance_manifests=candidate.governance_manifests,
             artifacts=candidate.artifacts,
+            candidate_author_provenance=candidate.author_provenance,
             finalized_at=timestamp,
             finalized_by=finalized_by,
         )

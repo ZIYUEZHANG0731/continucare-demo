@@ -59,6 +59,24 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, use_enum_values=True)
 
 
+class AuthorProvenance(StrictModel):
+    """Structured authorship pin; it is not itself a clinical approval."""
+
+    author_identity_id: SafeId
+    author_principal_id: SafeId
+    authored_at: datetime
+    provenance_reference: NonBlank
+    provenance_evidence_sha256: Sha256 | None = None
+    synthetic: bool
+
+    @field_validator("authored_at")
+    @classmethod
+    def authored_at_has_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("authored_at must include a timezone")
+        return value
+
+
 def safe_relative_parts(value: str) -> tuple[str, ...]:
     """Return canonical POSIX path parts or reject traversal and ambiguity."""
 
