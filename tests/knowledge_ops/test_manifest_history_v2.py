@@ -30,11 +30,13 @@ OLD_CURRENT_REFS = (
 )
 HISTORICAL_FILES = {
     "bundle_index_v2.json": ("03702a13464d0032677e88d433793ed4720820547cea59567201157b4fff4ddb", 2008),
+    "bundle_index_v2_2.json": ("05993fa2418a4a52e06d3e83370ca042f9e8089862f0a52a08fcd2092fd38909", 2054),
     "coverage_profiles_v2.json": ("ef939e3330b37cf8791b80a3942846fe7a2bda8c35670ca38122a99df787c298", 8217),
     "release_intent_v2.json": ("edc2fcd5d191d1fd6ccf2bd44b626fc4a82ff2f81dff783e5d39e38f8a517c6f", 908),
     "review_policy_v2.json": ("e6013664d1b126b60dec78522d988e296755ebe096c108f49d5862455a30709f", 3261),
     "safety_boundary_v2.json": ("64fb14f5562389cbd1a78bde579b702810b40b654a864c147c6b0ea98b69ad43", 846),
     "source_policies_v2.json": ("273dbdc2d50023b6687edbb56a8ceef818daa907837bd9b066cd748300a487bf", 23732),
+    "source_policies_v2_2.json": ("6914b875081741ca039ef18cea89e1338d19dda7f78a6c51a0d64e56c5e8bccd", 19327),
 }
 
 
@@ -45,6 +47,7 @@ def test_every_bundle_index_replays_hash_size_ref_current_head_and_contiguity() 
     assert [item.name for item in indexes] == [
         "bundle_index_v2.json",
         "bundle_index_v2_2.json",
+        "bundle_index_v2_3.json",
     ]
     for path in indexes:
         index = KnowledgeOpsBundleIndex.model_validate_json(path.read_bytes())
@@ -78,10 +81,11 @@ def test_original_v2_files_and_old_index_current_refs_are_byte_stable() -> None:
     assert len(old.source_policies) == 8
 
 
-def test_builtin_v2_2_materializes_incremental_source_policy_history() -> None:
+def test_builtin_v2_3_materializes_incremental_policy_and_gap_history() -> None:
     bundle = load_builtin_ops_bundle()
-    assert bundle.index.bundle_version == 2
+    assert bundle.index.bundle_version == 3
     assert len(bundle.source_policies) == 13
+    assert len(bundle.readiness_gaps) == 12
     assert bundle.source_policy("nlm-pubmed-metadata", 1).policy_version == 1
     assert bundle.source_policy("nlm-pubmed-metadata", 2).policy_version == 2
     assert bundle.source_policy("nmpa-cn-regulatory-metadata").policy_version == 1

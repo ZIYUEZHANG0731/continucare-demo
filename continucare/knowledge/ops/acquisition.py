@@ -30,6 +30,7 @@ from continucare.knowledge.ops.models import (
     SafeId,
     Sha256,
     SourceOperation,
+    SourcePolicyRef,
     StrictModel,
     safe_relative_parts,
 )
@@ -62,11 +63,6 @@ class NormalizedTopicCode(StrictModel):
     version: NonBlank
     code: NonBlank
     display: NonBlank | None = None
-
-
-class SourcePolicyRef(StrictModel):
-    policy_id: SafeId
-    policy_version: int = Field(ge=1)
 
 
 class AcquisitionRequest(StrictModel):

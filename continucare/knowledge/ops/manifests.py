@@ -22,13 +22,20 @@ from continucare.knowledge.ops.models import (
     KnowledgeOpsBundleIndex,
     KnowledgeReleaseIntent,
     KnowledgeOpsManifestError,
+    LicensePosture,
     PayloadEnvelope,
+    PolicyDecision,
+    ReadinessBlock,
+    ReadinessGap,
+    ReadinessGapKind,
+    ReadinessGapRegistryManifest,
     ReviewGatePolicy,
     ReviewPolicyManifest,
     ReleaseIntentManifest,
     SafetyBoundary,
     SafetyBoundaryManifest,
     SourcePolicy,
+    SourcePolicyGapSubject,
     SourcePolicyManifest,
     ValidationDomain,
     safe_relative_parts,
@@ -36,8 +43,17 @@ from continucare.knowledge.ops.models import (
 
 
 LEGACY_INDEX_PATH = "bundle_index_v2.json"
-BUILTIN_INDEX_PATH = "bundle_index_v2_2.json"
+BUILTIN_INDEX_PATH = "bundle_index_v2_3.json"
 _PAYLOAD_ADAPTER = TypeAdapter(PayloadEnvelope)
+_P1_READINESS_SOURCE_POLICY_REFS = frozenset(
+    {
+        ("source-dailymed", 1),
+        ("source-ema-website-data", 1),
+        ("source-medlineplus", 1),
+        ("nlm-pubmed-metadata", 2),
+        ("source-pmc-open-access", 1),
+    }
+)
 
 
 class BundleSource(Protocol):
@@ -93,6 +109,7 @@ class KnowledgeOpsBundle:
     review_gates: tuple[ReviewGatePolicy, ...]
     release_intent: KnowledgeReleaseIntent
     manifest_digests: Mapping[tuple[str, int], str]
+    readiness_gaps: tuple[ReadinessGap, ...] = ()
 
     def source_policy(self, policy_id: str, policy_version: int = 1) -> SourcePolicy:
         for policy in self.source_policies:
@@ -197,6 +214,11 @@ def load_ops_bundle(
     release_files = [
         item for item in current_envelopes if isinstance(item, ReleaseIntentManifest)
     ]
+    readiness_files = [
+        item
+        for item in current_envelopes
+        if isinstance(item, ReadinessGapRegistryManifest)
+    ]
     if not all(
         len(items) == 1
         for items in (
@@ -210,6 +232,15 @@ def load_ops_bundle(
         raise KnowledgeOpsManifestError(
             "current v2 bundle requires exactly one boundary, source policy, "
             "coverage profile, review policy, and release intent file"
+        )
+    if index.bundle_version >= 3:
+        if len(readiness_files) != 1:
+            raise KnowledgeOpsManifestError(
+                "Knowledge Ops bundle v3+ requires exactly one readiness Gap registry"
+            )
+    elif readiness_files:
+        raise KnowledgeOpsManifestError(
+            "legacy Knowledge Ops bundles cannot claim a readiness Gap registry"
         )
 
     source_policies = _materialize_source_policies(
@@ -242,6 +273,8 @@ def load_ops_bundle(
         )
     if not source_policies:
         raise KnowledgeOpsManifestError("source policy registry cannot be empty")
+    readiness_gaps = () if not readiness_files else readiness_files[0].gaps
+    _validate_readiness_gaps(readiness_gaps, source_policies)
 
     return KnowledgeOpsBundle(
         index=index,
@@ -251,6 +284,7 @@ def load_ops_bundle(
         review_gates=review_gates,
         release_intent=release_files[0].intent,
         manifest_digests=MappingProxyType(digests),
+        readiness_gaps=readiness_gaps,
     )
 
 
@@ -321,3 +355,97 @@ def _validate_source_policy_versions(policies: tuple[SourcePolicy, ...]) -> None
             raise KnowledgeOpsManifestError(
                 f"SourcePolicy {policy_id} versions must be contiguous"
             )
+
+
+def _validate_readiness_gaps(
+    gaps: tuple[ReadinessGap, ...],
+    policies: tuple[SourcePolicy, ...],
+) -> None:
+    if not gaps:
+        return
+    by_policy = {
+        (item.policy_id, item.policy_version): item for item in policies
+    }
+    live_refs: set[tuple[str, int]] = set()
+    rights_refs: set[tuple[str, int]] = set()
+    for gap in gaps:
+        if not isinstance(gap.subject, SourcePolicyGapSubject):
+            continue
+        reference = gap.subject.source_policy.key()
+        try:
+            policy = by_policy[reference]
+        except KeyError as exc:
+            raise KnowledgeOpsManifestError(
+                f"readiness Gap {gap.gap_id} references an unknown SourcePolicy"
+            ) from exc
+        if policy.status != "active":
+            raise KnowledgeOpsManifestError(
+                f"readiness Gap {gap.gap_id} references a retired SourcePolicy"
+            )
+        if gap.gap_kind == ReadinessGapKind.LIVE_VALIDATION_NOT_ATTEMPTED.value:
+            live_refs.add(reference)
+            if policy.live_network_enabled is not False:
+                raise KnowledgeOpsManifestError(
+                    "live-validation Gap conflicts with SourcePolicy live posture"
+                )
+        elif gap.gap_kind == ReadinessGapKind.RIGHTS_UNRESOLVED.value:
+            rights_refs.add(reference)
+            if policy.license_posture == LicensePosture.VERIFIED_OPEN.value:
+                raise KnowledgeOpsManifestError(
+                    "rights-unresolved Gap conflicts with verified-open SourcePolicy"
+                )
+            metadata_only_operations = {
+                "register_link_metadata",
+                "discover_metadata",
+            }
+            if any(
+                rule.decision == PolicyDecision.ALLOW.value
+                and rule.operation not in metadata_only_operations
+                for rule in policy.operation_rules
+            ):
+                raise KnowledgeOpsManifestError(
+                    "rights-unresolved SourcePolicy allows reuse beyond metadata/link-only"
+                )
+            if ReadinessBlock.REUSE_BEYOND_METADATA_LINK_ONLY.value not in gap.blocks:
+                raise KnowledgeOpsManifestError(
+                    "rights-unresolved Gap must enforce metadata/link-only reuse"
+                )
+    if live_refs != _P1_READINESS_SOURCE_POLICY_REFS:
+        raise KnowledgeOpsManifestError(
+            "readiness registry must cover the frozen five live-validation policies"
+        )
+    if rights_refs != _P1_READINESS_SOURCE_POLICY_REFS:
+        raise KnowledgeOpsManifestError(
+            "readiness registry must cover the frozen five rights policies"
+        )
+
+    catalog_gap = next(
+        (
+            item
+            for item in gaps
+            if item.gap_kind
+            == ReadinessGapKind.TERMINOLOGY_ALIAS_REVIEW_PENDING.value
+        ),
+        None,
+    )
+    if catalog_gap is None:
+        raise KnowledgeOpsManifestError("readiness registry omits the catalog Gap")
+    from continucare.terminology.core_catalog import load_core_symptom_catalog_v2
+
+    catalog = load_core_symptom_catalog_v2()
+    expected_refs = tuple(
+        item.existing_concept_ref
+        for item in catalog.records
+        if item.concept_status == "reused_concept"
+        and item.existing_concept_ref is not None
+    )
+    subject = catalog_gap.subject
+    if (
+        subject.subject_kind != "core_symptom_catalog"
+        or subject.catalog_id != catalog.catalog_id
+        or subject.catalog_version != catalog.catalog_version
+        or subject.concept_refs != expected_refs
+    ):
+        raise KnowledgeOpsManifestError(
+            "catalog readiness Gap differs from the current reused concept refs"
+        )

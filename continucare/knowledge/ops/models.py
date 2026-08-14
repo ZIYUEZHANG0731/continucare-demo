@@ -412,6 +412,14 @@ class SourcePolicy(StrictModel):
         return PolicyDecision.DENY.value
 
 
+class SourcePolicyRef(StrictModel):
+    policy_id: SafeId
+    policy_version: int = Field(ge=1)
+
+    def key(self) -> tuple[str, int]:
+        return self.policy_id, self.policy_version
+
+
 class ReviewerRole(StrEnum):
     KNOWLEDGE_CURATOR = "knowledge_curator"
     RIGHTS_OFFICER = "rights_officer"
@@ -585,12 +593,137 @@ class ReleaseIntentManifest(EnvelopeBase):
     intent: KnowledgeReleaseIntent
 
 
+class ReadinessGapKind(StrEnum):
+    LIVE_VALIDATION_NOT_ATTEMPTED = "live_validation_not_attempted"
+    RIGHTS_UNRESOLVED = "rights_unresolved"
+    COLD_IMPORT_SOCKET_PROOF_PENDING = "cold_import_socket_proof_pending"
+    TERMINOLOGY_ALIAS_REVIEW_PENDING = "terminology_alias_review_pending"
+
+
+class ReadinessBlock(StrEnum):
+    PERSISTENT_GOVERNANCE_VALIDATION = "persistent_governance_validation"
+    REUSE_BEYOND_METADATA_LINK_ONLY = "reuse_beyond_metadata_link_only"
+    PRODUCTION_ELIGIBILITY = "production_eligibility"
+    KNOWLEDGE_RELEASE = "knowledge_release"
+    P1B_LIVE_VALIDATION = "p1b_live_validation"
+    CONSUMER_INTEGRATION = "consumer_integration"
+
+
+class SourcePolicyGapSubject(StrictModel):
+    subject_kind: Literal["source_policy"] = "source_policy"
+    source_policy: SourcePolicyRef
+
+
+class GovernanceGateGapSubject(StrictModel):
+    subject_kind: Literal["governance_gate"] = "governance_gate"
+    gate: Literal["cold_import_socket_proof"] = "cold_import_socket_proof"
+
+
+class CoreSymptomCatalogGapSubject(StrictModel):
+    subject_kind: Literal["core_symptom_catalog"] = "core_symptom_catalog"
+    catalog_id: Literal["continucare-core-symptom-catalog"] = (
+        "continucare-core-symptom-catalog"
+    )
+    catalog_version: Literal["2.0.0"] = "2.0.0"
+    concept_refs: tuple[SafeId, ...] = Field(min_length=1)
+
+    @field_validator("concept_refs")
+    @classmethod
+    def unique_concept_refs(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("readiness catalog concept refs must be unique")
+        return value
+
+
+ReadinessGapSubject = Annotated[
+    SourcePolicyGapSubject
+    | GovernanceGateGapSubject
+    | CoreSymptomCatalogGapSubject,
+    Field(discriminator="subject_kind"),
+]
+
+
+class ReadinessGap(StrictModel):
+    gap_id: SafeId
+    gap_kind: ReadinessGapKind
+    subject: ReadinessGapSubject
+    lifecycle: Literal["open"] = "open"
+    blocks: tuple[ReadinessBlock, ...] = Field(min_length=1)
+    reason: NonBlank
+    created_at: datetime
+    created_by_principal_id: SafeId
+    contains_patient_data: Literal[False] = False
+    knowledge_effect: Literal["informational_only"] = "informational_only"
+    runtime_authority: Literal["none"] = "none"
+
+    @model_validator(mode="after")
+    def validate_open_gap(self) -> "ReadinessGap":
+        if self.created_at.tzinfo is None:
+            raise ValueError("readiness Gap creation time must include a timezone")
+        if len(self.blocks) != len(set(self.blocks)):
+            raise ValueError("readiness Gap blockers must be unique")
+        kind = ReadinessGapKind(self.gap_kind)
+        if kind in {
+            ReadinessGapKind.LIVE_VALIDATION_NOT_ATTEMPTED,
+            ReadinessGapKind.RIGHTS_UNRESOLVED,
+        }:
+            if not isinstance(self.subject, SourcePolicyGapSubject):
+                raise ValueError("source readiness Gap requires SourcePolicyRef subject")
+        elif kind == ReadinessGapKind.COLD_IMPORT_SOCKET_PROOF_PENDING:
+            if not isinstance(self.subject, GovernanceGateGapSubject):
+                raise ValueError("cold-import Gap requires its governance gate subject")
+        elif not isinstance(self.subject, CoreSymptomCatalogGapSubject):
+            raise ValueError("terminology readiness Gap requires catalog subject")
+        if kind == ReadinessGapKind.TERMINOLOGY_ALIAS_REVIEW_PENDING and set(
+            self.blocks
+        ) != {ReadinessBlock.CONSUMER_INTEGRATION.value}:
+            raise ValueError("catalog Gap may only block v2 consumer integration")
+        return self
+
+
+class ReadinessGapRegistryManifest(EnvelopeBase):
+    file_kind: Literal["readiness_gap_registry"] = "readiness_gap_registry"
+    gaps: tuple[ReadinessGap, ...] = Field(min_length=12, max_length=12)
+
+    @model_validator(mode="after")
+    def validate_frozen_open_set(self) -> "ReadinessGapRegistryManifest":
+        if len({item.gap_id for item in self.gaps}) != len(self.gaps):
+            raise ValueError("readiness Gap IDs must be unique")
+        counts = {
+            kind.value: sum(item.gap_kind == kind.value for item in self.gaps)
+            for kind in ReadinessGapKind
+        }
+        if counts != {
+            ReadinessGapKind.LIVE_VALIDATION_NOT_ATTEMPTED.value: 5,
+            ReadinessGapKind.RIGHTS_UNRESOLVED.value: 5,
+            ReadinessGapKind.COLD_IMPORT_SOCKET_PROOF_PENDING.value: 1,
+            ReadinessGapKind.TERMINOLOGY_ALIAS_REVIEW_PENDING.value: 1,
+        }:
+            raise ValueError("readiness Gap registry v1 requires the frozen 5+5+1+1 set")
+        live_refs = {
+            item.subject.source_policy.key()
+            for item in self.gaps
+            if item.gap_kind == ReadinessGapKind.LIVE_VALIDATION_NOT_ATTEMPTED.value
+            and isinstance(item.subject, SourcePolicyGapSubject)
+        }
+        rights_refs = {
+            item.subject.source_policy.key()
+            for item in self.gaps
+            if item.gap_kind == ReadinessGapKind.RIGHTS_UNRESOLVED.value
+            and isinstance(item.subject, SourcePolicyGapSubject)
+        }
+        if len(live_refs) != 5 or live_refs != rights_refs:
+            raise ValueError("live and rights readiness Gaps must cover the same five policies")
+        return self
+
+
 PayloadEnvelope = Annotated[
     SafetyBoundaryManifest
     | SourcePolicyManifest
     | CoverageProfileManifest
     | ReviewPolicyManifest
-    | ReleaseIntentManifest,
+    | ReleaseIntentManifest
+    | ReadinessGapRegistryManifest,
     Field(discriminator="file_kind"),
 ]
 

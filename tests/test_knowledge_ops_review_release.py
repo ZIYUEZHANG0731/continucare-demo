@@ -1670,6 +1670,7 @@ def test_release_readiness_blocks_synthetic_reviews_sources_and_open_gaps(tmp_pa
     assert report.production_review_count == 0
     assert "synthetic_release_candidate" in codes
     assert "governance_release_intent_blocked" in codes
+    assert "governance_readiness_gap_open" in codes
     assert "synthetic_artifact" in codes
     assert "nonproduction_source" in codes
     assert "artifact_review_nonproduction" in codes
@@ -1729,9 +1730,17 @@ def test_empty_release_intent_is_explicitly_not_ready(tmp_path):
     assert report.ready is False
     assert {item.code for item in report.blockers} == {
         "governance_release_intent_blocked",
+        "governance_readiness_gap_open",
         "empty_release",
         "release_review_missing",
     }
+    assert len(
+        [
+            item
+            for item in report.blockers
+            if item.code == "governance_readiness_gap_open"
+        ]
+    ) == 11
 
 
 def test_release_cannot_hide_gaps_carried_by_promoted_source(tmp_path):

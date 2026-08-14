@@ -20,6 +20,7 @@ from continucare.knowledge.ops.models import (
     KnowledgeOpsIntegrityError,
     KnowledgeOpsPolicyError,
     NonBlank,
+    ReadinessBlock,
     SafeId,
     Sha256,
     StrictModel,
@@ -143,6 +144,7 @@ class KnowledgeReleaseCandidate(StrictModel):
 class ReadinessBlockerCode(StrEnum):
     GOVERNANCE_RELEASE_INTENT_BLOCKED = "governance_release_intent_blocked"
     GOVERNANCE_MANIFEST_MISMATCH = "governance_manifest_mismatch"
+    GOVERNANCE_READINESS_GAP_OPEN = "governance_readiness_gap_open"
     EMPTY_RELEASE = "empty_release"
     STALE_RELEASE_CANDIDATE = "stale_release_candidate"
     UNKNOWN_OR_STALE_ARTIFACT = "unknown_or_stale_artifact"
@@ -167,6 +169,7 @@ class ReadinessBlocker(StrictModel):
     code: ReadinessBlockerCode
     message: NonBlank
     subject_ref: LedgerRef | None = None
+    readiness_gap_id: SafeId | None = None
 
 
 class ReleaseReadinessReport(StrictModel):
@@ -307,6 +310,18 @@ class ReleaseReadinessService:
                     release_candidate_ref,
                 )
             )
+        for readiness_gap in self._bundle.readiness_gaps:
+            if ReadinessBlock.KNOWLEDGE_RELEASE.value in readiness_gap.blocks:
+                blockers.append(
+                    ReadinessBlocker(
+                        code=ReadinessBlockerCode.GOVERNANCE_READINESS_GAP_OPEN,
+                        message=(
+                            "Persistent governance readiness Gap remains open: "
+                            f"{readiness_gap.gap_id}."
+                        ),
+                        readiness_gap_id=readiness_gap.gap_id,
+                    )
+                )
         head = self._ledger.head(
             release_candidate_ref.collection, release_candidate_ref.record_id
         )
@@ -730,11 +745,12 @@ def _blocker(
 
 
 def _unique_blockers(blockers: list[ReadinessBlocker]) -> list[ReadinessBlocker]:
-    unique: dict[tuple[str, tuple | None], ReadinessBlocker] = {}
+    unique: dict[tuple[str, tuple | None, str | None], ReadinessBlocker] = {}
     for blocker in blockers:
         key = (
             str(blocker.code),
             None if blocker.subject_ref is None else _ref_key(blocker.subject_ref),
+            blocker.readiness_gap_id,
         )
         unique.setdefault(key, blocker)
     return list(unique.values())

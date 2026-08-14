@@ -21,6 +21,7 @@ from continucare.knowledge.ops.models import (
     KnowledgeOpsPolicyError,
     LanguageCode,
     NonBlank,
+    ReadinessBlock,
     ReviewerRole,
     SafeId,
     Sha256,
@@ -259,6 +260,13 @@ class SourcePromotionService:
             production_eligible = False
             registry_status = "synthetic_fixture"
         else:
+            if any(
+                ReadinessBlock.PRODUCTION_ELIGIBILITY.value in gap.blocks
+                for gap in self._bundle.readiness_gaps
+            ):
+                raise KnowledgeOpsPolicyError(
+                    "production Source promotion is blocked by persistent readiness Gaps"
+                )
             if candidate.synthetic or snapshot.synthetic or decision.synthetic:
                 raise KnowledgeOpsPolicyError(
                     "production promotion rejects synthetic evidence"
