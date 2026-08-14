@@ -14,6 +14,7 @@ from continucare.ui import (
     KnowledgeTopicProjection,
     inject_global_styles,
     project_knowledge_library,
+    render_disclosure_controls,
 )
 
 
@@ -301,12 +302,25 @@ else:
     )
     _render_claims(topic)
     _render_coverage(topic)
-    details_open = bool(st.session_state.get("cc_knowledge_details"))
-    key = "cc_knowledge_details_active" if details_open else "cc_knowledge_details"
-    if st.button("收起来源与版本" if details_open else "查看来源与版本", key=key, width="stretch"):
-        st.session_state["cc_knowledge_details"] = not details_open
-        st.rerun()
+    details_open = st.query_params.get("cc_knowledge_details") == "sources"
+    render_disclosure_controls(
+        st,
+        query_parameter="cc_knowledge_details",
+        page_path="/knowledge_evidence",
+        options=(
+            (
+                "sources",
+                "收起来源与版本" if details_open else "查看来源与版本",
+            ),
+        ),
+        aria_label="Knowledge 来源与版本",
+        panel_id="cc-knowledge-sources-panel",
+    )
     if details_open:
+        st.markdown(
+            '<span id="cc-knowledge-sources-panel" aria-hidden="true"></span>',
+            unsafe_allow_html=True,
+        )
         _render_sources(projection, topic)
 
 st.markdown(

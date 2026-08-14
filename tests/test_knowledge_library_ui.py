@@ -229,7 +229,8 @@ def test_source_layer_is_separate_from_patient_source_styling_and_exposes_histor
     ui_source = UI_SOURCE.read_text("utf-8")
     app = AppTest.from_file(str(KNOWLEDGE_PAGE), default_timeout=10).run()
 
-    app.button[0].click().run()
+    app.query_params["cc_knowledge_details"] = "sources"
+    app.run()
     assert not app.exception
     visible = "\n".join(item.value for item in app.markdown)
     assert "CURRENT / HISTORICAL" in visible
@@ -239,5 +240,7 @@ def test_source_layer_is_separate_from_patient_source_styling_and_exposes_histor
     assert ".cc-knowledge-shell" in ui_source
     assert ".cc-patient-quote" in ui_source
     assert "cc-knowledge-source cc-patient" not in ui_source
+    assert "render_disclosure_controls" in KNOWLEDGE_PAGE.read_text("utf-8")
     assert "grid-template-columns:repeat(2, minmax(0, 1fr))" in ui_source
     assert "min-height:48px" in ui_source
+    assert 'aria-expanded="{str(active).lower()}"' in ui_source

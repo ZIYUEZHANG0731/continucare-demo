@@ -41,6 +41,7 @@ from continucare.ui import (
     patient_recorded_meaning,
     project_doctor_summary_wording,
     project_doctor_visit_brief,
+    render_disclosure_controls,
 )
 
 
@@ -236,29 +237,23 @@ def _render_facts(projection) -> None:
 
 
 def _render_source_rail(projection) -> str | None:
-    selected = st.session_state.get("cc_doctor_source")
-    valid = {key for key, _ in projection.source_actions if key != "audit"}
-    if selected not in valid:
-        selected = None
-        st.session_state.pop("cc_doctor_source", None)
     st.markdown('<h2 class="cc-doctor-source-title">来源</h2>', unsafe_allow_html=True)
+    source_options = tuple(
+        (key, label) for key, label in projection.source_actions if key != "audit"
+    )
+    selected = render_disclosure_controls(
+        st,
+        query_parameter="cc_doctor_source",
+        page_path="/doctor_summary",
+        options=source_options,
+        aria_label="复诊速览来源",
+        panel_id="cc-doctor-source-panel",
+        stacked=True,
+    )
     for key, label in projection.source_actions:
         if key == "audit":
             with st.container(key="cc_doctor_record_link"):
                 st.page_link("pages/4_audit_log.py", label=label, width="stretch")
-            continue
-        active = selected == key
-        if st.button(
-            label,
-            key=f"cc_doctor_source_{'active_' if active else ''}{key}",
-            width="stretch",
-        ):
-            selected = None if active else key
-            if selected is None:
-                st.session_state.pop("cc_doctor_source", None)
-            else:
-                st.session_state["cc_doctor_source"] = selected
-            st.rerun()
     if projection.source_notice:
         st.markdown(
             f'<p class="cc-doctor-source-notice">{html.escape(projection.source_notice)}</p>',
@@ -316,7 +311,8 @@ def _render_source_detail(selected, projection, summary, trace) -> None:
         return
     labels = dict(projection.source_actions)
     st.markdown(
-        f'<section class="cc-doctor-disclosure"><h2>{html.escape(labels[selected])}</h2></section>',
+        f'<section id="cc-doctor-source-panel" class="cc-doctor-disclosure">'
+        f'<h2>{html.escape(labels[selected])}</h2></section>',
         unsafe_allow_html=True,
     )
     if selected == "patient":

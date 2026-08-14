@@ -418,6 +418,7 @@ def test_nurse_page_removes_alert_dashboard_and_keeps_role_styles_scoped():
     assert "render_competition_progress" not in source
     assert "demo_write_guard" in source
     assert "expected_generation=progress.generation" in source
+    assert "render_disclosure_controls" in source
     assert 'st.expander("演示边界"' in source
     assert ".cc-nurse-shell" in ui_source
     assert '.stApp:has(.cc-nurse-shell) [data-testid="stSidebar"]' in ui_source
@@ -426,6 +427,7 @@ def test_nurse_page_removes_alert_dashboard_and_keeps_role_styles_scoped():
     assert '[data-testid="stHorizontalBlock"]:not(:has(.cc-nurse-sort))' in ui_source
     assert "flex-direction:row !important" in ui_source
     assert "@media (prefers-reduced-motion: reduce)" in ui_source
+    assert 'aria-expanded="{str(active).lower()}"' in ui_source
 
 
 def test_visible_projection_never_exposes_internal_or_delivery_capability_terms():

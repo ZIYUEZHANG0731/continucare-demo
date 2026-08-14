@@ -347,18 +347,20 @@ def test_audit_page_is_read_only_and_uses_scoped_progressive_disclosure(monkeypa
     assert not app.exception
     assert app.title[0].value == "记录追溯"
     assert not db_path.exists()
-    assert [item.label for item in app.button] == [
-        "为什么停在这里",
-        "查看资源关系",
-        "查看技术详情",
-    ]
+    assert not app.button
+    assert all(
+        label in page_source
+        for label in ("为什么停在这里", "查看资源关系", "查看技术详情")
+    )
     assert "project_audit_trail" in page_source
     assert "render_competition_progress" not in page_source
     assert "append_audit_event" not in page_source
     assert "start_competition_demo" not in page_source
     assert "demo_write_guard" not in page_source
     assert "Layer4SQLiteStore(settings.db_path, initialize=False)" in page_source
+    assert "render_disclosure_controls" in page_source
     assert "重置" not in page_source
     assert ".cc-audit-shell" in ui_source
     assert ".cc-audit-table" in ui_source
     assert "min-height:44px" in ui_source
+    assert 'aria-expanded="{str(active).lower()}"' in ui_source

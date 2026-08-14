@@ -598,7 +598,8 @@ def test_knowledge_page_renders_all_four_fixture_details_offline():
         assert topic_name in rendered
         assert "支持什么" in rendered
         assert "不支持什么" in rendered
-    app.button[0].click().run()
+    app.query_params["cc_knowledge_details"] = "sources"
+    app.run()
     assert not app.exception
     assert any("CURRENT / HISTORICAL" in item.value for item in app.markdown)
 

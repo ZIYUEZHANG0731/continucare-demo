@@ -462,6 +462,7 @@ def test_page_uses_pure_projection_guards_and_scoped_doctor_styles():
     assert "DoctorReviewService" in page_source
     assert "demo_write_guard" in page_source
     assert "expected_generation=progress.generation" in page_source
+    assert "render_disclosure_controls" in page_source
     assert "sqlite3.Error" in page_source
     assert "index=None" in page_source
     assert "render_competition_progress" not in page_source
@@ -473,3 +474,4 @@ def test_page_uses_pure_projection_guards_and_scoped_doctor_styles():
     assert ".cc-doctor-facts" in ui_source
     assert "min-height:44px" in ui_source
     assert "@media (prefers-reduced-motion: reduce)" in ui_source
+    assert 'aria-expanded="{str(active).lower()}"' in ui_source

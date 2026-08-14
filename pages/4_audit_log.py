@@ -14,7 +14,12 @@ from continucare.config import get_settings
 from continucare.demo_data import DEMO_PATIENT_ID
 from continucare.layer4.storage import Layer4SQLiteStore
 from continucare.services.competition_demo import read_competition_demo
-from continucare.ui import AuditTrailProjection, inject_global_styles, project_audit_trail
+from continucare.ui import (
+    AuditTrailProjection,
+    inject_global_styles,
+    project_audit_trail,
+    render_disclosure_controls,
+)
 
 
 AUDIT_BOUNDARY = "合成数据 · 无临床评估 · 无风险分级 · 无真实发送 · 外部系统为 Mock/disabled。"
@@ -97,26 +102,20 @@ def _render_actions(projection: AuditTrailProjection) -> None:
     )
 
 
-def _set_disclosure(value: str) -> None:
-    current = st.session_state.get("cc_audit_disclosure")
-    st.session_state["cc_audit_disclosure"] = None if current == value else value
-
-
 def _render_disclosure_controls() -> str | None:
-    selected = st.session_state.get("cc_audit_disclosure")
     options = (
         ("why", "为什么停在这里"),
         ("relations", "查看资源关系"),
         ("technical", "查看技术详情"),
     )
-    columns = st.columns(3)
-    for column, (value, label) in zip(columns, options):
-        with column:
-            key_prefix = "cc_audit_disclosure_active" if selected == value else "cc_audit_disclosure"
-            if st.button(label, key=f"{key_prefix}_{value}", width="stretch"):
-                _set_disclosure(value)
-                st.rerun()
-    return selected
+    return render_disclosure_controls(
+        st,
+        query_parameter="cc_audit_disclosure",
+        page_path="/audit_log",
+        options=options,
+        aria_label="记录追溯进一步查看",
+        panel_id="cc-audit-disclosure-panel",
+    )
 
 
 def _render_why(projection: AuditTrailProjection) -> None:
@@ -134,7 +133,7 @@ def _render_why(projection: AuditTrailProjection) -> None:
     )
     st.markdown(
         f"""
-        <section class="cc-audit-disclosure" aria-label="停止或完成原因说明">
+        <section id="cc-audit-disclosure-panel" class="cc-audit-disclosure" aria-label="停止或完成原因说明">
           <h2>为什么停在这里</h2>
           <p><strong>原因：{html.escape(projection.reason)}</strong></p>
           <p>{html.escape(projection.explanation)}</p>
@@ -153,7 +152,7 @@ def _render_relations(projection: AuditTrailProjection) -> None:
         rows = "<li>当前没有可安全连接的资源关系。</li>"
     st.markdown(
         f"""
-        <section class="cc-audit-disclosure" aria-label="资源关系">
+        <section id="cc-audit-disclosure-panel" class="cc-audit-disclosure" aria-label="资源关系">
           <h2>资源关系</h2>
           <p>这里只用业务语言展示已经存在的关系，不把审计事件本身当作临床事实。</p>
           <ol class="cc-audit-relations">{rows}</ol>
@@ -165,7 +164,7 @@ def _render_relations(projection: AuditTrailProjection) -> None:
 
 def _render_technical(projection: AuditTrailProjection) -> None:
     st.markdown(
-        '<section class="cc-audit-disclosure"><h2>技术详情</h2>'
+        '<section id="cc-audit-disclosure-panel" class="cc-audit-disclosure"><h2>技术详情</h2>'
         '<p>以下字段用于排查和资料审计；默认不展开原始 JSON。</p></section>',
         unsafe_allow_html=True,
     )

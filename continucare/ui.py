@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 
 COMPETITION_STEP_LABELS = (
@@ -2402,6 +2402,40 @@ def render_demo_guide(
     return projection
 
 
+def render_disclosure_controls(
+    st,
+    *,
+    query_parameter: str,
+    page_path: str,
+    options: tuple[tuple[str, str], ...],
+    aria_label: str,
+    panel_id: str,
+    selected: str | None = None,
+    stacked: bool = False,
+) -> str | None:
+    """Render keyboard-native state links with explicit expanded state."""
+
+    query_selected = st.query_params.get(query_parameter)
+    if query_selected is not None:
+        selected = str(query_selected)
+    links = []
+    for value, label in options:
+        active = selected == value
+        href = page_path + "?" + urlencode({query_parameter: "" if active else value})
+        links.append(
+            f'<a class="cc-disclosure-control" target="_top" href="{html.escape(href, quote=True)}" '
+            f'aria-expanded="{str(active).lower()}" aria-controls="{html.escape(panel_id, quote=True)}">'
+            f"{html.escape(label)}</a>"
+        )
+    layout_class = " cc-disclosure-controls--stacked" if stacked else ""
+    st.markdown(
+        f'<nav class="cc-disclosure-controls cc-disclosure-controls--{len(options)}{layout_class}" '
+        f'aria-label="{html.escape(aria_label, quote=True)}">{"".join(links)}</nav>',
+        unsafe_allow_html=True,
+    )
+    return selected
+
+
 def inject_global_styles(st) -> None:
     st.markdown(
         """
@@ -2420,6 +2454,24 @@ def inject_global_styles(st) -> None:
             --cc-danger-bg: #FFF5F4;
         }
         .block-container {max-width: 1180px; padding-top: 2rem; padding-bottom: 4rem;}
+        .cc-disclosure-controls {
+            display:grid; grid-template-columns:1fr; gap:.5rem; margin:.25rem 0;
+        }
+        .cc-disclosure-controls--2 {grid-template-columns:repeat(2, minmax(0, 1fr));}
+        .cc-disclosure-controls--3 {grid-template-columns:repeat(3, minmax(0, 1fr));}
+        .cc-disclosure-controls--stacked {grid-template-columns:1fr;}
+        .cc-disclosure-control {
+            display:flex; align-items:center; justify-content:center; min-height:44px;
+            padding:.5rem .65rem; border:1px solid var(--cc-accent); border-radius:5px;
+            background:var(--cc-bg); color:var(--cc-accent-strong) !important;
+            font-size:.94rem; line-height:1.35; font-weight:630; text-align:center;
+            text-decoration:none !important; box-shadow:none;
+        }
+        .cc-disclosure-control:hover {border-color:var(--cc-accent-strong); background:var(--cc-surface-subtle);}
+        .cc-disclosure-control:focus-visible {outline:3px solid rgba(0,109,112,.28); outline-offset:2px;}
+        .cc-disclosure-control[aria-expanded="true"] {
+            border-color:var(--cc-accent-strong); background:var(--cc-surface-subtle); font-weight:720;
+        }
         h1, h2, h3 {
             overflow-wrap: anywhere;
             word-break: break-word;

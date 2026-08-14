@@ -30,6 +30,7 @@ from continucare.ui import (
     inject_global_styles,
     patient_recorded_meaning,
     project_nurse_workbench,
+    render_disclosure_controls,
 )
 
 
@@ -229,36 +230,34 @@ def _render_queue(
 
 
 def _render_disclosure(task: NurseTaskProjection, *, area: str) -> None:
-    state_key = f"cc_nurse_disclosure_state_{task.task_id}"
-    choice = st.session_state.get(state_key, "不展开")
-    labels = (
-        ("查看患者原话",)
+    choice = st.query_params.get("cc_nurse_disclosure")
+    options = (
+        (("patient", "查看患者原话"),)
         if area == "source"
-        else ("查看先前动作", "技术详情")
+        else (("history", "查看先前动作"), ("technical", "技术详情"))
     )
-    columns = st.columns(len(labels))
-    for index, (column, label) in enumerate(zip(columns, labels)):
-        active = choice == label
-        key_prefix = (
-            "cc_nurse_disclosure_active" if active else "cc_nurse_disclosure"
-        )
-        with column, st.container(key=f"{key_prefix}_{area}_{index}"):
-            if st.button(
-                label,
-                key=f"cc_nurse_disclosure_button_{task.task_id}_{area}_{index}",
-                width="stretch",
-            ):
-                st.session_state[state_key] = "不展开" if active else label
-                st.rerun()
-    if area == "source" and choice == "查看患者原话":
+    render_disclosure_controls(
+        st,
+        query_parameter="cc_nurse_disclosure",
+        page_path="/nurse_risk_center",
+        options=options,
+        selected=str(choice) if choice is not None else None,
+        aria_label="护士任务来源" if area == "source" else "护士任务进一步查看",
+        panel_id="cc-nurse-disclosure-panel",
+    )
+    if area == "source" and choice == "patient":
         quote = task.original_quote or "患者原话暂时无法读取。"
         st.markdown(
-            '<div class="cc-nurse-result-boundary">'
+            '<div id="cc-nurse-disclosure-panel" class="cc-nurse-result-boundary">'
             f"<strong>患者在本轮确认</strong><br>{html.escape(quote)}"
             "</div>",
             unsafe_allow_html=True,
         )
-    elif area == "record" and choice == "查看先前动作":
+    elif area == "record" and choice == "history":
+        st.markdown(
+            '<span id="cc-nurse-disclosure-panel" aria-hidden="true"></span>',
+            unsafe_allow_html=True,
+        )
         if not task.history:
             st.caption("还没有先前动作。")
         for version, status, occurred_at in task.history:
@@ -270,9 +269,9 @@ def _render_disclosure(task: NurseTaskProjection, *, area: str) -> None:
                 "</div>",
                 unsafe_allow_html=True,
             )
-    elif area == "record" and choice == "技术详情":
+    elif area == "record" and choice == "technical":
         st.markdown(
-            '<div class="cc-nurse-technical">'
+            '<div id="cc-nurse-disclosure-panel" class="cc-nurse-technical">'
             f"Task：<code>{html.escape(task.task_id)}</code>"
             "</div>",
             unsafe_allow_html=True,
