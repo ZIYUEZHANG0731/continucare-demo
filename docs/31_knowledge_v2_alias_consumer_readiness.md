@@ -94,8 +94,11 @@ display label。9 个 v2 English benchmark label 只作为 benchmark/display lab
 - `get_core_symptom_record(benchmark_key)`；
 - `get_core_symptom_alias_readiness()`；
 - `get_core_symptom_gap_resolution_readiness()`；
-- `build_core_symptom_catalog_read_model(bundle, catalog)`，只接受已验证的
-  immutable inputs，没有 readiness/override 参数。
+- `build_core_symptom_catalog_read_model(bundle, catalog)`，只提供当前 open-Gap
+  readiness-only contract，没有 readiness/override 参数。builder 先重算 repository
+  canonical catalog raw bytes 的 SHA-256 并与 alias audit pin 比较，再将 caller
+  catalog 的完整 12-record 结构与 canonical catalog 比较；任一字段不同都会在
+  DTO 生成前 fail closed，后续投影只使用 canonical catalog。
 
 `CoreSymptomRecordReadDTO` 固定暴露：
 
@@ -171,7 +174,11 @@ UI 禁止：
 - 让 Knowledge 页面影响患者事实、Task、Observation、Summary、Alert、
   ClinicalRule、状态机或故事完成判定。
 
-## 7. 真实 reviewer 到位后的最后动作
+当前 DTO 使用 `Literal[False]`、`approved_match_aliases` 的 `max_length=0`，并要求
+exact open Gap。它刻意不能表示 resolved/approved 状态；未来不得通过放宽当前
+模型来复用这一版本。
+
+## 7. 真实 reviewer 到位后的治理与 successor 实现
 
 1. 为精确 alias audit 创建正式 Review Packet；
 2. terminologist、rights officer、knowledge curator 三个合格、非 synthetic、
@@ -179,20 +186,26 @@ UI 禁止：
 3. ReviewerVerifier 验证当前身份、授权、scope、principal separation 和
    attestation；
 4. 创建 hash-pinned successor readiness manifest，旧 manifest 保持可加载；
-5. 重新加载 successor bundle 并重新计算 `consumer_integration_ready`；
-6. 对新 consumer DTO 和匹配边界进行独立审核；
-7. 另行授权后，Knowledge UI 才可使用正式获批的 matchable aliases。
+5. 设计新的版本化 successor DTO/builder contract，不修改当前 open-Gap contract；
+6. 独立实现 resolved/approved 状态及其 fail-closed 测试；
+7. 重新加载 successor bundle，通过新 contract 重新计算 consumer readiness；
+8. 对 successor API、DTO 和匹配边界进行独立审核；
+9. Knowledge UI 完成独立审核并另行授权后，才可使用正式获批的 matchable aliases。
+
+因此，真实 reviewer 到位不是本能力的最后一个动作；之后仍有明确、独立的代码、
+测试和 UI 审核切片。
 
 ## 8. Verification snapshot
 
-验证所针对的 implementation HEAD 为
-`a250e963b53e653de3686d2b270c808fe625e8ef`。全部 Python 命令使用独立
-`mktemp` 目录、临时 `PYTHONPYCACHEPREFIX`、临时 `CONTINUCARE_DB_PATH` 和
-冻结离线环境。
+本次 BLOCKER 修复的验证基线 HEAD 为
+`db485c45caf59c8a715361924bbcfbe405097d38`；最终包含本次修复的 branch HEAD
+在执行报告中记录，避免在 commit 内容中伪造自引用 SHA。全部 Python 命令使用
+独立 `mktemp` 目录、临时 `PYTHONPYCACHEPREFIX`、临时
+`CONTINUCARE_DB_PATH` 和冻结离线环境。
 
-- alias audit/read API 定向测试：`20 passed`，exit 0；
-- `tests/knowledge_ops`：`186 passed`，exit 0；
-- 全量 pytest：`795 passed, 3 skipped in 21.68s`，exit 0；
+- alias audit/read API 定向测试：`27 passed in 0.85s`，exit 0；
+- `tests/knowledge_ops`：`193 passed in 5.15s`，exit 0；
+- 全量 pytest：`802 passed, 3 skipped in 21.19s`，exit 0；
 - 三个 skip 仍只因未设置官方 `FHIR_R4_SCHEMA_ZIP`；
 - `python -m compileall -q continucare app.py pages`：exit 0；
 - `git diff --check 5779238040212bbe7edfee968081c48527fbcfd7..HEAD`：

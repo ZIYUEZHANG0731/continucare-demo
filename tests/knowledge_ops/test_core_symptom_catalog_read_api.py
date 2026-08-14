@@ -33,6 +33,7 @@ from continucare.knowledge.ops.manifests import (
 from continucare.knowledge.ops.models import KnowledgeOpsManifestError
 from continucare.terminology.core_catalog import (
     BENCHMARK_KEYS,
+    CoreSymptomCatalogV2,
     load_core_symptom_catalog_v2,
 )
 
@@ -184,6 +185,71 @@ def test_no_boolean_or_caller_parameter_can_force_readiness() -> None:
                 "resolution_permitted": True,
                 "consumer_integration_ready": True,
             }
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "preferred_zh",
+        "preferred_en",
+        "semantic_boundary_codes",
+        "alias_value",
+        "alias_review_status",
+        "concept_mapping_contract",
+    ),
+)
+def test_builder_rejects_every_schema_valid_caller_catalog_drift(
+    mutation: str,
+) -> None:
+    bundle = load_builtin_ops_bundle()
+    canonical = load_core_symptom_catalog_v2()
+    payload = canonical.model_dump(mode="json")
+    record = payload["records"][0]
+
+    if mutation == "preferred_zh":
+        record["preferred_zh"] = "恶心（caller篡改）"
+    elif mutation == "preferred_en":
+        record["preferred_en"] = "caller-altered nausea"
+    elif mutation == "semantic_boundary_codes":
+        record["semantic_boundary_codes"] = ["caller-only-boundary"]
+    elif mutation == "alias_value":
+        record["aliases"][0]["value"] = "恶心（caller alias）"
+    elif mutation == "alias_review_status":
+        record["aliases"][0]["review_status"] = "pending_terminologist_review"
+    else:
+        record["concept_status"] = "internal_candidate"
+        record["existing_concept_ref"] = None
+        record["candidate_target_ref"] = None
+        record["mapping_status"] = "pending_unverified"
+
+    altered = CoreSymptomCatalogV2.model_validate(payload)
+    assert altered != canonical
+    with pytest.raises(
+        KnowledgeOpsManifestError,
+        match="differs from hash-pinned canonical catalog",
+    ):
+        build_core_symptom_catalog_read_model(bundle, altered)
+
+    projected = build_core_symptom_catalog_read_model(bundle, canonical)
+    assert len(projected.records) == 12
+    assert all(item.approved_match_aliases == () for item in projected.records)
+    assert projected.gap_resolution_readiness.lifecycle == "open"
+    assert projected.consumer_integration_ready is False
+
+
+def test_builder_rechecks_canonical_catalog_digest_against_audit_pin() -> None:
+    bundle = load_builtin_ops_bundle()
+    audit = bundle.core_symptom_alias_audit
+    assert audit is not None
+    wrong_pin = audit.model_copy(update={"catalog_sha256": "0" * 64})
+    with pytest.raises(
+        KnowledgeOpsManifestError,
+        match="canonical catalog SHA-256 differs from alias audit",
+    ):
+        build_core_symptom_catalog_read_model(
+            replace(bundle, core_symptom_alias_audit=wrong_pin),
+            load_core_symptom_catalog_v2(),
         )
 
 

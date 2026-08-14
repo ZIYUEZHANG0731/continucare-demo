@@ -34,8 +34,8 @@ readiness Gap registry 和冻结只读 DTO。当前没有真实 reviewer、正�
 | Readiness Gap registry | 已实现并验证 | 12 个 open Gaps；rights/live/socket/alias 问题显式化 | registry v1 只能 open；resolution 需 successor manifest |
 | P1 source connectors | 已实现但仍被治理门禁 | DailyMed、EMA、MedlinePlus、PubMed、PMC metadata contracts；fake transport tests | operational live acquisition disabled；P1b 未执行 |
 | v2 governance read model | 已实现并验证 | Source readiness、persistent Gap、release/consumer readiness 的只读投影 | 所有生产与 release readiness 仍 false |
-| Core Symptom v2 DTO/API | 已实现但仍被治理门禁 | 12 条 frozen DTO、alias/readiness/Gap resolution API | `approved_match_aliases=()`；consumer integration false |
-| Knowledge UI integration | 尚未实施 | 当前 UI 未导入新 v2 API | 需正式 alias review、successor Gap manifest 和独立 UI 审核 |
+| Core Symptom v2 DTO/API | 已实现但仍被治理门禁 | 12 条 frozen DTO；caller catalog 必须与 hash-pinned canonical catalog 完整相等 | 当前仅为 open-Gap readiness-only contract；`approved_match_aliases=()`；consumer integration false |
+| Knowledge UI integration | 尚未实施 | 当前 UI 未导入新 v2 API | 需正式 alias review、successor Gap manifest、版本化 successor DTO/builder 和独立 UI 审核 |
 | P1b live validation | 尚未实施 | default-off report 为 `not_attempted` | 需要单独授权、冷导入 socket 证明和隔离执行 |
 | Formal KnowledgeRelease | 尚未实施 | release readiness/finalize fail-closed 机制存在 | 无正式 reviewer、rights decisions、selected artifacts 或 release approval |
 | 患者匹配、临床规则、诊断、分诊、治疗 | 明确非目标 | Knowledge 不参与这些状态或结论 | 不能由本仓库当前 Knowledge 能力推断或宣传 |
@@ -83,7 +83,9 @@ official/repository source
    KnowledgeRelease；
 2. Core Symptom v2 已形成 technical alias audit 和冻结 DTO，但
    `terminology_alias_review_pending` 仍 open，所有 inherited aliases 均不可匹配，
-   UI integration 尚未开始。
+   UI integration 尚未开始。当前 DTO/builder 只能表达 open-Gap readiness；即使
+   未来完成正式审核，仍需新的 hash-pinned readiness manifest、版本化 successor
+   contract 及 resolved/approved 实现与测试，不能放宽当前 `Literal[False]` 模型。
 
 五个真实来源仍受 rights/live-validation Gaps 阻断；P1b 为 `not_attempted`。
 release intent 明确为 `readiness_only_blocked`。
@@ -118,6 +120,9 @@ Layer 4 和 runtime 均未导入新 v2 alias API。
   default deny。
 - Alias audit 是当前 v1/v2 catalog bytes 的 technical snapshot；catalog 变化必须
   创建新 artifact/index，不能原地重写。
+- 当前 Core Symptom DTO/builder 是 open-Gap readiness-only contract；正式审核后
+  仍需独立的版本化 successor DTO/builder、resolved/approved 实现和测试，再进入
+  Knowledge UI 独立审核。
 
 ## 7. 审阅导航
 
@@ -164,16 +169,17 @@ Layer 4 和 runtime 均未导入新 v2 alias API。
 
 ## 8. Verification snapshot
 
-验证所针对的 implementation HEAD 为
-`a250e963b53e653de3686d2b270c808fe625e8ef`；测试工作树同时包含本指南和
-alias readiness 文档。包含本文件的 Git commit 无法在自身内容中自引用其 SHA，
-因此最终 branch HEAD 在同一执行报告中精确记录，不以占位值冒充已知 commit。
+本次 BLOCKER 修复的验证基线 HEAD 为
+`db485c45caf59c8a715361924bbcfbe405097d38`；测试工作树同时包含 canonical
+catalog binding、负向测试和两份文档修正。包含本文件的 Git commit 无法在自身
+内容中自引用其 SHA，因此最终 branch HEAD 在同一执行报告中精确记录，不以占位
+值冒充已知 commit。
 
 | 验证 | 结果 |
 |---|---|
-| Alias audit/read API 定向测试 | exit 0；`20 passed` |
-| `tests/knowledge_ops` | exit 0；`186 passed` |
-| 全量 pytest | exit 0；`795 passed, 3 skipped in 21.68s` |
+| Alias audit/read API 定向测试 | exit 0；`27 passed in 0.85s` |
+| `tests/knowledge_ops` | exit 0；`193 passed in 5.15s` |
+| 全量 pytest | exit 0；`802 passed, 3 skipped in 21.19s` |
 | Skip 原因 | 仅未设置官方 `FHIR_R4_SCHEMA_ZIP`，与基线一致 |
 | Compileall | exit 0；无输出 |
 | 基线至 implementation HEAD diff check | exit 0 |

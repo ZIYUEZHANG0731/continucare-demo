@@ -7,6 +7,7 @@ clinical/runtime authority.
 
 from __future__ import annotations
 
+import hashlib
 from functools import lru_cache
 from typing import Literal
 
@@ -32,6 +33,7 @@ from continucare.knowledge.ops.models import (
 from continucare.knowledge.ops.read_model import build_governance_readiness
 from continucare.terminology.core_catalog import (
     BENCHMARK_KEYS,
+    CORE_CATALOG_V2_FILE,
     CoreSymptomCatalogV2,
     load_core_symptom_catalog_v2,
 )
@@ -213,6 +215,7 @@ def build_core_symptom_catalog_read_model(
         raise KnowledgeOpsManifestError(
             "Core Symptom consumer read model requires the hash-pinned alias audit"
         )
+    catalog = _require_hash_pinned_canonical_catalog(catalog, audit)
     gap = _resolve_exact_alias_gap(bundle, catalog)
     gate = bundle.review_gate(GovernanceGate.TERMINOLOGY_MAPPING_PROMOTION)
     if gate.required_roles != tuple(item.value for item in _REQUIRED_ALIAS_REVIEW_ROLES):
@@ -294,6 +297,27 @@ def build_core_symptom_catalog_read_model(
         alias_readiness=alias_readiness,
         gap_resolution_readiness=gap_readiness,
     )
+
+
+def _require_hash_pinned_canonical_catalog(
+    catalog: CoreSymptomCatalogV2,
+    audit: CoreSymptomAliasAudit,
+) -> CoreSymptomCatalogV2:
+    """Reject every caller catalog that differs from the pinned repository bytes."""
+
+    canonical_bytes = CORE_CATALOG_V2_FILE.read_bytes()
+    if hashlib.sha256(canonical_bytes).hexdigest() != audit.catalog_sha256:
+        raise KnowledgeOpsManifestError(
+            "Core Symptom read model canonical catalog SHA-256 differs from alias audit"
+        )
+    canonical_catalog = load_core_symptom_catalog_v2()
+    if not isinstance(catalog, CoreSymptomCatalogV2) or catalog.model_dump(
+        mode="json"
+    ) != canonical_catalog.model_dump(mode="json"):
+        raise KnowledgeOpsManifestError(
+            "caller-supplied Core Symptom catalog differs from hash-pinned canonical catalog"
+        )
+    return canonical_catalog
 
 
 def _resolve_exact_alias_gap(
