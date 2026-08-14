@@ -1166,7 +1166,7 @@ def test_multi_role_gate_rejects_distinct_accounts_for_same_principal(tmp_path):
     ) is None
 
 
-def test_unverified_real_identity_cannot_approve(tmp_path):
+def test_unverified_real_identity_cannot_approve_or_resolve_direct_event(tmp_path):
     bundle, profile, ledger, acquisition = _acquisition_context(tmp_path)
     packet_ref = _source_review_packet(bundle, profile, ledger, acquisition)
     reviewer = ReviewerIdentity(
@@ -1181,10 +1181,12 @@ def test_unverified_real_identity_cannot_approve(tmp_path):
         assurance="identity_unverified",
         synthetic=False,
     )
+    rights = _synthetic_reviewer("rights_officer")
+    directory = InMemoryReviewerDirectory((reviewer, rights))
     service = ReviewEventService(
         bundle=bundle,
         ledger=ledger,
-        reviewers=InMemoryReviewerDirectory((reviewer,)),
+        reviewers=directory,
     )
 
     with pytest.raises(KnowledgeOpsPolicyError, match="cannot approve"):
@@ -1197,6 +1199,64 @@ def test_unverified_real_identity_cannot_approve(tmp_path):
             rationale="Unverified identity cannot approve.",
             decision_payload=_payload(),
         )
+
+    revision_ref = service.record(
+        packet_ref=packet_ref,
+        reviewer_identity_id=reviewer.identity_id,
+        reviewer_role="knowledge_curator",
+        axis="metadata_quality",
+        decision="revision_requested",
+        rationale="Unverified reviewer may request revision but cannot approve.",
+    )
+    service.record(
+        packet_ref=packet_ref,
+        reviewer_identity_id=rights.identity_id,
+        reviewer_role="rights_officer",
+        axis="rights",
+        decision="approved",
+        rationale="Synthetic rights mechanism fixture.",
+        decision_payload=_payload(operation="register_link_metadata"),
+    )
+    revision = ReviewEvent.model_validate(ledger.get(revision_ref).payload)
+    timestamp = revision.decided_at + timedelta(microseconds=1)
+    direct_payload = revision.model_dump(mode="json")
+    direct_payload.update(
+        {
+            "event_id": review_module._event_id(revision_ref.record_id, timestamp),
+            "decision": "approved",
+            "decision_payload": _payload().model_dump(mode="json"),
+            "rationale": "Direct signed unverified approval bypass probe.",
+            "decided_at": timestamp.isoformat().replace("+00:00", "Z"),
+            "expected_predecessor_sha256": revision_ref.entry_sha256,
+            "counts_toward_release": False,
+        }
+    )
+    claim_sha256 = review_module._review_event_claim_sha256(direct_payload)
+    attestation = directory.issue_review_attestation(
+        reviewer,
+        role="knowledge_curator",
+        scope=profile.scope,
+        event_claim_sha256=claim_sha256,
+        issued_at=timestamp,
+    )
+    assert attestation is not None
+    direct_payload["review_attestation"] = attestation.model_dump(mode="json")
+    direct_event = ReviewEvent.model_validate(direct_payload)
+    ledger.append(
+        LedgerCollection.REVIEW_EVENT,
+        revision_ref.record_id,
+        payload_type="review_event_v3",
+        payload=direct_event,
+        recorded_by=reviewer.identity_id,
+        recorded_at=timestamp,
+        synthetic=True,
+    )
+
+    assert ReviewLedgerDecisionProvider(
+        bundle=bundle, ledger=ledger, reviewers=directory
+    ).resolve_gate(
+        acquisition.candidate_refs[0], GovernanceGate.SOURCE_PROMOTION
+    ) is None
 
 
 def test_formal_identity_contract_requires_auditable_verification_evidence():

@@ -1134,6 +1134,8 @@ class ReviewLedgerDecisionProvider:
                     identity is None
                     or not _event_identity_snapshot_matches(event, identity)
                     or _is_author_reviewer_conflict(packet, identity)
+                    or identity.assurance
+                    == ReviewerAssurance.IDENTITY_UNVERIFIED
                     or not self._reviewers.verify_identity_authorization(
                         identity,
                         role=ReviewerRole(role),
