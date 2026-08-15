@@ -220,7 +220,8 @@ def _render_sources(
     topic: KnowledgeTopicProjection,
 ) -> None:
     st.markdown(
-        '<section class="cc-knowledge-details-head"><h2>来源与版本</h2>'
+        '<section id="cc-knowledge-sources-panel" class="cc-knowledge-details-head">'
+        '<h2>来源与版本</h2>'
         '<p>链接只在您明确点击后打开；页面加载不会访问官方来源 URL。</p></section>',
         unsafe_allow_html=True,
     )
@@ -317,10 +318,6 @@ else:
         panel_id="cc-knowledge-sources-panel",
     )
     if details_open:
-        st.markdown(
-            '<span id="cc-knowledge-sources-panel" aria-hidden="true"></span>',
-            unsafe_allow_html=True,
-        )
         _render_sources(projection, topic)
 
 st.markdown(

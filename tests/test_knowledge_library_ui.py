@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import replace
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,26 @@ from continucare.ui import project_knowledge_library
 ROOT = Path(__file__).parents[1]
 KNOWLEDGE_PAGE = ROOT / "pages" / "5_knowledge_evidence.py"
 UI_SOURCE = ROOT / "continucare" / "ui.py"
+
+
+class _KnowledgeDOM(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.ids: list[tuple[str, dict[str, str | None]]] = []
+        self.controls: list[dict[str, str | None]] = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if "id" in attributes:
+            self.ids.append((tag, attributes))
+        if tag == "a" and "aria-controls" in attributes:
+            self.controls.append(attributes)
+
+
+def _rendered_dom(app) -> _KnowledgeDOM:
+    parser = _KnowledgeDOM()
+    parser.feed("\n".join(str(item.value) for item in app.markdown))
+    return parser
 
 
 def _registry_with_view(registry, view):
@@ -229,6 +250,18 @@ def test_source_layer_is_separate_from_patient_source_styling_and_exposes_histor
     ui_source = UI_SOURCE.read_text("utf-8")
     app = AppTest.from_file(str(KNOWLEDGE_PAGE), default_timeout=10).run()
 
+    collapsed = _rendered_dom(app)
+    assert len(collapsed.controls) == 1
+    assert collapsed.controls[0]["aria-expanded"] == "false"
+    targets = [
+        item for item in collapsed.ids if item[1]["id"] == "cc-knowledge-sources-panel"
+    ]
+    assert len(targets) == 1
+    assert targets[0][0] == "span"
+    assert targets[0][1]["hidden"] is None
+    assert targets[0][1]["aria-hidden"] == "true"
+    assert "tabindex" not in targets[0][1]
+
     app.query_params["cc_knowledge_details"] = "sources"
     app.run()
     assert not app.exception
@@ -244,3 +277,24 @@ def test_source_layer_is_separate_from_patient_source_styling_and_exposes_histor
     assert "grid-template-columns:repeat(2, minmax(0, 1fr))" in ui_source
     assert "min-height:48px" in ui_source
     assert 'aria-expanded="{str(active).lower()}"' in ui_source
+    expanded = _rendered_dom(app)
+    assert expanded.controls[0]["aria-expanded"] == "true"
+    targets = [
+        item for item in expanded.ids if item[1]["id"] == "cc-knowledge-sources-panel"
+    ]
+    assert len(targets) == 1
+    assert targets[0][0] == "section"
+    assert "cc-knowledge-details-head" in (
+        targets[0][1].get("class") or ""
+    ).split()
+    assert "hidden" not in targets[0][1]
+    assert targets[0][1].get("aria-hidden") != "true"
+    assert "来源与版本" in visible
+
+    app.query_params["cc_knowledge_details"] = "future-value"
+    app.run()
+    unknown = _rendered_dom(app)
+    assert unknown.controls[0]["aria-expanded"] == "false"
+    assert sum(
+        item[1]["id"] == "cc-knowledge-sources-panel" for item in unknown.ids
+    ) == 1

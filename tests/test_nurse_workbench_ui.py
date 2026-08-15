@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from streamlit.testing.v1 import AppTest
 
+from continucare.adapters.sqlite_store import SQLiteStore
+from continucare.care_agent import CareAgentService
+from continucare.care_agent.model_api import SemanticModelConfig, UnconfiguredModelAdapter
+from continucare.care_engine import CareEngine
+from continucare.services.competition_demo import demo_write_guard, start_competition_demo
+from continucare.services.confirmed_review import ConfirmedReviewService
 from continucare.services.competition_demo import (
     CompetitionDemoProgress,
     CompetitionDemoStage,
@@ -99,6 +107,50 @@ def _visible_task_text(task) -> str:
         *(label for _, label in task.secondary_actions),
     )
     return "\n".join(str(value) for value in values if value)
+
+
+class _RenderedDOM(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.ids: list[tuple[str, dict[str, str | None]]] = []
+        self.controls: list[dict[str, str | None]] = []
+        self.text: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if "id" in attributes:
+            self.ids.append((tag, attributes))
+        if tag == "a" and "aria-controls" in attributes:
+            self.controls.append(attributes)
+
+    def handle_data(self, data):
+        if data.strip():
+            self.text.append(data.strip())
+
+
+def _rendered_dom(app) -> _RenderedDOM:
+    parser = _RenderedDOM()
+    parser.feed("\n".join(str(item.value) for item in app.markdown))
+    return parser
+
+
+def _seed_requested_task(db_path) -> None:
+    progress = start_competition_demo(db_path)
+    store = SQLiteStore(db_path, initialize=False)
+    engine = CareEngine(store)
+    agent = CareAgentService(
+        store,
+        care_engine=engine,
+        model_adapter=UnconfiguredModelAdapter(SemanticModelConfig()),
+        patient_timezone="Asia/Shanghai",
+    )
+    confirmed = ConfirmedReviewService(store, care_agent=agent, care_engine=engine)
+    record = store.get_agent_run(progress.run_id)
+    candidate_ids = [
+        item["candidate_id"] for item in record.output_json["candidates"]
+    ]
+    with demo_write_guard(db_path, expected_generation=progress.generation):
+        confirmed.accept_all(progress.run_id, candidate_ids)
 
 
 def test_empty_workbench_is_truthful_and_has_no_business_action():
@@ -428,6 +480,81 @@ def test_nurse_page_removes_alert_dashboard_and_keeps_role_styles_scoped():
     assert "flex-direction:row !important" in ui_source
     assert "@media (prefers-reduced-motion: reduce)" in ui_source
     assert 'aria-expanded="{str(active).lower()}"' in ui_source
+
+
+def test_nurse_disclosures_render_distinct_unique_targets_and_fail_closed(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "nurse-disclosure.db"
+    _seed_requested_task(db_path)
+    monkeypatch.setenv("CONTINUCARE_DB_PATH", str(db_path))
+    monkeypatch.setattr("streamlit.page_link", lambda *_args, **_kwargs: None)
+
+    app = AppTest.from_file(str(NURSE_PAGE), default_timeout=10).run()
+    assert not app.exception
+    collapsed = _rendered_dom(app)
+    assert [item["aria-controls"] for item in collapsed.controls] == [
+        "cc-nurse-source-panel",
+        "cc-nurse-record-panel",
+        "cc-nurse-record-panel",
+    ]
+    assert all(item["aria-expanded"] == "false" for item in collapsed.controls)
+    for panel_id in ("cc-nurse-source-panel", "cc-nurse-record-panel"):
+        targets = [item for item in collapsed.ids if item[1]["id"] == panel_id]
+        assert len(targets) == 1
+        assert targets[0][0] == "span"
+        assert targets[0][1]["hidden"] is None
+        assert targets[0][1]["aria-hidden"] == "true"
+        assert "tabindex" not in targets[0][1]
+
+    app.query_params["cc_nurse_disclosure"] = "patient"
+    app.run()
+    patient = _rendered_dom(app)
+    assert [item["aria-expanded"] for item in patient.controls] == [
+        "true",
+        "false",
+        "false",
+    ]
+    source_targets = [
+        item for item in patient.ids if item[1]["id"] == "cc-nurse-source-panel"
+    ]
+    record_targets = [
+        item for item in patient.ids if item[1]["id"] == "cc-nurse-record-panel"
+    ]
+    assert len(source_targets) == len(record_targets) == 1
+    assert source_targets[0][0] == "div" and "hidden" not in source_targets[0][1]
+    assert record_targets[0][0] == "span" and record_targets[0][1]["hidden"] is None
+    assert "我今天拉肚子。" in patient.text
+
+    app.query_params["cc_nurse_disclosure"] = "history"
+    app.run()
+    history = _rendered_dom(app)
+    assert [item["aria-expanded"] for item in history.controls] == [
+        "false",
+        "true",
+        "false",
+    ]
+    source_targets = [
+        item for item in history.ids if item[1]["id"] == "cc-nurse-source-panel"
+    ]
+    record_targets = [
+        item for item in history.ids if item[1]["id"] == "cc-nurse-record-panel"
+    ]
+    assert len(source_targets) == len(record_targets) == 1
+    assert source_targets[0][0] == "span" and source_targets[0][1]["hidden"] is None
+    assert record_targets[0][0] == "section" and "hidden" not in record_targets[0][1]
+    assert "v1" in history.text
+
+    app.query_params["cc_nurse_disclosure"] = "future-value"
+    app.run()
+    unknown = _rendered_dom(app)
+    assert all(item["aria-expanded"] == "false" for item in unknown.controls)
+    assert sum(
+        item[1]["id"] == "cc-nurse-source-panel" for item in unknown.ids
+    ) == 1
+    assert sum(
+        item[1]["id"] == "cc-nurse-record-panel" for item in unknown.ids
+    ) == 1
 
 
 def test_visible_projection_never_exposes_internal_or_delivery_capability_terms():

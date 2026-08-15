@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,7 @@ from continucare.ui import (
     DOCTOR_REJECT_BOUNDARY,
     build_doctor_modified_items,
     project_doctor_visit_brief,
+    render_disclosure_controls,
 )
 
 
@@ -137,6 +139,34 @@ def _first_layer_text(projection) -> str:
         *projection.not_produced,
     )
     return "\n".join(str(value) for value in values if value)
+
+
+class _DoctorDisclosureDOM(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.ids: list[tuple[str, dict[str, str | None]]] = []
+        self.controls: list[dict[str, str | None]] = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if "id" in attributes:
+            self.ids.append((tag, attributes))
+        if tag == "a" and "aria-controls" in attributes:
+            self.controls.append(attributes)
+
+
+class _DoctorDisclosureRenderer:
+    def __init__(self, query_params=None):
+        self.query_params = query_params or {}
+        self.fragments: list[str] = []
+
+    def markdown(self, value, **_kwargs):
+        self.fragments.append(str(value))
+
+    def dom(self):
+        parser = _DoctorDisclosureDOM()
+        parser.feed("\n".join(self.fragments))
+        return parser
 
 
 def test_demo_not_started_has_no_write_action():
@@ -475,3 +505,72 @@ def test_page_uses_pure_projection_guards_and_scoped_doctor_styles():
     assert "min-height:44px" in ui_source
     assert "@media (prefers-reduced-motion: reduce)" in ui_source
     assert 'aria-expanded="{str(active).lower()}"' in ui_source
+    assert 'panel_id="cc-doctor-source-panel"' in page_source
+
+
+def test_doctor_disclosure_renders_a_safe_collapsed_target_and_one_expanded_panel():
+    options = (("patient", "患者原话"), ("nursing", "护理动作"))
+    collapsed = _DoctorDisclosureRenderer()
+
+    assert render_disclosure_controls(
+        collapsed,
+        query_parameter="cc_doctor_source",
+        page_path="/doctor_summary",
+        options=options,
+        aria_label="复诊速览来源",
+        panel_id="cc-doctor-source-panel",
+        stacked=True,
+    ) is None
+    collapsed_dom = collapsed.dom()
+    assert [item["aria-expanded"] for item in collapsed_dom.controls] == [
+        "false",
+        "false",
+    ]
+    assert collapsed_dom.ids == [
+        (
+            "span",
+            {
+                "id": "cc-doctor-source-panel",
+                "class": "cc-disclosure-anchor",
+                "hidden": None,
+                "aria-hidden": "true",
+            },
+        )
+    ]
+
+    unknown = _DoctorDisclosureRenderer({"cc_doctor_source": "future-value"})
+    assert render_disclosure_controls(
+        unknown,
+        query_parameter="cc_doctor_source",
+        page_path="/doctor_summary",
+        options=options,
+        aria_label="复诊速览来源",
+        panel_id="cc-doctor-source-panel",
+        stacked=True,
+    ) is None
+    assert all(
+        item["aria-expanded"] == "false" for item in unknown.dom().controls
+    )
+
+    expanded = _DoctorDisclosureRenderer({"cc_doctor_source": "nursing"})
+    assert render_disclosure_controls(
+        expanded,
+        query_parameter="cc_doctor_source",
+        page_path="/doctor_summary",
+        options=options,
+        aria_label="复诊速览来源",
+        panel_id="cc-doctor-source-panel",
+        stacked=True,
+    ) == "nursing"
+    expanded.markdown(
+        '<section id="cc-doctor-source-panel"><h2>护理动作</h2></section>',
+        unsafe_allow_html=True,
+    )
+    expanded_dom = expanded.dom()
+    assert [item["aria-expanded"] for item in expanded_dom.controls] == [
+        "false",
+        "true",
+    ]
+    assert len(expanded_dom.ids) == 1
+    assert expanded_dom.ids[0][0] == "section"
+    assert "hidden" not in expanded_dom.ids[0][1]

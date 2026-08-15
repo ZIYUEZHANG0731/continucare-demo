@@ -5,6 +5,8 @@ import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,9 +37,11 @@ from continucare.services.manual_review_workflow import ManualReviewWorkflowServ
 from continucare.ui import (
     COMPETITION_STEP_LABELS,
     DEMO_GUIDE_STEPS,
+    clear_demo_session_state,
     project_demo_guide,
     render_competition_progress,
     render_demo_guide,
+    render_disclosure_controls,
 )
 
 
@@ -691,6 +695,141 @@ def test_explicit_restart_removes_the_old_chain_and_stale_writes_are_rejected(
     with pytest.raises(CompetitionDemoConflict, match="另一标签页重新开始"):
         with demo_write_guard(db_path, expected_generation=original.generation):
             pass
+
+
+def test_explicit_restart_clears_only_demo_and_current_role_browser_state():
+    session_state = {
+        "care::session-123::answer": "yes",
+        "semantic::confirmed::run-123": ["candidate-123"],
+        "manual_review_hint": "legacy",
+        "competition::reset_consent": True,
+        "care_submission_notice": "saved",
+        "cc_patient_pending_decision": {"action": "accept"},
+        "cc_patient_other_methods_toggle": True,
+        "cc_nurse_selected_task": "task-dynamic-123",
+        "cc_nurse_confirm_action": "task-dynamic-123:cancel",
+        "cc_nurse_stop_note_task-dynamic-123_cancel": "stop note",
+        "cc_nurse_outcome_task-dynamic-123": "evidence_consistent",
+        "cc_nurse_notice": "saved",
+        "cc_nurse_primary_button_task-dynamic-123_acknowledge": True,
+        "cc_doctor_feedback": "saved",
+        "cc_doctor_decisions_summary-dynamic-456_7": "modify",
+        "cc_doctor_modify_note_summary-dynamic-456_7": "wording note",
+        "cc_doctor_reject_note_summary-dynamic-456_7": "reject note",
+        "cc_doctor_technical_summary-dynamic-456_7": "Task/task-1",
+        "cc_knowledge_topic": "nausea",
+        "unrelated_application_key": "keep",
+    }
+    streamlit = SimpleNamespace(session_state=session_state)
+
+    clear_demo_session_state(streamlit)
+    clear_demo_session_state(streamlit)
+
+    assert session_state == {
+        "cc_knowledge_topic": "nausea",
+        "unrelated_application_key": "keep",
+    }
+
+
+def test_explicit_restart_is_safe_for_an_empty_session_state():
+    streamlit = SimpleNamespace(session_state={})
+
+    clear_demo_session_state(streamlit)
+    clear_demo_session_state(streamlit)
+
+    assert streamlit.session_state == {}
+
+
+class _DisclosureDOM(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.ids: list[tuple[str, dict[str, str | None]]] = []
+        self.controls: list[dict[str, str | None]] = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if "id" in attributes:
+            self.ids.append((tag, attributes))
+        if tag == "a" and "aria-controls" in attributes:
+            self.controls.append(attributes)
+
+
+class _DisclosureRenderer:
+    def __init__(self, query_params=None):
+        self.query_params = query_params or {}
+        self.fragments: list[str] = []
+
+    def markdown(self, value, **_kwargs):
+        self.fragments.append(str(value))
+
+    def dom(self) -> _DisclosureDOM:
+        parser = _DisclosureDOM()
+        parser.feed("\n".join(self.fragments))
+        return parser
+
+
+def test_disclosure_html_keeps_a_unique_real_target_in_every_state():
+    options = (("patient", "查看患者原话"), ("technical", "技术详情"))
+
+    collapsed = _DisclosureRenderer()
+    assert render_disclosure_controls(
+        collapsed,
+        query_parameter="view",
+        page_path="/example",
+        options=options,
+        aria_label="进一步查看",
+        panel_id="cc-example-panel",
+    ) is None
+    collapsed_dom = collapsed.dom()
+    assert [item[1]["id"] for item in collapsed_dom.ids] == ["cc-example-panel"]
+    assert collapsed_dom.ids[0][0] == "span"
+    assert collapsed_dom.ids[0][1]["hidden"] is None
+    assert collapsed_dom.ids[0][1]["aria-hidden"] == "true"
+    assert "tabindex" not in collapsed_dom.ids[0][1]
+    assert [item["aria-expanded"] for item in collapsed_dom.controls] == [
+        "false",
+        "false",
+    ]
+    assert [item["href"] for item in collapsed_dom.controls] == [
+        "/example?view=patient",
+        "/example?view=technical",
+    ]
+
+    expanded = _DisclosureRenderer({"view": "patient"})
+    assert render_disclosure_controls(
+        expanded,
+        query_parameter="view",
+        page_path="/example",
+        options=options,
+        aria_label="进一步查看",
+        panel_id="cc-example-panel",
+    ) == "patient"
+    expanded.markdown(
+        '<section id="cc-example-panel"><p>患者原话</p></section>',
+        unsafe_allow_html=True,
+    )
+    expanded_dom = expanded.dom()
+    assert [item[1]["id"] for item in expanded_dom.ids] == ["cc-example-panel"]
+    assert expanded_dom.ids[0][0] == "section"
+    assert "hidden" not in expanded_dom.ids[0][1]
+    assert [item["aria-expanded"] for item in expanded_dom.controls] == [
+        "true",
+        "false",
+    ]
+    assert expanded_dom.controls[0]["href"] == "/example?view="
+
+    unknown = _DisclosureRenderer({"view": "future-value"})
+    assert render_disclosure_controls(
+        unknown,
+        query_parameter="view",
+        page_path="/example",
+        options=options,
+        aria_label="进一步查看",
+        panel_id="cc-example-panel",
+    ) is None
+    unknown_dom = unknown.dom()
+    assert len(unknown_dom.ids) == 1
+    assert all(item["aria-expanded"] == "false" for item in unknown_dom.controls)
 
 
 def test_patient_page_no_longer_creates_a_session_on_load_and_knowledge_stays_isolated():

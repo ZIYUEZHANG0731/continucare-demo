@@ -236,42 +236,46 @@ def _render_disclosure(task: NurseTaskProjection, *, area: str) -> None:
         if area == "source"
         else (("history", "查看先前动作"), ("technical", "技术详情"))
     )
-    render_disclosure_controls(
+    panel_id = (
+        "cc-nurse-source-panel" if area == "source" else "cc-nurse-record-panel"
+    )
+    selected = render_disclosure_controls(
         st,
         query_parameter="cc_nurse_disclosure",
         page_path="/nurse_risk_center",
         options=options,
         selected=str(choice) if choice is not None else None,
         aria_label="护士任务来源" if area == "source" else "护士任务进一步查看",
-        panel_id="cc-nurse-disclosure-panel",
+        panel_id=panel_id,
     )
-    if area == "source" and choice == "patient":
+    if area == "source" and selected == "patient":
         quote = task.original_quote or "患者原话暂时无法读取。"
         st.markdown(
-            '<div id="cc-nurse-disclosure-panel" class="cc-nurse-result-boundary">'
+            f'<div id="{panel_id}" class="cc-nurse-result-boundary">'
             f"<strong>患者在本轮确认</strong><br>{html.escape(quote)}"
             "</div>",
             unsafe_allow_html=True,
         )
-    elif area == "record" and choice == "history":
-        st.markdown(
-            '<span id="cc-nurse-disclosure-panel" aria-hidden="true"></span>',
-            unsafe_allow_html=True,
-        )
-        if not task.history:
-            st.caption("还没有先前动作。")
-        for version, status, occurred_at in task.history:
-            st.markdown(
+    elif area == "record" and selected == "history":
+        history = "".join(
+            (
                 '<div class="cc-nurse-history">'
                 f"<strong>{html.escape(version)}</strong>"
                 f"<span>{html.escape(status)}</span>"
                 f"<span>{html.escape(occurred_at)}</span>"
-                "</div>",
-                unsafe_allow_html=True,
+                "</div>"
             )
-    elif area == "record" and choice == "technical":
+            for version, status, occurred_at in task.history
+        )
+        if not history:
+            history = "<p>还没有先前动作。</p>"
         st.markdown(
-            '<div id="cc-nurse-disclosure-panel" class="cc-nurse-technical">'
+            f'<section id="{panel_id}" aria-label="先前动作">{history}</section>',
+            unsafe_allow_html=True,
+        )
+    elif area == "record" and selected == "technical":
+        st.markdown(
+            f'<div id="{panel_id}" class="cc-nurse-technical">'
             f"Task：<code>{html.escape(task.task_id)}</code>"
             "</div>",
             unsafe_allow_html=True,

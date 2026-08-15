@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,26 @@ from continucare.ui import project_audit_trail
 ROOT = Path(__file__).parents[1]
 AUDIT_PAGE = ROOT / "pages" / "4_audit_log.py"
 UI_SOURCE = ROOT / "continucare" / "ui.py"
+
+
+class _AuditDOM(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.ids: list[tuple[str, dict[str, str | None]]] = []
+        self.controls: list[dict[str, str | None]] = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if "id" in attributes:
+            self.ids.append((tag, attributes))
+        if tag == "a" and "aria-controls" in attributes:
+            self.controls.append(attributes)
+
+
+def _rendered_dom(app) -> _AuditDOM:
+    parser = _AuditDOM()
+    parser.feed("\n".join(str(item.value) for item in app.markdown))
+    return parser
 
 
 TASK_STATUSES = {
@@ -543,3 +564,38 @@ def test_audit_page_is_read_only_and_uses_scoped_progressive_disclosure(monkeypa
     assert ".cc-audit-table" in ui_source
     assert "min-height:44px" in ui_source
     assert 'aria-expanded="{str(active).lower()}"' in ui_source
+
+    collapsed = _rendered_dom(app)
+    assert len(collapsed.controls) == 3
+    assert all(item["aria-expanded"] == "false" for item in collapsed.controls)
+    targets = [
+        item for item in collapsed.ids if item[1]["id"] == "cc-audit-disclosure-panel"
+    ]
+    assert len(targets) == 1
+    assert targets[0][0] == "span"
+    assert targets[0][1]["hidden"] is None
+    assert targets[0][1]["aria-hidden"] == "true"
+    assert "tabindex" not in targets[0][1]
+
+    app.query_params["cc_audit_disclosure"] = "why"
+    app.run()
+    expanded = _rendered_dom(app)
+    assert [item["aria-expanded"] for item in expanded.controls] == [
+        "true",
+        "false",
+        "false",
+    ]
+    targets = [
+        item for item in expanded.ids if item[1]["id"] == "cc-audit-disclosure-panel"
+    ]
+    assert len(targets) == 1
+    assert targets[0][0] == "section"
+    assert "hidden" not in targets[0][1]
+
+    app.query_params["cc_audit_disclosure"] = "future-value"
+    app.run()
+    unknown = _rendered_dom(app)
+    assert all(item["aria-expanded"] == "false" for item in unknown.controls)
+    assert sum(
+        item[1]["id"] == "cc-audit-disclosure-panel" for item in unknown.ids
+    ) == 1

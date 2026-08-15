@@ -2459,6 +2459,9 @@ def render_disclosure_controls(
     query_selected = st.query_params.get(query_parameter)
     if query_selected is not None:
         selected = str(query_selected)
+    valid_values = {value for value, _ in options}
+    if selected not in valid_values:
+        selected = None
     links = []
     for value, label in options:
         active = selected == value
@@ -2469,9 +2472,16 @@ def render_disclosure_controls(
             f"{html.escape(label)}</a>"
         )
     layout_class = " cc-disclosure-controls--stacked" if stacked else ""
+    collapsed_anchor = (
+        f'<span id="{html.escape(panel_id, quote=True)}" '
+        'class="cc-disclosure-anchor" hidden aria-hidden="true"></span>'
+        if selected is None
+        else ""
+    )
     st.markdown(
         f'<nav class="cc-disclosure-controls cc-disclosure-controls--{len(options)}{layout_class}" '
-        f'aria-label="{html.escape(aria_label, quote=True)}">{"".join(links)}</nav>',
+        f'aria-label="{html.escape(aria_label, quote=True)}">{"".join(links)}</nav>'
+        f"{collapsed_anchor}",
         unsafe_allow_html=True,
     )
     return selected
@@ -2501,6 +2511,7 @@ def inject_global_styles(st) -> None:
         .cc-disclosure-controls--2 {grid-template-columns:repeat(2, minmax(0, 1fr));}
         .cc-disclosure-controls--3 {grid-template-columns:repeat(3, minmax(0, 1fr));}
         .cc-disclosure-controls--stacked {grid-template-columns:1fr;}
+        .cc-disclosure-anchor {display:none !important;}
         .cc-disclosure-control {
             display:flex; align-items:center; justify-content:center; min-height:44px;
             padding:.5rem .65rem; border:1px solid var(--cc-accent); border-radius:5px;
@@ -3661,7 +3672,15 @@ def render_integration_status(st) -> None:
 def clear_demo_session_state(st) -> None:
     """Drop browser-only widget/navigation hints after an explicit reset."""
 
-    prefixes = ("care::", "semantic::", "manual_", "competition::")
+    prefixes = (
+        "care::",
+        "semantic::",
+        "manual_",
+        "competition::",
+        "cc_patient_",
+        "cc_nurse_",
+        "cc_doctor_",
+    )
     exact = {"care_submission_notice"}
     for key in list(st.session_state):
         if key in exact or key.startswith(prefixes):
