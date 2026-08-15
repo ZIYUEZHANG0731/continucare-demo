@@ -387,8 +387,11 @@ class ClinicalStateService:
             algorithm_version=self.ALGORITHM_VERSION,
             created_at=generated_text,
         )
-        self.repository.save_fhir_resource(provenance, patient_id=patient_id)
-        self.repository.save_contract(result)
+        self.repository.persist_state_snapshot_bundle(
+            expected_current=cast(ClinicalStateSnapshot | None, current),
+            snapshot=result,
+            provenance=provenance,
+        )
         return result
 
     def _eligible_points(

@@ -5,9 +5,13 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from continucare.layer4.contracts import (
+    ClinicalStateSnapshot,
     DoctorReview,
     Layer4ContractRecord,
     Layer4SummaryDraft,
+    MemoryEvent,
+    RevisionLink,
+    TimelineEvent,
 )
 from continucare.models import AuditEvent, FollowUpMessage
 
@@ -16,6 +20,22 @@ class Layer4Repository(Protocol):
     def save_fhir_resource(
         self, resource: dict[str, Any], *, patient_id: str | None
     ) -> dict[str, Any]: ...
+
+    def persist_fhir_creation_bundle(
+        self,
+        *,
+        resources: list[dict[str, Any]],
+        patient_id: str | None,
+    ) -> bool: ...
+
+    def persist_task_transition(
+        self,
+        *,
+        patient_id: str,
+        expected_task: dict[str, Any],
+        task: dict[str, Any],
+        provenance: dict[str, Any],
+    ) -> bool: ...
 
     def get_fhir_resource(
         self,
@@ -35,6 +55,38 @@ class Layer4Repository(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     def save_contract(self, record: Layer4ContractRecord) -> Layer4ContractRecord: ...
+
+    def persist_summary_bundle(
+        self,
+        *,
+        expected_current: Layer4SummaryDraft | None,
+        summary: Layer4SummaryDraft,
+        provenance: dict[str, Any],
+    ) -> bool: ...
+
+    def persist_state_snapshot_bundle(
+        self,
+        *,
+        expected_current: ClinicalStateSnapshot | None,
+        snapshot: ClinicalStateSnapshot,
+        provenance: dict[str, Any],
+    ) -> bool: ...
+
+    def persist_memory_projection_bundle(
+        self,
+        *,
+        memory: MemoryEvent,
+        timeline: TimelineEvent,
+        provenance: dict[str, Any],
+        revision_bundles: list[tuple[RevisionLink, dict[str, Any]]] | None = None,
+    ) -> bool: ...
+
+    def persist_revision_link_bundle(
+        self,
+        *,
+        link: RevisionLink,
+        provenance: dict[str, Any],
+    ) -> bool: ...
 
     def persist_doctor_review_bundle(
         self,

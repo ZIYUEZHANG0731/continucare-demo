@@ -42,6 +42,87 @@ from continucare.repositories import (
 from continucare.pathways.fhir_artifacts import load_glp1_questionnaire
 
 
+def _agent_run_values(record: AgentRunRecord) -> tuple:
+    return (
+        record.run_id,
+        record.task_id,
+        record.patient_id,
+        record.session_id,
+        record.agent_name,
+        record.agent_version,
+        record.mode,
+        record.input_text,
+        record.input_hash,
+        json.dumps(record.output_json, ensure_ascii=False),
+        record.status,
+        record.model_provider,
+        record.model_name,
+        record.prompt_version,
+        record.started_at,
+        record.completed_at,
+        record.error_code,
+    )
+
+
+def _insert_agent_run_row(
+    connection: sqlite3.Connection, record: AgentRunRecord
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO agent_runs (
+            run_id, task_id, patient_id, session_id, agent_name,
+            agent_version, mode, input_text, input_hash, output_json,
+            status, model_provider, model_name, prompt_version,
+            started_at, completed_at, error_code
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        _agent_run_values(record),
+    )
+
+
+def _agent_run_matches(row, record: AgentRunRecord) -> bool:
+    return bool(row is not None and row_to_agent_run(row) == record)
+
+
+def _audit_row_matches(row, event: AuditEvent) -> bool:
+    return bool(
+        row is not None
+        and row["patient_id"] == event.patient_id
+        and row["entity_type"] == event.entity_type
+        and row["entity_id"] == event.entity_id
+        and row["event_type"] == event.event_type
+        and row["actor_type"] == event.actor_type
+        and json.loads(row["details_json"]) == event.details_json
+        and row["created_at"] == event.created_at
+    )
+
+
+def _insert_audit_row(connection: sqlite3.Connection, event: AuditEvent) -> None:
+    connection.execute(
+        """
+        INSERT INTO audit_events (
+            event_id, patient_id, entity_type, entity_id, event_type,
+            actor_type, details_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event.event_id,
+            event.patient_id,
+            event.entity_type,
+            event.entity_id,
+            event.event_type,
+            event.actor_type,
+            json.dumps(
+                event.details_json,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            event.created_at,
+        ),
+    )
+
+
 class SQLiteStore:
     def __init__(self, db_path: Path | str, *, initialize: bool = True):
         self.db_path = Path(db_path)
@@ -147,35 +228,71 @@ class SQLiteStore:
 
     def save_agent_run(self, record: AgentRunRecord) -> None:
         with connect(self.db_path) as connection:
-            connection.execute(
-                """
-                INSERT INTO agent_runs (
-                    run_id, task_id, patient_id, session_id, agent_name,
-                    agent_version, mode, input_text, input_hash, output_json,
-                    status, model_provider, model_name, prompt_version,
-                    started_at, completed_at, error_code
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record.run_id,
-                    record.task_id,
-                    record.patient_id,
-                    record.session_id,
-                    record.agent_name,
-                    record.agent_version,
-                    record.mode,
-                    record.input_text,
-                    record.input_hash,
-                    json.dumps(record.output_json, ensure_ascii=False),
-                    record.status,
-                    record.model_provider,
-                    record.model_name,
-                    record.prompt_version,
-                    record.started_at,
-                    record.completed_at,
-                    record.error_code,
-                ),
-            )
+            _insert_agent_run_row(connection, record)
+
+    def persist_agent_run_bundle(
+        self,
+        *,
+        record: AgentRunRecord,
+        audit_events: list[AuditEvent],
+    ) -> bool:
+        """Persist one analysis result and its required audit facts atomically."""
+
+        if not audit_events:
+            raise ValueError("AgentRun bundle requires audit evidence")
+        if len({event.event_id for event in audit_events}) != len(audit_events):
+            raise ValueError("AgentRun bundle audit ids must be unique")
+        if any(event.patient_id != record.patient_id for event in audit_events):
+            raise ValueError("AgentRun bundle audit patient mismatch")
+        if any(
+            event.entity_type != "AgentRun" or event.entity_id != record.run_id
+            for event in audit_events
+        ):
+            raise ValueError("AgentRun bundle audit identity mismatch")
+        try:
+            with connect(self.db_path) as connection:
+                connection.execute("PRAGMA busy_timeout=0")
+                connection.execute("BEGIN IMMEDIATE")
+                run_row = connection.execute(
+                    "SELECT * FROM agent_runs WHERE run_id=?", (record.run_id,)
+                ).fetchone()
+                audit_rows = {
+                    event.event_id: connection.execute(
+                        "SELECT * FROM audit_events WHERE event_id=?",
+                        (event.event_id,),
+                    ).fetchone()
+                    for event in audit_events
+                }
+                if run_row is not None or any(
+                    row is not None for row in audit_rows.values()
+                ):
+                    if _agent_run_matches(run_row, record) and all(
+                        _audit_row_matches(audit_rows[event.event_id], event)
+                        for event in audit_events
+                    ):
+                        return False
+                    raise ConcurrentWriteConflict(
+                        "AgentRun bundle has a conflicting or partial replay"
+                    )
+                _insert_agent_run_row(connection, record)
+                self._agent_run_bundle_fault("after_run")
+                for event in audit_events:
+                    _insert_audit_row(connection, event)
+                    self._agent_run_bundle_fault(f"after_audit:{event.event_type}")
+                self._agent_run_bundle_fault("before_commit")
+            self._agent_run_bundle_fault("after_commit")
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_busy(exc):
+                raise ConcurrentWriteConflict(
+                    "AgentRun database is busy; retry the same request"
+                ) from exc
+            raise
+        return True
+
+    def _agent_run_bundle_fault(self, stage: str) -> None:
+        """Test seam for AgentRun rollback and post-commit replay."""
+
+        return None
 
     def get_agent_run(self, run_id: str) -> AgentRunRecord | None:
         with connect(self.db_path) as connection:
@@ -260,6 +377,7 @@ class SQLiteStore:
         response_text: str | None,
         resolved_at: str,
         audit_events: list[AuditEvent],
+        response_record: AgentRunRecord | None = None,
     ) -> bool:
         """CAS one ordinary M2/M3 patient decision as an atomic command."""
 
@@ -289,6 +407,12 @@ class SQLiteStore:
             raise ValueError("conversation material does not match source run/session")
         if answers is None and (answer_contexts or symptom_reports):
             raise ValueError("conversation material requires a draft answer update")
+        if response_record is not None and (
+            response_run_id != response_record.run_id
+            or response_record.patient_id != expected_session.patient_id
+            or response_record.session_id != expected_session.session_id
+        ):
+            raise ValueError("conversation decision response AgentRun mismatch")
 
         def payload(value) -> str:
             return json.dumps(
@@ -298,7 +422,10 @@ class SQLiteStore:
         expected_answers_payload = payload(expected_session.answers)
         target_answers_payload = payload(answers) if answers is not None else None
 
-        def audit_matches(row, event: AuditEvent) -> bool:
+        def replay_audit_matches(row, event: AuditEvent) -> bool:
+            # Patient button retries rebuild the command timestamp. The stable
+            # event identity and semantic payload, not that retry timestamp,
+            # determine whether this is the same already-committed decision.
             return bool(
                 row is not None
                 and row["patient_id"] == event.patient_id
@@ -306,8 +433,7 @@ class SQLiteStore:
                 and row["entity_id"] == event.entity_id
                 and row["event_type"] == event.event_type
                 and row["actor_type"] == event.actor_type
-                and payload(json.loads(row["details_json"]))
-                == payload(event.details_json)
+                and json.loads(row["details_json"]) == event.details_json
             )
 
         try:
@@ -332,18 +458,28 @@ class SQLiteStore:
                     or run_row["session_id"] != expected_session.session_id
                 ):
                     raise ValueError("conversation decision source AgentRun mismatch")
+                response_row = None
                 if response_run_id is not None:
-                    response_run = connection.execute(
-                        "SELECT patient_id, session_id FROM agent_runs WHERE run_id=?",
+                    response_row = connection.execute(
+                        "SELECT * FROM agent_runs WHERE run_id=?",
                         (response_run_id,),
                     ).fetchone()
-                    if (
-                        response_run is None
-                        or response_run["patient_id"] != expected_session.patient_id
-                        or response_run["session_id"] != expected_session.session_id
+                    if response_record is None:
+                        if (
+                            response_row is None
+                            or response_row["patient_id"]
+                            != expected_session.patient_id
+                            or response_row["session_id"]
+                            != expected_session.session_id
+                        ):
+                            raise ValueError(
+                                "conversation decision response AgentRun mismatch"
+                            )
+                    elif response_row is not None and not _agent_run_matches(
+                        response_row, response_record
                     ):
-                        raise ValueError(
-                            "conversation decision response AgentRun mismatch"
+                        raise ConcurrentWriteConflict(
+                            "conversation response AgentRun conflicts with replay"
                         )
                 result = json.loads(run_row["output_json"])
                 available_action_ids = {
@@ -394,7 +530,7 @@ class SQLiteStore:
                 }
                 any_audit = any(row is not None for row in audit_rows.values())
                 all_audits_exact = all(
-                    audit_matches(audit_rows[event.event_id], event)
+                    replay_audit_matches(audit_rows[event.event_id], event)
                     for event in audit_events
                 )
 
@@ -459,10 +595,19 @@ class SQLiteStore:
                         for row in [report_rows[report.report_id]]
                     )
                 )
-                if all_resolutions_exact and all_audits_exact and replay_domain_exact:
+                response_exact = response_record is None or _agent_run_matches(
+                    response_row, response_record
+                )
+                if (
+                    response_exact
+                    and all_resolutions_exact
+                    and all_audits_exact
+                    and replay_domain_exact
+                ):
                     return False
                 if (
-                    any_audit
+                    (response_record is not None and response_row is not None)
+                    or any_audit
                     or (bool(action_ids) and all_resolutions_exact)
                     or domain_rows_exist
                     or not (
@@ -486,6 +631,9 @@ class SQLiteStore:
                         "care session changed; refresh and retry"
                     )
 
+                if response_record is not None:
+                    _insert_agent_run_row(connection, response_record)
+                    self._conversation_decision_fault("after_response_run")
                 self._conversation_decision_fault("before_material")
                 for context in answer_contexts:
                     connection.execute(
@@ -647,28 +795,12 @@ class SQLiteStore:
                         )
                     self._conversation_decision_fault(f"after_resolution:{index}")
                 for event in audit_events:
-                    connection.execute(
-                        """
-                        INSERT INTO audit_events (
-                            event_id, patient_id, entity_type, entity_id, event_type,
-                            actor_type, details_json, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            event.event_id,
-                            event.patient_id,
-                            event.entity_type,
-                            event.entity_id,
-                            event.event_type,
-                            event.actor_type,
-                            payload(event.details_json),
-                            event.created_at,
-                        ),
-                    )
+                    _insert_audit_row(connection, event)
                     self._conversation_decision_fault(
                         f"after_audit:{event.event_type}"
                     )
                 self._conversation_decision_fault("before_commit")
+            self._conversation_decision_fault("after_commit")
         except sqlite3.OperationalError as exc:
             if is_sqlite_busy(exc):
                 raise ConcurrentWriteConflict(
@@ -681,6 +813,138 @@ class SQLiteStore:
         """Test seam for proving ordinary decision bundle rollback."""
 
         return None
+
+    def agent_run_has_audit(
+        self, record: AgentRunRecord, event_type: str
+    ) -> bool:
+        """Verify the minimum durable audit evidence required for a replay."""
+
+        with connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM audit_events
+                WHERE patient_id=? AND entity_type='AgentRun'
+                  AND entity_id=? AND event_type=?
+                LIMIT 1
+                """,
+                (record.patient_id, record.run_id, event_type),
+            ).fetchone()
+        return row is not None
+
+    def contextual_response_is_complete(
+        self,
+        *,
+        record: AgentRunRecord,
+        source_run_id: str,
+        action_ids: list[str],
+        decision: str,
+        applied_link_ids: list[str],
+        require_context_audit: bool,
+    ) -> bool:
+        """Fail-closed read check for a response and its decision effects."""
+
+        if (
+            not action_ids
+            or len(action_ids) != len(set(action_ids))
+            or decision not in {"accepted", "rejected", "unsure"}
+        ):
+            return False
+        placeholders = ",".join("?" for _ in action_ids)
+        with connect(self.db_path) as connection:
+            resolution_rows = connection.execute(
+                "SELECT * FROM conversation_action_resolutions "
+                f"WHERE action_id IN ({placeholders})",
+                tuple(action_ids),
+            ).fetchall()
+            if len(resolution_rows) != len(action_ids) or any(
+                row["source_run_id"] != source_run_id
+                or row["session_id"] != record.session_id
+                or row["response_run_id"] != record.run_id
+                or row["response_text"] != record.input_text
+                or row["decision"] != decision
+                for row in resolution_rows
+            ):
+                return False
+
+            decision_rows = connection.execute(
+                """
+                SELECT details_json FROM audit_events
+                WHERE patient_id=? AND entity_type='AgentRun'
+                  AND entity_id=?
+                  AND event_type='semantic_candidate_patient_decision'
+                  AND created_at=?
+                """,
+                (
+                    record.patient_id,
+                    source_run_id,
+                    record.completed_at,
+                ),
+            ).fetchall()
+            if not decision_rows:
+                return False
+
+            if require_context_audit:
+                context_rows = connection.execute(
+                    """
+                    SELECT details_json FROM audit_events
+                    WHERE patient_id=? AND entity_type='AgentRun'
+                      AND entity_id=?
+                      AND event_type='conversation_context_resolved'
+                    """,
+                    (record.patient_id, record.run_id),
+                ).fetchall()
+                expected_actions = sorted(action_ids)
+                expected_links = sorted(applied_link_ids)
+                if not any(
+                    (details := json.loads(row["details_json"]))
+                    .get("session_id")
+                    == record.session_id
+                    and details.get("source_run_id") == source_run_id
+                    and sorted(details.get("action_ids", [])) == expected_actions
+                    and details.get("decision") == decision
+                    and sorted(details.get("applied_link_ids", []))
+                    == expected_links
+                    for row in context_rows
+                ):
+                    return False
+
+            if applied_link_ids:
+                session_row = connection.execute(
+                    "SELECT answers_json FROM care_sessions WHERE session_id=?",
+                    (record.session_id,),
+                ).fetchone()
+                if session_row is None:
+                    return False
+                answers = json.loads(session_row["answers_json"])
+                for link_id in applied_link_ids:
+                    if link_id.startswith("patient-reported-symptom::"):
+                        concept_id = link_id.removeprefix(
+                            "patient-reported-symptom::"
+                        )
+                        material = connection.execute(
+                            """
+                            SELECT 1 FROM confirmed_symptom_reports
+                            WHERE session_id=? AND concept_id=?
+                              AND source_run_id=?
+                            LIMIT 1
+                            """,
+                            (record.session_id, concept_id, source_run_id),
+                        ).fetchone()
+                    else:
+                        if link_id not in answers:
+                            return False
+                        material = connection.execute(
+                            """
+                            SELECT 1 FROM confirmed_answer_contexts
+                            WHERE session_id=? AND link_id=?
+                              AND source_run_id=?
+                            LIMIT 1
+                            """,
+                            (record.session_id, link_id, source_run_id),
+                        ).fetchone()
+                    if material is None:
+                        return False
+        return True
 
     def conversation_action_decisions(self, session_id: str) -> dict[str, str]:
         with connect(self.db_path) as connection:

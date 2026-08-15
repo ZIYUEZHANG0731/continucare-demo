@@ -69,13 +69,14 @@ from continucare.care_agent.temporal import (
 from continucare.care_engine import CareEngine
 from continucare.config import get_settings
 from continucare.db import utc_now_iso
+from continucare.errors import ConcurrentWriteConflict
 from continucare.fhir.questionnaires import (
     build_questionnaire_response,
     flatten_questionnaire_items,
 )
-from continucare.services.audit import record_audit_event
 from continucare.services.audit import build_audit_event
 from continucare.models import (
+    AuditEvent,
     CareSession,
     ConfirmedAnswerContext,
     ConfirmedSymptomReport,
@@ -194,20 +195,13 @@ class CareAgentService:
                     and latest_temporal.local_date
                     == task.temporal_context.local_date
                 ):
-                    return SemanticInteraction(
-                        task=task.model_copy(update={"task_id": latest_record.task_id}),
-                        result=latest_result,
-                        record=latest_record,
-                        idempotent_replay=True,
+                    return self._verified_replay(
+                        task.model_copy(update={"task_id": latest_record.task_id}),
+                        latest_record,
                     )
         existing = self.store.get_agent_run_by_task(task.task_id)
         if existing:
-            return SemanticInteraction(
-                task=task,
-                result=SemanticResult.model_validate(existing.output_json),
-                record=existing,
-                idempotent_replay=True,
-            )
+            return self._verified_replay(task, existing)
 
         contextual = self._contextual_resolution(task)
         if contextual is not None:
@@ -221,7 +215,6 @@ class CareAgentService:
                 agent_version=self.agent.VERSION,
             )
             record = self._record(task, outcome)
-            self.store.save_agent_run(record)
             if candidates:
                 plan = self.prepare_confirmed_candidates(
                     source_record.run_id,
@@ -255,6 +248,7 @@ class CareAgentService:
                 persist_answers=bool(candidates),
                 response_run_id=record.run_id,
                 response_text=task.message_text,
+                response_record=record,
                 context_audit_details=(
                     {
                         "session_id": task.session_id,
@@ -317,7 +311,6 @@ class CareAgentService:
             idempotent_replay=care_outcome.idempotent_replay,
         )
         record = self._record(task, outcome)
-        self.store.save_agent_run(record)
         bindings_by_run: dict[str, set[str]] = {}
         for candidate in outcome.result.candidates:
             binding = candidate.context_binding
@@ -325,7 +318,11 @@ class CareAgentService:
                 bindings_by_run.setdefault(binding.source_run_id, set()).add(
                     binding.source_action_id
                 )
-        for source_run_id, bound_action_ids in bindings_by_run.items():
+        if len(bindings_by_run) > 1:
+            raise ValueError("一条回复不能同时关闭多个历史 Agent 运行的待办")
+        analysis_audit = self._semantic_analysis_audit(task, record, outcome.result)
+        if bindings_by_run:
+            source_run_id, bound_action_ids = next(iter(bindings_by_run.items()))
             source_record = self.store.get_agent_run(source_run_id)
             if source_record is None:
                 raise ValueError("上下文候选引用的 Agent 运行记录不存在")
@@ -348,31 +345,58 @@ class CareAgentService:
                 persist_answers=False,
                 response_run_id=record.run_id,
                 response_text=task.message_text,
+                response_record=record,
+                additional_audit_events=[analysis_audit],
             )
-        record_audit_event(
-            self.store,
-            patient_id=session.patient_id,
+        else:
+            self.store.persist_agent_run_bundle(
+                record=record,
+                audit_events=[analysis_audit],
+            )
+        return SemanticInteraction(
+            task=task,
+            result=outcome.result,
+            record=record,
+            idempotent_replay=outcome.idempotent_replay,
+        )
+
+    def _semantic_analysis_audit(
+        self,
+        task: SemanticTask,
+        record: AgentRunRecord,
+        result: SemanticResult,
+    ) -> AuditEvent:
+        """Build the deterministic audit fact owned by an AgentRun bundle."""
+
+        event_id = "audit-" + uuid5(
+            NAMESPACE_URL,
+            f"{record.run_id}|semantic_analysis_completed",
+        ).hex
+        return build_audit_event(
+            event_id=event_id,
+            patient_id=record.patient_id,
             entity_type="AgentRun",
             entity_id=record.run_id,
             event_type="semantic_analysis_completed",
             actor_type="controlled_care_agent",
+            created_at=record.completed_at,
             details={
-                "session_id": session.session_id,
+                "session_id": record.session_id,
                 "task_id": task.task_id,
                 "mode": record.mode,
                 "status": record.status,
                 "candidate_link_ids": [
-                    item.link_id for item in outcome.result.candidates
+                    item.link_id for item in result.candidates
                 ],
-                "clarification_count": len(outcome.result.clarifications),
-                "safety_violation_count": len(outcome.result.safety_violations),
+                "clarification_count": len(result.clarifications),
+                "safety_violation_count": len(result.safety_violations),
                 "candidate_issues": [
                     {
                         "link_id": issue.link_id,
                         "action": issue.action.value,
                         "reason_codes": issue.reason_codes,
                     }
-                    for issue in outcome.result.candidate_issues
+                    for issue in result.candidate_issues
                 ],
                 "agent_stages": [
                     {
@@ -384,21 +408,75 @@ class CareAgentService:
                         "model_usage": trace.model_usage,
                         "latency_ms": trace.latency_ms,
                     }
-                    for trace in outcome.result.stage_traces
+                    for trace in result.stage_traces
                 ],
-                "model_usage": outcome.result.model_usage,
-                "provider_request_id": outcome.result.provider_request_id,
+                "model_usage": result.model_usage,
+                "provider_request_id": result.provider_request_id,
                 "patient_confirmation_required": True,
                 "followup_occurrence_id": task.temporal_context.followup_occurrence_id,
                 "patient_timezone": task.temporal_context.patient_timezone,
                 "received_at_local": task.temporal_context.received_at_local,
             },
         )
+
+    def _verified_replay(
+        self, task: SemanticTask, record: AgentRunRecord
+    ) -> SemanticInteraction:
+        """Return only complete durable results; never bless an orphaned run."""
+
+        result = SemanticResult.model_validate(record.output_json)
+        if (
+            record.patient_id != task.patient_id
+            or record.session_id != task.session_id
+            or result.run_id != record.run_id
+            or result.task_id != record.task_id
+        ):
+            raise ConcurrentWriteConflict(
+                "stored AgentRun identity is inconsistent; replay is blocked"
+            )
+        resolution = result.context_resolution
+        if resolution is not None:
+            complete = self.store.contextual_response_is_complete(
+                record=record,
+                source_run_id=resolution.source_run_id,
+                action_ids=resolution.action_ids,
+                decision=resolution.decision.value,
+                applied_link_ids=resolution.applied_link_ids,
+                require_context_audit=True,
+            )
+        else:
+            complete = self.store.agent_run_has_audit(
+                record, "semantic_analysis_completed"
+            )
+            bindings_by_run: dict[str, set[str]] = {}
+            for candidate in result.candidates:
+                binding = candidate.context_binding
+                if binding is not None:
+                    bindings_by_run.setdefault(binding.source_run_id, set()).add(
+                        binding.source_action_id
+                    )
+            if len(bindings_by_run) > 1:
+                complete = False
+            elif bindings_by_run:
+                source_run_id, action_ids = next(iter(bindings_by_run.items()))
+                complete = complete and self.store.contextual_response_is_complete(
+                    record=record,
+                    source_run_id=source_run_id,
+                    action_ids=sorted(action_ids),
+                    decision=ContextResolutionDecision.ACCEPTED.value,
+                    applied_link_ids=[],
+                    require_context_audit=False,
+                )
+        if not complete:
+            raise ConcurrentWriteConflict(
+                "stored AgentRun is missing required decision or audit effects; "
+                "replay is blocked"
+            )
         return SemanticInteraction(
             task=task,
-            result=outcome.result,
+            result=result,
             record=record,
-            idempotent_replay=outcome.idempotent_replay,
+            idempotent_replay=True,
         )
 
     def _contextual_answer_candidate(
@@ -1810,6 +1888,8 @@ class CareAgentService:
         persist_answers: bool = True,
         response_run_id: str | None = None,
         response_text: str | None = None,
+        response_record: AgentRunRecord | None = None,
+        additional_audit_events: list[AuditEvent] | None = None,
         context_audit_details: dict[str, Any] | None = None,
     ) -> CareSession:
         """Validate a draft and hand one immutable decision bundle to SQLite."""
@@ -1836,7 +1916,7 @@ class CareAgentService:
             separators=(",", ":"),
         )
         identity = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()
-        audits = []
+        audits = list(additional_audit_events or [])
         if persist_answers:
             audits.append(
                 build_audit_event(
@@ -1895,6 +1975,7 @@ class CareAgentService:
             response_text=response_text,
             resolved_at=plan.resolved_at,
             audit_events=audits,
+            response_record=response_record,
         )
         session = self.store.get_care_session(plan.record.session_id)
         if session is None:

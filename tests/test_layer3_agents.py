@@ -686,3 +686,167 @@ def test_unsure_action_can_be_finalized_once_as_rejected(tmp_path):
     assert _resolution_row(store, clarification.clarification_id) == resolution_before
     assert _business_state(store, session.session_id) == business_before
     assert _audit_state(store) == audit_before
+
+
+def test_context_response_fault_after_run_rolls_back_and_retry_completes(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    source = service.analyze(
+        session.session_id,
+        "过去24小时我吐了2次，现在有点恶心。",
+        received_at="2026-08-02T01:00:00+00:00",
+    )
+    action_ids = [item.candidate_id for item in source.result.candidates]
+    runs_before = store.list_agent_runs(session.session_id)
+    audits_before = _audit_state(store)
+
+    def inject(stage):
+        if stage == "after_response_run":
+            raise RuntimeError("fault:after_response_run")
+
+    store._conversation_decision_fault = inject
+    with pytest.raises(RuntimeError, match="after_response_run"):
+        service.analyze(
+            session.session_id,
+            "都正确",
+            received_at="2026-08-02T01:01:00+00:00",
+        )
+
+    assert store.list_agent_runs(session.session_id) == runs_before
+    assert _audit_state(store) == audits_before
+    assert _resolution_rows(store, action_ids) == {
+        action_id: None for action_id in action_ids
+    }
+    assert store.get_care_session(session.session_id).answers == {}
+
+    store._conversation_decision_fault = lambda stage: None
+    replay = service.analyze(
+        session.session_id,
+        "都正确",
+        received_at="2026-08-02T01:01:00+00:00",
+    )
+    assert replay.result.status == SemanticStatus.CONTEXT_RESOLVED
+    assert len(store.list_agent_runs(session.session_id)) == len(runs_before) + 1
+    assert set(store.get_care_session(session.session_id).answers) >= {
+        "vomiting-count-24h",
+        "nausea-present",
+        "nausea-severity",
+    }
+
+
+def test_context_response_after_commit_replays_without_duplicate_effects(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    source = service.analyze(
+        session.session_id,
+        "过去24小时我吐了2次，现在有点恶心。",
+        received_at="2026-08-02T01:00:00+00:00",
+    )
+    action_ids = [item.candidate_id for item in source.result.candidates]
+
+    def inject(stage):
+        if stage == "after_commit":
+            raise RuntimeError("fault:after_commit")
+
+    store._conversation_decision_fault = inject
+    with pytest.raises(RuntimeError, match="after_commit"):
+        service.analyze(
+            session.session_id,
+            "都正确",
+            received_at="2026-08-02T01:01:00+00:00",
+        )
+    committed_state = _business_state(store, session.session_id)
+    committed_audits = _audit_state(store)
+    committed_resolutions = _resolution_rows(store, action_ids)
+
+    store._conversation_decision_fault = lambda stage: None
+    replay = service.analyze(
+        session.session_id,
+        "都正确",
+        received_at="2026-08-02T01:01:00+00:00",
+    )
+
+    assert replay.idempotent_replay is True
+    assert _business_state(store, session.session_id) == committed_state
+    assert _audit_state(store) == committed_audits
+    assert _resolution_rows(store, action_ids) == committed_resolutions
+
+
+def test_context_response_partial_history_is_never_blessed_as_replay(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    service.analyze(
+        session.session_id,
+        "过去24小时我吐了2次，现在有点恶心。",
+        received_at="2026-08-02T01:00:00+00:00",
+    )
+    response = service.analyze(
+        session.session_id,
+        "都正确",
+        received_at="2026-08-02T01:01:00+00:00",
+    )
+    missing_action = response.result.context_resolution.action_ids[0]
+    with connect(store.db_path) as connection:
+        connection.execute(
+            "DELETE FROM conversation_action_resolutions WHERE action_id=?",
+            (missing_action,),
+        )
+
+    with pytest.raises(ConcurrentWriteConflict, match="replay is blocked"):
+        service.analyze(
+            session.session_id,
+            "都正确",
+            received_at="2026-08-02T01:01:00+00:00",
+        )
+
+
+def test_agent_run_bundle_rollback_and_post_commit_replay(tmp_path):
+    store, _, session, service = _service(tmp_path)
+
+    def rollback_fault(stage):
+        if stage == "after_run":
+            raise RuntimeError("fault:after_run")
+
+    store._agent_run_bundle_fault = rollback_fault
+    with pytest.raises(RuntimeError, match="after_run"):
+        service.analyze(session.session_id, "我现在没有腹痛。")
+    assert store.list_agent_runs(session.session_id) == []
+    assert not any(
+        event.event_type == "semantic_analysis_completed"
+        for event in store.list_audit_events(DEMO_PATIENT_ID)
+    )
+
+    def commit_fault(stage):
+        if stage == "after_commit":
+            raise RuntimeError("fault:after_commit")
+
+    store._agent_run_bundle_fault = commit_fault
+    with pytest.raises(RuntimeError, match="after_commit"):
+        service.analyze(session.session_id, "我现在没有腹痛。")
+    committed_runs = store.list_agent_runs(session.session_id)
+    committed_audits = _audit_state(store)
+    assert len(committed_runs) == 1
+
+    store._agent_run_bundle_fault = lambda stage: None
+    replay = service.analyze(session.session_id, "我现在没有腹痛。")
+    assert replay.idempotent_replay is True
+    assert store.list_agent_runs(session.session_id) == committed_runs
+    assert _audit_state(store) == committed_audits
+
+
+def test_agent_run_bundle_rejects_audit_for_another_run(tmp_path):
+    store, _, session, service = _service(tmp_path)
+    interaction = service.analyze(session.session_id, "我现在没有腹痛。")
+    audit = next(
+        event
+        for event in store.list_audit_events(DEMO_PATIENT_ID)
+        if event.event_type == "semantic_analysis_completed"
+    ).model_copy(
+        update={
+            "event_id": "audit-agent-run-identity-mismatch",
+            "entity_id": "run-another-analysis",
+        }
+    )
+
+    with pytest.raises(ValueError, match="audit identity mismatch"):
+        store.persist_agent_run_bundle(
+            record=interaction.record,
+            audit_events=[audit],
+        )

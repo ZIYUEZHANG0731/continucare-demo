@@ -129,7 +129,6 @@ class TaskWorkflowService:
         updated = validate_layer4_fhir_resource(
             updated, expected_resource_type="Task"
         )
-        self.repository.save_fhir_resource(updated, patient_id=patient_id)
 
         transition_id = _stable_id(
             "task-transition", task_id, current_version, next_version
@@ -148,7 +147,12 @@ class TaskWorkflowService:
                 f"Task/{task_id}/_history/{current_version}"
             ],
         )
-        self.repository.save_fhir_resource(provenance, patient_id=patient_id)
+        self.repository.persist_task_transition(
+            patient_id=patient_id,
+            expected_task=current,
+            task=updated,
+            provenance=provenance,
+        )
         return TaskTransitionResult(
             transition_id=transition_id,
             patient_id=patient_id,

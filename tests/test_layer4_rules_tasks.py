@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from threading import Barrier
 
 import pytest
 
+from continucare.errors import ConcurrentWriteConflict
 from continucare.fhir.observations import (
     build_patient_reported_observation,
     per_day_quantity,
@@ -634,3 +637,201 @@ def test_generated_and_transitioned_tasks_pass_official_schema_when_available(
         patient_id=PATIENT_ID, current_only=False
     ):
         validate_official_json_schema(resource, schema_path)
+
+
+def test_rule_task_creation_bundle_rolls_back_and_replays_after_commit(tmp_path):
+    repository = Layer4SQLiteStore(tmp_path / "rule-creation-atomic.db")
+    repository.save_contract(_rule())
+    engine = _engine(repository)
+
+    def rollback_fault(stage):
+        if stage == "after_resource:0":
+            raise RuntimeError("fault:after_resource:0")
+
+    repository._fhir_creation_bundle_fault = rollback_fault
+    with pytest.raises(RuntimeError, match="after_resource:0"):
+        _evaluate(engine, [_observation()])
+    assert repository.list_fhir_resources(
+        patient_id=PATIENT_ID, resource_type="Task", current_only=False
+    ) == []
+    assert repository.list_fhir_resources(
+        patient_id=PATIENT_ID, resource_type="Provenance", current_only=False
+    ) == []
+
+    def commit_fault(stage):
+        if stage == "after_commit":
+            raise RuntimeError("fault:after_commit")
+
+    repository._fhir_creation_bundle_fault = commit_fault
+    with pytest.raises(RuntimeError, match="after_commit"):
+        _evaluate(engine, [_observation()])
+    tasks = repository.list_fhir_resources(
+        patient_id=PATIENT_ID, resource_type="Task", current_only=False
+    )
+    provenance = repository.list_fhir_resources(
+        patient_id=PATIENT_ID, resource_type="Provenance", current_only=False
+    )
+    assert len(tasks) == 1
+    assert len(provenance) == 1
+
+    repository._fhir_creation_bundle_fault = lambda stage: None
+    replay = _evaluate(engine, [_observation()])
+    assert replay.task_references == [f"Task/{tasks[0]['id']}"]
+    assert len(
+        repository.list_fhir_resources(
+            patient_id=PATIENT_ID, resource_type="Task", current_only=False
+        )
+    ) == 1
+    assert len(
+        repository.list_fhir_resources(
+            patient_id=PATIENT_ID,
+            resource_type="Provenance",
+            current_only=False,
+        )
+    ) == 1
+
+
+def test_task_transition_bundle_rolls_back_and_replays_after_commit(tmp_path):
+    repository = Layer4SQLiteStore(tmp_path / "task-transition-atomic.db")
+    repository.save_contract(_rule())
+    evaluation = _evaluate(_engine(repository), [_observation()])
+    task_id = evaluation.task_references[0].removeprefix("Task/")
+    workflow = TaskWorkflowService(repository)
+    transition = {
+        "patient_id": PATIENT_ID,
+        "task_id": task_id,
+        "to_status": "received",
+        "actor_reference": "PractitionerRole/nurse",
+        "note": "原子事务故障注入。",
+        "transitioned_at": "2026-08-02T12:05:00+00:00",
+    }
+    provenance_before = repository.list_fhir_resources(
+        patient_id=PATIENT_ID, resource_type="Provenance", current_only=False
+    )
+
+    def rollback_fault(stage):
+        if stage == "after_task":
+            raise RuntimeError("fault:after_task")
+
+    repository._task_transition_fault = rollback_fault
+    with pytest.raises(RuntimeError, match="after_task"):
+        workflow.transition(**transition)
+    current = repository.get_fhir_resource("Task", task_id)
+    assert current["status"] == "requested"
+    assert current["meta"]["versionId"] == "1"
+    assert repository.list_fhir_resources(
+        patient_id=PATIENT_ID, resource_type="Provenance", current_only=False
+    ) == provenance_before
+
+    def commit_fault(stage):
+        if stage == "after_commit":
+            raise RuntimeError("fault:after_commit")
+
+    repository._task_transition_fault = commit_fault
+    with pytest.raises(RuntimeError, match="after_commit"):
+        workflow.transition(**transition)
+    committed = repository.get_fhir_resource("Task", task_id)
+    assert committed["status"] == "received"
+    assert committed["meta"]["versionId"] == "2"
+
+    repository._task_transition_fault = lambda stage: None
+    replay = workflow.transition(**transition)
+    assert replay.to_version == "2"
+    assert len(
+        repository.list_fhir_resources(
+            patient_id=PATIENT_ID, resource_type="Task", current_only=False
+        )
+    ) == 2
+    assert len(
+        repository.list_fhir_resources(
+            patient_id=PATIENT_ID,
+            resource_type="Provenance",
+            current_only=False,
+        )
+    ) == len(provenance_before) + 1
+
+
+def test_concurrent_task_creation_has_one_complete_bundle(tmp_path):
+    repository = Layer4SQLiteStore(tmp_path / "rule-creation-concurrent.db")
+    repository.save_contract(_rule())
+    engines = [_engine(repository), _engine(repository)]
+    barrier = Barrier(2)
+    original = repository.persist_fhir_creation_bundle
+
+    def synchronized(**kwargs):
+        barrier.wait(timeout=5)
+        return original(**kwargs)
+
+    repository.persist_fhir_creation_bundle = synchronized
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(_evaluate, engine, [_observation()])
+            for engine in engines
+        ]
+    outcomes = []
+    conflicts = []
+    for future in futures:
+        try:
+            outcomes.append(future.result())
+        except ConcurrentWriteConflict as exc:
+            conflicts.append(exc)
+
+    assert len(outcomes) + len(conflicts) == 2
+    assert outcomes
+    tasks = repository.list_fhir_resources(
+        patient_id=PATIENT_ID, resource_type="Task", current_only=False
+    )
+    provenance = repository.list_fhir_resources(
+        patient_id=PATIENT_ID, resource_type="Provenance", current_only=False
+    )
+    assert len(tasks) == 1
+    assert len(provenance) == 1
+
+
+def test_concurrent_same_task_transition_has_one_complete_version(tmp_path):
+    repository = Layer4SQLiteStore(tmp_path / "task-transition-concurrent.db")
+    repository.save_contract(_rule())
+    evaluation = _evaluate(_engine(repository), [_observation()])
+    task_id = evaluation.task_references[0].removeprefix("Task/")
+    barrier = Barrier(2)
+    original = repository.persist_task_transition
+
+    def synchronized(**kwargs):
+        barrier.wait(timeout=5)
+        return original(**kwargs)
+
+    repository.persist_task_transition = synchronized
+    arguments = {
+        "patient_id": PATIENT_ID,
+        "task_id": task_id,
+        "to_status": "received",
+        "actor_reference": "PractitionerRole/nurse",
+        "note": "并发原子事务测试。",
+        "transitioned_at": "2026-08-02T12:05:00+00:00",
+    }
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(TaskWorkflowService(repository).transition, **arguments)
+            for _ in range(2)
+        ]
+    outcomes = []
+    conflicts = []
+    for future in futures:
+        try:
+            outcomes.append(future.result())
+        except ConcurrentWriteConflict as exc:
+            conflicts.append(exc)
+
+    assert len(outcomes) + len(conflicts) == 2
+    assert outcomes
+    versions = repository.list_fhir_resources(
+        patient_id=PATIENT_ID, resource_type="Task", current_only=False
+    )
+    assert [item["meta"]["versionId"] for item in versions] == ["2", "1"]
+    assert len(
+        repository.list_fhir_resources(
+            patient_id=PATIENT_ID,
+            resource_type="Provenance",
+            current_only=False,
+        )
+    ) == 2

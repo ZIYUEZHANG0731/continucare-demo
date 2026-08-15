@@ -189,8 +189,11 @@ class EvidenceSummaryService:
             generator_version=self.GENERATOR_VERSION,
             created_at=generated_at,
         )
-        self.repository.save_fhir_resource(provenance, patient_id=patient_id)
-        self.repository.save_contract(summary)
+        self.repository.persist_summary_bundle(
+            expected_current=cast(Layer4SummaryDraft | None, current),
+            summary=summary,
+            provenance=provenance,
+        )
         return summary
 
     @staticmethod

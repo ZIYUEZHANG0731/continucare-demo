@@ -444,6 +444,32 @@ class ClinicalMemoryService:
         actor_reference: str,
         recorded_at: str,
     ) -> RevisionLink:
+        link, provenance = self._build_revision_bundle(
+            patient_id=patient_id,
+            predecessor=predecessor,
+            successor=successor,
+            relationship=relationship,
+            reason=reason,
+            actor_reference=actor_reference,
+            recorded_at=recorded_at,
+        )
+        self.repository.persist_revision_link_bundle(
+            link=link,
+            provenance=provenance,
+        )
+        return link
+
+    @staticmethod
+    def _build_revision_bundle(
+        *,
+        patient_id: str,
+        predecessor: ResourceReference,
+        successor: ResourceReference,
+        relationship: RevisionRelationship,
+        reason: str,
+        actor_reference: str,
+        recorded_at: str,
+    ) -> tuple[RevisionLink, dict[str, Any]]:
         link_id = _stable_id(
             "revision",
             patient_id,
@@ -463,7 +489,6 @@ class ClinicalMemoryService:
             activity_display=relationship.value,
             entity_source_references=[_versioned_reference(predecessor)],
         )
-        self.repository.save_fhir_resource(provenance, patient_id=patient_id)
         link = RevisionLink(
             link_id=link_id,
             patient_id=patient_id,
@@ -475,8 +500,7 @@ class ClinicalMemoryService:
             provenance_reference=f"Provenance/{provenance_id}",
             created_at=recorded_at,
         )
-        self.repository.save_contract(link)
-        return link
+        return link, provenance
 
     def _revision_states(self, patient_id: str) -> dict[str, TimelineEventState]:
         scoped_memory = self.repository.list_contracts(
@@ -557,7 +581,16 @@ class ClinicalMemoryService:
                 )
             )
         entered_in_error = resource.get("status") == "entered-in-error"
-        result = self._persist_event(
+        revision_bundles = (
+            self._workflow_revision_bundles(
+                patient_id=patient_id,
+                successor=source,
+                recorded_at=recorded_at,
+            )
+            if resource["resourceType"] in {"Communication", "Task"}
+            else []
+        )
+        return self._persist_event(
             patient_id=patient_id,
             kind=_event_kind(resource["resourceType"]),
             source=source,
@@ -574,14 +607,8 @@ class ClinicalMemoryService:
                 else TimelineEventState.CURRENT
             ),
             current=not entered_in_error,
+            revision_bundles=revision_bundles,
         )
-        if resource["resourceType"] in {"Communication", "Task"}:
-            self._supersede_prior_workflow_versions(
-                patient_id=patient_id,
-                successor=source,
-                recorded_at=recorded_at,
-            )
-        return result
 
     def _persist_audit_event(
         self, audit: AuditEvent
@@ -626,6 +653,7 @@ class ClinicalMemoryService:
         current: bool = True,
         conflict_group_id: str | None = None,
         expectation_id: str | None = None,
+        revision_bundles: list[tuple[RevisionLink, dict[str, Any]]] | None = None,
     ) -> tuple[MemoryEvent, TimelineEvent, str]:
         source_version = _versioned_reference(source)
         deduplication_key = "|".join(
@@ -656,7 +684,6 @@ class ClinicalMemoryService:
             activity_display="deterministic projection",
             entity_source_references=[source_version],
         )
-        self.repository.save_fhir_resource(provenance, patient_id=patient_id)
         provenance_reference = ResourceReference(
             reference=f"Provenance/{provenance_id}", version_id="1"
         )
@@ -696,30 +723,37 @@ class ClinicalMemoryService:
             conflict_group_id=conflict_group_id,
             expectation_id=expectation_id,
         )
-        self.repository.save_contract(memory)
-        self.repository.save_contract(timeline)
+        self.repository.persist_memory_projection_bundle(
+            memory=memory,
+            timeline=timeline,
+            provenance=provenance,
+            revision_bundles=revision_bundles,
+        )
         return memory, timeline, provenance_id
 
-    def _supersede_prior_workflow_versions(
+    def _workflow_revision_bundles(
         self,
         *,
         patient_id: str,
         successor: ResourceReference,
         recorded_at: str,
-    ) -> None:
+    ) -> list[tuple[RevisionLink, dict[str, Any]]]:
         records = self.repository.list_contracts(
             "memory_event", patient_id=patient_id, current_only=True
         )
-        for record in records:
-            event = cast(MemoryEvent, record)
-            if (
-                event.pathway_code != self.pathway_code
-                or event.pathway_version != self.pathway_version
-                or event.source.reference != successor.reference
-                or event.source.version_id == successor.version_id
-            ):
-                continue
-            self.record_revision(
+        prior = sorted(
+            (
+                cast(MemoryEvent, record)
+                for record in records
+                if cast(MemoryEvent, record).pathway_code == self.pathway_code
+                and cast(MemoryEvent, record).pathway_version == self.pathway_version
+                and cast(MemoryEvent, record).source.reference == successor.reference
+                and cast(MemoryEvent, record).source.version_id != successor.version_id
+            ),
+            key=lambda item: _versioned_reference(item.source),
+        )
+        return [
+            self._build_revision_bundle(
                 patient_id=patient_id,
                 predecessor=event.source,
                 successor=successor,
@@ -728,6 +762,8 @@ class ClinicalMemoryService:
                 actor_reference=MEMORY_AGENT_REFERENCE,
                 recorded_at=recorded_at,
             )
+            for event in prior
+        ]
 
     def _persist_conflicts(
         self, patient_id: str, observations: list[dict[str, Any]]

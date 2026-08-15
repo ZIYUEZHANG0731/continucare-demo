@@ -872,8 +872,11 @@ class ControlledSummaryService:
             fallback_reason_codes=reasons,
             created_at=generated_at,
         )
-        self.repository.save_fhir_resource(provenance, patient_id=patient_id)
-        self.repository.save_contract(summary)
+        self.repository.persist_summary_bundle(
+            expected_current=current,
+            summary=summary,
+            provenance=provenance,
+        )
         return summary
 
     @staticmethod

@@ -150,6 +150,183 @@ def _contract_identity(
     raise TypeError(f"unsupported Layer-4 contract type: {type(record).__name__}")
 
 
+def _fhir_storage_values(
+    resource: dict[str, Any], *, patient_id: str | None
+) -> tuple[
+    dict[str, Any],
+    tuple[str, str, str],
+    str,
+    str,
+    str,
+]:
+    normalized = validate_layer4_fhir_resource(resource)
+    resource_type = normalized["resourceType"]
+    resource_id = normalized.get("id")
+    meta = normalized.get("meta", {})
+    version_id = meta.get("versionId")
+    updated_at = meta.get("lastUpdated")
+    if not resource_id or not version_id or not updated_at:
+        raise ValueError(
+            "Layer-4 FHIR persistence requires id, meta.versionId and "
+            "meta.lastUpdated"
+        )
+    expected_patient = _fhir_patient_reference(normalized)
+    if expected_patient is not None:
+        if not patient_id:
+            raise ValueError(f"{resource_type} persistence requires patient_id")
+        if expected_patient != f"Patient/{patient_id}":
+            raise ValueError(
+                f"{resource_type} patient reference does not match patient_id"
+            )
+    return (
+        normalized,
+        (resource_type, resource_id, version_id),
+        _json(normalized),
+        _fhir_clinical_time(normalized),
+        updated_at,
+    )
+
+
+def _insert_fhir_row(
+    connection: sqlite3.Connection,
+    *,
+    normalized: dict[str, Any],
+    identity: tuple[str, str, str],
+    patient_id: str | None,
+    payload: str,
+    clinical_time: str,
+    updated_at: str,
+) -> None:
+    resource_type, resource_id, version_id = identity
+    connection.execute(
+        """
+        UPDATE layer4_fhir_resources SET is_current = 0
+        WHERE resource_type = ? AND resource_id = ? AND is_current = 1
+        """,
+        (resource_type, resource_id),
+    )
+    connection.execute(
+        """
+        INSERT INTO layer4_fhir_resources (
+            resource_type, resource_id, version_id, patient_id, status,
+            clinical_time, resource_json, is_current, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        """,
+        (
+            resource_type,
+            resource_id,
+            version_id,
+            patient_id,
+            normalized.get("status"),
+            clinical_time,
+            payload,
+            updated_at,
+            updated_at,
+        ),
+    )
+
+
+def _contract_storage_values(
+    record: Layer4ContractRecord,
+) -> tuple[
+    tuple[str, str, str],
+    str | None,
+    str | None,
+    str,
+    str,
+    str,
+    str,
+]:
+    (
+        record_type,
+        record_id,
+        record_version,
+        patient_id,
+        pathway_code,
+        status,
+        effective_time,
+        updated_at,
+    ) = _contract_identity(record)
+    return (
+        (record_type, record_id, record_version),
+        patient_id,
+        pathway_code,
+        status,
+        effective_time,
+        updated_at,
+        _json(record.model_dump(mode="json")),
+    )
+
+
+def _versioned_reference(reference: Any) -> str:
+    if reference.reference.startswith("urn:") or not reference.version_id:
+        return reference.reference
+    return f"{reference.reference}/_history/{reference.version_id}"
+
+
+def _validated_revision_provenance(
+    link: RevisionLink, provenance: dict[str, Any]
+) -> dict[str, Any]:
+    normalized = validate_layer4_fhir_resource(
+        provenance, expected_resource_type="Provenance"
+    )
+    provenance_reference = f"Provenance/{normalized['id']}"
+    if link.provenance_reference != provenance_reference:
+        raise ValueError("Revision link must reference the exact bundle Provenance")
+    if {
+        item.get("reference") for item in normalized.get("target", [])
+    } != {_versioned_reference(link.successor)}:
+        raise ValueError("Revision Provenance must target the exact successor")
+    if {
+        item.get("what", {}).get("reference")
+        for item in normalized.get("entity", [])
+    } != {_versioned_reference(link.predecessor)}:
+        raise ValueError("Revision Provenance must source the exact predecessor")
+    return normalized
+
+
+def _insert_contract_row(
+    connection: sqlite3.Connection,
+    *,
+    identity: tuple[str, str, str],
+    patient_id: str | None,
+    pathway_code: str | None,
+    status: str,
+    effective_time: str,
+    updated_at: str,
+    payload: str,
+) -> None:
+    record_type, record_id, record_version = identity
+    connection.execute(
+        """
+        UPDATE layer4_contract_records SET is_current = 0
+        WHERE record_type = ? AND record_id = ? AND is_current = 1
+        """,
+        (record_type, record_id),
+    )
+    connection.execute(
+        """
+        INSERT INTO layer4_contract_records (
+            record_type, record_id, record_version, patient_id,
+            pathway_code, status, effective_time, record_json,
+            is_current, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        """,
+        (
+            record_type,
+            record_id,
+            record_version,
+            patient_id,
+            pathway_code,
+            status,
+            effective_time,
+            payload,
+            updated_at,
+            updated_at,
+        ),
+    )
+
+
 class Layer4SQLiteStore:
     """Persist exact JSON while keeping only query projections in columns."""
 
@@ -161,33 +338,16 @@ class Layer4SQLiteStore:
     def save_fhir_resource(
         self, resource: dict[str, Any], *, patient_id: str | None
     ) -> dict[str, Any]:
-        normalized = validate_layer4_fhir_resource(resource)
-        resource_type = normalized["resourceType"]
-        resource_id = normalized.get("id")
-        meta = normalized.get("meta", {})
-        version_id = meta.get("versionId")
-        updated_at = meta.get("lastUpdated")
-        if not resource_id or not version_id or not updated_at:
-            raise ValueError(
-                "Layer-4 FHIR persistence requires id, meta.versionId and meta.lastUpdated"
-            )
-        expected_patient = _fhir_patient_reference(normalized)
-        if expected_patient is not None:
-            if not patient_id:
-                raise ValueError(f"{resource_type} persistence requires patient_id")
-            if expected_patient != f"Patient/{patient_id}":
-                raise ValueError(
-                    f"{resource_type} patient reference does not match patient_id"
-                )
-        payload = _json(normalized)
-        clinical_time = _fhir_clinical_time(normalized)
+        normalized, identity, payload, clinical_time, updated_at = (
+            _fhir_storage_values(resource, patient_id=patient_id)
+        )
         with connect(self.db_path) as connection:
             existing = connection.execute(
                 """
                 SELECT resource_json, patient_id FROM layer4_fhir_resources
                 WHERE resource_type = ? AND resource_id = ? AND version_id = ?
                 """,
-                (resource_type, resource_id, version_id),
+                identity,
             ).fetchone()
             if existing:
                 if existing["resource_json"] != payload or existing["patient_id"] != patient_id:
@@ -195,33 +355,228 @@ class Layer4SQLiteStore:
                         "FHIR resource version is immutable and conflicts with stored JSON"
                     )
                 return normalized
-            connection.execute(
-                """
-                UPDATE layer4_fhir_resources SET is_current = 0
-                WHERE resource_type = ? AND resource_id = ? AND is_current = 1
-                """,
-                (resource_type, resource_id),
-            )
-            connection.execute(
-                """
-                INSERT INTO layer4_fhir_resources (
-                    resource_type, resource_id, version_id, patient_id, status,
-                    clinical_time, resource_json, is_current, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-                """,
-                (
-                    resource_type,
-                    resource_id,
-                    version_id,
-                    patient_id,
-                    normalized.get("status"),
-                    clinical_time,
-                    payload,
-                    updated_at,
-                    updated_at,
-                ),
+            _insert_fhir_row(
+                connection,
+                normalized=normalized,
+                identity=identity,
+                patient_id=patient_id,
+                payload=payload,
+                clinical_time=clinical_time,
+                updated_at=updated_at,
             )
         return normalized
+
+    def persist_fhir_creation_bundle(
+        self,
+        *,
+        resources: list[dict[str, Any]],
+        patient_id: str | None,
+    ) -> bool:
+        """Create one immutable FHIR write set without a partial current state."""
+
+        if not resources:
+            raise ValueError("FHIR creation bundle requires resources")
+        prepared = [
+            _fhir_storage_values(item, patient_id=patient_id) for item in resources
+        ]
+        identities = [item[1] for item in prepared]
+        if len(identities) != len(set(identities)):
+            raise ValueError("FHIR creation bundle identities must be unique")
+        try:
+            with connect(self.db_path) as connection:
+                connection.execute("PRAGMA busy_timeout=0")
+                connection.execute("BEGIN IMMEDIATE")
+                existing = {
+                    identity: connection.execute(
+                        """
+                        SELECT resource_json, patient_id
+                        FROM layer4_fhir_resources
+                        WHERE resource_type=? AND resource_id=? AND version_id=?
+                        """,
+                        identity,
+                    ).fetchone()
+                    for identity in identities
+                }
+                present = {key: row for key, row in existing.items() if row is not None}
+                if present:
+                    exact = len(present) == len(prepared) and all(
+                        row["resource_json"] == item[2]
+                        and row["patient_id"] == patient_id
+                        for item in prepared
+                        for row in [present.get(item[1])]
+                        if row is not None
+                    )
+                    if exact:
+                        return False
+                    raise ConcurrentWriteConflict(
+                        "FHIR creation bundle has a conflicting or partial replay"
+                    )
+                for index, item in enumerate(prepared):
+                    normalized, identity, payload, clinical_time, updated_at = item
+                    prior = connection.execute(
+                        """
+                        SELECT 1 FROM layer4_fhir_resources
+                        WHERE resource_type=? AND resource_id=?
+                        LIMIT 1
+                        """,
+                        identity[:2],
+                    ).fetchone()
+                    if prior is not None:
+                        raise ConcurrentWriteConflict(
+                            "FHIR creation bundle cannot append an existing resource"
+                        )
+                    _insert_fhir_row(
+                        connection,
+                        normalized=normalized,
+                        identity=identity,
+                        patient_id=patient_id,
+                        payload=payload,
+                        clinical_time=clinical_time,
+                        updated_at=updated_at,
+                    )
+                    self._fhir_creation_bundle_fault(f"after_resource:{index}")
+                self._fhir_creation_bundle_fault("before_commit")
+            self._fhir_creation_bundle_fault("after_commit")
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_busy(exc):
+                raise ConcurrentWriteConflict(
+                    "FHIR creation database is busy; retry the same request"
+                ) from exc
+            raise
+        return True
+
+    def _fhir_creation_bundle_fault(self, stage: str) -> None:
+        """Test seam for creation rollback and post-commit replay."""
+
+        return None
+
+    def persist_task_transition(
+        self,
+        *,
+        patient_id: str,
+        expected_task: dict[str, Any],
+        task: dict[str, Any],
+        provenance: dict[str, Any],
+    ) -> bool:
+        """CAS one Task version and its exact transition Provenance."""
+
+        expected = validate_layer4_fhir_resource(
+            expected_task, expected_resource_type="Task"
+        )
+        updated, task_identity, task_payload, task_time, task_updated = (
+            _fhir_storage_values(task, patient_id=patient_id)
+        )
+        if updated["resourceType"] != "Task" or expected["id"] != updated["id"]:
+            raise ValueError("Task transition resources must identify the same Task")
+        expected_version = expected["meta"]["versionId"]
+        updated_version = updated["meta"]["versionId"]
+        try:
+            expected_number = int(expected_version)
+            updated_number = int(updated_version)
+        except ValueError as exc:
+            raise ValueError("Task transition versions must be numeric and consecutive") from exc
+        if updated_number != expected_number + 1:
+            raise ValueError("Task transition must persist the exact next version")
+        normalized_provenance, provenance_identity, provenance_payload, provenance_time, provenance_updated = (
+            _fhir_storage_values(provenance, patient_id=patient_id)
+        )
+        if normalized_provenance["resourceType"] != "Provenance":
+            raise ValueError("Task transition requires Provenance")
+        expected_target = f"Task/{updated['id']}/_history/{updated_version}"
+        expected_source = f"Task/{expected['id']}/_history/{expected_version}"
+        targets = {
+            item.get("reference")
+            for item in normalized_provenance.get("target", [])
+        }
+        sources = {
+            item.get("what", {}).get("reference")
+            for item in normalized_provenance.get("entity", [])
+        }
+        if targets != {expected_target} or sources != {expected_source}:
+            raise ValueError(
+                "Task transition Provenance must bind the exact predecessor and successor"
+            )
+        expected_payload = _json(expected)
+        try:
+            with connect(self.db_path) as connection:
+                connection.execute("PRAGMA busy_timeout=0")
+                connection.execute("BEGIN IMMEDIATE")
+                task_row = connection.execute(
+                    """
+                    SELECT resource_json, patient_id FROM layer4_fhir_resources
+                    WHERE resource_type='Task' AND resource_id=? AND version_id=?
+                    """,
+                    (updated["id"], updated_version),
+                ).fetchone()
+                provenance_row = connection.execute(
+                    """
+                    SELECT resource_json, patient_id FROM layer4_fhir_resources
+                    WHERE resource_type='Provenance' AND resource_id=? AND version_id=?
+                    """,
+                    provenance_identity[1:],
+                ).fetchone()
+                if task_row is not None or provenance_row is not None:
+                    if (
+                        task_row is not None
+                        and task_row["resource_json"] == task_payload
+                        and task_row["patient_id"] == patient_id
+                        and provenance_row is not None
+                        and provenance_row["resource_json"] == provenance_payload
+                        and provenance_row["patient_id"] == patient_id
+                    ):
+                        return False
+                    raise ConcurrentWriteConflict(
+                        "Task transition has a conflicting or partial replay"
+                    )
+                current = connection.execute(
+                    """
+                    SELECT resource_json, patient_id FROM layer4_fhir_resources
+                    WHERE resource_type='Task' AND resource_id=? AND is_current=1
+                    """,
+                    (expected["id"],),
+                ).fetchone()
+                if (
+                    current is None
+                    or current["resource_json"] != expected_payload
+                    or current["patient_id"] != patient_id
+                ):
+                    raise ConcurrentWriteConflict(
+                        "Task changed; refresh and retry the transition"
+                    )
+                _insert_fhir_row(
+                    connection,
+                    normalized=updated,
+                    identity=task_identity,
+                    patient_id=patient_id,
+                    payload=task_payload,
+                    clinical_time=task_time,
+                    updated_at=task_updated,
+                )
+                self._task_transition_fault("after_task")
+                _insert_fhir_row(
+                    connection,
+                    normalized=normalized_provenance,
+                    identity=provenance_identity,
+                    patient_id=patient_id,
+                    payload=provenance_payload,
+                    clinical_time=provenance_time,
+                    updated_at=provenance_updated,
+                )
+                self._task_transition_fault("after_provenance")
+                self._task_transition_fault("before_commit")
+            self._task_transition_fault("after_commit")
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_busy(exc):
+                raise ConcurrentWriteConflict(
+                    "Task transition database is busy; retry the same request"
+                ) from exc
+            raise
+        return True
+
+    def _task_transition_fault(self, stage: str) -> None:
+        """Test seam for transition rollback and post-commit replay."""
+
+        return None
 
     def persist_doctor_review_bundle(
         self,
@@ -1061,23 +1416,21 @@ class Layer4SQLiteStore:
 
     def save_contract(self, record: Layer4ContractRecord) -> Layer4ContractRecord:
         (
-            record_type,
-            record_id,
-            record_version,
+            identity,
             patient_id,
             pathway_code,
             status,
             effective_time,
             updated_at,
-        ) = _contract_identity(record)
-        payload = _json(record.model_dump(mode="json"))
+            payload,
+        ) = _contract_storage_values(record)
         with connect(self.db_path) as connection:
             existing = connection.execute(
                 """
                 SELECT record_json, patient_id FROM layer4_contract_records
                 WHERE record_type = ? AND record_id = ? AND record_version = ?
                 """,
-                (record_type, record_id, record_version),
+                identity,
             ).fetchone()
             if existing:
                 if existing["record_json"] != payload or existing["patient_id"] != patient_id:
@@ -1085,35 +1438,461 @@ class Layer4SQLiteStore:
                         "Layer-4 contract version is immutable and conflicts with stored JSON"
                     )
                 return record
-            connection.execute(
-                """
-                UPDATE layer4_contract_records SET is_current = 0
-                WHERE record_type = ? AND record_id = ? AND is_current = 1
-                """,
-                (record_type, record_id),
-            )
-            connection.execute(
-                """
-                INSERT INTO layer4_contract_records (
-                    record_type, record_id, record_version, patient_id,
-                    pathway_code, status, effective_time, record_json,
-                    is_current, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-                """,
-                (
-                    record_type,
-                    record_id,
-                    record_version,
-                    patient_id,
-                    pathway_code,
-                    status,
-                    effective_time,
-                    payload,
-                    updated_at,
-                    updated_at,
-                ),
+            _insert_contract_row(
+                connection,
+                identity=identity,
+                patient_id=patient_id,
+                pathway_code=pathway_code,
+                status=status,
+                effective_time=effective_time,
+                updated_at=updated_at,
+                payload=payload,
             )
         return record
+
+    def persist_summary_bundle(
+        self,
+        *,
+        expected_current: Layer4SummaryDraft | None,
+        summary: Layer4SummaryDraft,
+        provenance: dict[str, Any],
+    ) -> bool:
+        normalized = validate_layer4_fhir_resource(
+            provenance, expected_resource_type="Provenance"
+        )
+        provenance_reference = f"Provenance/{normalized['id']}"
+        if {
+            (item.reference, item.version_id) for item in summary.provenance_refs
+        } != {(provenance_reference, normalized["meta"]["versionId"])}:
+            raise ValueError("Summary must reference the exact bundle Provenance")
+        expected_target = (
+            f"urn:continucare:summary:{summary.summary_id}:version:{summary.version}"
+        )
+        if {
+            item.get("reference") for item in normalized.get("target", [])
+        } != {expected_target}:
+            raise ValueError("Summary Provenance must target the exact Summary version")
+        return self._persist_provenance_contract_records(
+            provenance=normalized,
+            records=[summary],
+            patient_id=summary.patient_id,
+            expected_current=expected_current,
+            cas_identity=("summary_draft", summary.summary_id),
+            fault_prefix="summary",
+        )
+
+    def persist_state_snapshot_bundle(
+        self,
+        *,
+        expected_current: ClinicalStateSnapshot | None,
+        snapshot: ClinicalStateSnapshot,
+        provenance: dict[str, Any],
+    ) -> bool:
+        normalized = validate_layer4_fhir_resource(
+            provenance, expected_resource_type="Provenance"
+        )
+        provenance_reference = f"Provenance/{normalized['id']}"
+        if {
+            (item.reference, item.version_id) for item in snapshot.provenance_refs
+        } != {(provenance_reference, normalized["meta"]["versionId"])}:
+            raise ValueError("State snapshot must reference the exact bundle Provenance")
+        expected_target = (
+            "urn:continucare:state-snapshot:"
+            f"{snapshot.snapshot_id}:version:{snapshot.version}"
+        )
+        if {
+            item.get("reference") for item in normalized.get("target", [])
+        } != {expected_target}:
+            raise ValueError(
+                "State snapshot Provenance must target the exact snapshot version"
+            )
+        return self._persist_provenance_contract_records(
+            provenance=normalized,
+            records=[snapshot],
+            patient_id=snapshot.patient_id,
+            expected_current=expected_current,
+            cas_identity=("state_snapshot", snapshot.snapshot_id),
+            fault_prefix="state",
+        )
+
+    def persist_memory_projection_bundle(
+        self,
+        *,
+        memory: MemoryEvent,
+        timeline: TimelineEvent,
+        provenance: dict[str, Any],
+        revision_bundles: list[tuple[RevisionLink, dict[str, Any]]] | None = None,
+    ) -> bool:
+        normalized = validate_layer4_fhir_resource(
+            provenance, expected_resource_type="Provenance"
+        )
+        if memory.patient_id != timeline.patient_id:
+            raise ValueError("Memory projection patient mismatch")
+        if timeline.memory_event_id != memory.event_id:
+            raise ValueError("Timeline must reference the bundled Memory event")
+        provenance_reference = f"Provenance/{normalized['id']}"
+        if {
+            (item.reference, item.version_id) for item in memory.provenance_refs
+        } != {(provenance_reference, normalized["meta"]["versionId"])}:
+            raise ValueError("Memory event must reference the exact bundle Provenance")
+        expected_targets = {
+            f"urn:continucare:memory-event:{memory.event_id}",
+            f"urn:continucare:timeline-event:{timeline.timeline_event_id}",
+        }
+        if {
+            item.get("reference") for item in normalized.get("target", [])
+        } != expected_targets:
+            raise ValueError(
+                "Memory Provenance must target the exact Memory and Timeline events"
+            )
+        revisions = list(revision_bundles or [])
+        source_reference = memory.source.reference
+        workflow_projection = source_reference.startswith(("Task/", "Communication/"))
+        if revisions and not workflow_projection:
+            raise ValueError("Only workflow Memory projections can bundle revisions")
+
+        revision_values: list[
+            tuple[
+                RevisionLink,
+                tuple[dict[str, Any], tuple[str, str, str], str, str, str],
+            ]
+        ] = []
+        for link, revision_provenance in revisions:
+            normalized_revision = _validated_revision_provenance(
+                link, revision_provenance
+            )
+            if (
+                link.patient_id != memory.patient_id
+                or link.relationship.value != "supersedes"
+                or link.predecessor.reference != source_reference
+                or link.predecessor.version_id == memory.source.version_id
+                or link.successor != memory.source
+            ):
+                raise ValueError(
+                    "Workflow revision must supersede a prior version of the bundled source"
+                )
+            revision_values.append(
+                (
+                    link,
+                    _fhir_storage_values(
+                        normalized_revision, patient_id=memory.patient_id
+                    ),
+                )
+            )
+
+        primary_provenance = _fhir_storage_values(
+            normalized, patient_id=memory.patient_id
+        )
+        fhir_values = [
+            primary_provenance,
+            *(item[1] for item in revision_values),
+        ]
+        fhir_identities = [item[1] for item in fhir_values]
+        if len(fhir_identities) != len(set(fhir_identities)):
+            raise ValueError("Memory projection Provenance identities must be unique")
+
+        records: list[Layer4ContractRecord] = [
+            memory,
+            timeline,
+            *(item[0] for item in revision_values),
+        ]
+        prepared = [_contract_storage_values(record) for record in records]
+        contract_identities = [item[0] for item in prepared]
+        if len(contract_identities) != len(set(contract_identities)):
+            raise ValueError("Memory projection contract identities must be unique")
+        if any(item[1] != memory.patient_id for item in prepared):
+            raise ValueError("Memory projection bundle patient mismatch")
+
+        expected_predecessors = {
+            _versioned_reference(link.predecessor) for link, _ in revision_values
+        }
+        try:
+            with connect(self.db_path) as connection:
+                connection.execute("PRAGMA busy_timeout=0")
+                connection.execute("BEGIN IMMEDIATE")
+                fhir_rows = {
+                    item[1]: connection.execute(
+                        """
+                        SELECT resource_json, patient_id FROM layer4_fhir_resources
+                        WHERE resource_type=? AND resource_id=? AND version_id=?
+                        """,
+                        item[1],
+                    ).fetchone()
+                    for item in fhir_values
+                }
+                contract_rows = {
+                    item[0]: connection.execute(
+                        """
+                        SELECT record_json, patient_id FROM layer4_contract_records
+                        WHERE record_type=? AND record_id=? AND record_version=?
+                        """,
+                        item[0],
+                    ).fetchone()
+                    for item in prepared
+                }
+                any_output = any(row is not None for row in fhir_rows.values()) or any(
+                    row is not None for row in contract_rows.values()
+                )
+                if any_output:
+                    exact = all(
+                        (row := fhir_rows[item[1]]) is not None
+                        and row["resource_json"] == item[2]
+                        and row["patient_id"] == memory.patient_id
+                        for item in fhir_values
+                    ) and all(
+                        (row := contract_rows[item[0]]) is not None
+                        and row["record_json"] == item[-1]
+                        and row["patient_id"] == memory.patient_id
+                        for item in prepared
+                    )
+                    if exact:
+                        return False
+                    raise ConcurrentWriteConflict(
+                        "Memory projection bundle has a conflicting or partial replay"
+                    )
+
+                if workflow_projection:
+                    prior_rows = connection.execute(
+                        """
+                        SELECT record_json FROM layer4_contract_records
+                        WHERE record_type='memory_event' AND patient_id=?
+                          AND pathway_code=? AND is_current=1
+                        """,
+                        (memory.patient_id, memory.pathway_code),
+                    ).fetchall()
+                    actual_predecessors = {
+                        _versioned_reference(event.source)
+                        for row in prior_rows
+                        if (
+                            event := MemoryEvent.model_validate_json(
+                                row["record_json"]
+                            )
+                        ).pathway_version
+                        == memory.pathway_version
+                        and event.source.reference == source_reference
+                        and event.source.version_id != memory.source.version_id
+                    }
+                    if actual_predecessors != expected_predecessors:
+                        raise ConcurrentWriteConflict(
+                            "Workflow Memory history changed; refresh and retry"
+                        )
+
+                _insert_fhir_row(
+                    connection,
+                    normalized=primary_provenance[0],
+                    identity=primary_provenance[1],
+                    patient_id=memory.patient_id,
+                    payload=primary_provenance[2],
+                    clinical_time=primary_provenance[3],
+                    updated_at=primary_provenance[4],
+                )
+                self._provenance_contract_bundle_fault("memory:after_provenance")
+                for index, item in enumerate(prepared[:2]):
+                    _insert_contract_row(
+                        connection,
+                        identity=item[0],
+                        patient_id=item[1],
+                        pathway_code=item[2],
+                        status=item[3],
+                        effective_time=item[4],
+                        updated_at=item[5],
+                        payload=item[6],
+                    )
+                    self._provenance_contract_bundle_fault(
+                        f"memory:after_contract:{index}"
+                    )
+                for index, ((_, revision_fhir), revision_record) in enumerate(
+                    zip(revision_values, prepared[2:])
+                ):
+                    self._provenance_contract_bundle_fault(
+                        f"memory:before_revision:{index}"
+                    )
+                    _insert_fhir_row(
+                        connection,
+                        normalized=revision_fhir[0],
+                        identity=revision_fhir[1],
+                        patient_id=memory.patient_id,
+                        payload=revision_fhir[2],
+                        clinical_time=revision_fhir[3],
+                        updated_at=revision_fhir[4],
+                    )
+                    self._provenance_contract_bundle_fault(
+                        f"memory:after_revision_provenance:{index}"
+                    )
+                    _insert_contract_row(
+                        connection,
+                        identity=revision_record[0],
+                        patient_id=revision_record[1],
+                        pathway_code=revision_record[2],
+                        status=revision_record[3],
+                        effective_time=revision_record[4],
+                        updated_at=revision_record[5],
+                        payload=revision_record[6],
+                    )
+                    self._provenance_contract_bundle_fault(
+                        f"memory:after_revision_contract:{index}"
+                    )
+                self._provenance_contract_bundle_fault("memory:before_commit")
+            self._provenance_contract_bundle_fault("memory:after_commit")
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_busy(exc):
+                raise ConcurrentWriteConflict(
+                    "Memory projection database is busy; retry the same request"
+                ) from exc
+            raise
+        return True
+
+    def persist_revision_link_bundle(
+        self,
+        *,
+        link: RevisionLink,
+        provenance: dict[str, Any],
+    ) -> bool:
+        normalized = _validated_revision_provenance(link, provenance)
+        return self._persist_provenance_contract_records(
+            provenance=normalized,
+            records=[link],
+            patient_id=link.patient_id,
+            expected_current=None,
+            cas_identity=None,
+            fault_prefix="revision",
+        )
+
+    def _persist_provenance_contract_records(
+        self,
+        *,
+        provenance: dict[str, Any],
+        records: list[Layer4ContractRecord],
+        patient_id: str,
+        expected_current: Layer4ContractRecord | None,
+        cas_identity: tuple[str, str] | None,
+        fault_prefix: str,
+    ) -> bool:
+        if not records:
+            raise ValueError("Provenance contract bundle requires records")
+        provenance_values = _fhir_storage_values(
+            provenance, patient_id=patient_id
+        )
+        prepared = [_contract_storage_values(record) for record in records]
+        identities = [item[0] for item in prepared]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Provenance contract identities must be unique")
+        if any(item[1] != patient_id for item in prepared):
+            raise ValueError("Provenance contract bundle patient mismatch")
+        expected_payload = (
+            _contract_storage_values(expected_current)[-1]
+            if expected_current is not None
+            else None
+        )
+        try:
+            with connect(self.db_path) as connection:
+                connection.execute("PRAGMA busy_timeout=0")
+                connection.execute("BEGIN IMMEDIATE")
+                provenance_row = connection.execute(
+                    """
+                    SELECT resource_json, patient_id FROM layer4_fhir_resources
+                    WHERE resource_type='Provenance' AND resource_id=? AND version_id=?
+                    """,
+                    provenance_values[1][1:],
+                ).fetchone()
+                contract_rows = {
+                    identity: connection.execute(
+                        """
+                        SELECT record_json, patient_id FROM layer4_contract_records
+                        WHERE record_type=? AND record_id=? AND record_version=?
+                        """,
+                        identity,
+                    ).fetchone()
+                    for identity in identities
+                }
+                any_output = provenance_row is not None or any(
+                    row is not None for row in contract_rows.values()
+                )
+                if any_output:
+                    exact = (
+                        provenance_row is not None
+                        and provenance_row["resource_json"] == provenance_values[2]
+                        and provenance_row["patient_id"] == patient_id
+                        and all(
+                            (row := contract_rows[item[0]]) is not None
+                            and row["record_json"] == item[-1]
+                            and row["patient_id"] == patient_id
+                            for item in prepared
+                        )
+                    )
+                    if exact:
+                        return False
+                    raise ConcurrentWriteConflict(
+                        "Provenance contract bundle has a conflicting or partial replay"
+                    )
+                if cas_identity is not None:
+                    current = connection.execute(
+                        """
+                        SELECT record_json FROM layer4_contract_records
+                        WHERE record_type=? AND record_id=? AND is_current=1
+                        """,
+                        cas_identity,
+                    ).fetchone()
+                    if expected_payload is None:
+                        if current is not None:
+                            raise ConcurrentWriteConflict(
+                                "derived contract changed; refresh and retry"
+                            )
+                    elif current is None or current["record_json"] != expected_payload:
+                        raise ConcurrentWriteConflict(
+                            "derived contract changed; refresh and retry"
+                        )
+                _insert_fhir_row(
+                    connection,
+                    normalized=provenance_values[0],
+                    identity=provenance_values[1],
+                    patient_id=patient_id,
+                    payload=provenance_values[2],
+                    clinical_time=provenance_values[3],
+                    updated_at=provenance_values[4],
+                )
+                self._provenance_contract_bundle_fault(
+                    f"{fault_prefix}:after_provenance"
+                )
+                for index, item in enumerate(prepared):
+                    (
+                        identity,
+                        record_patient_id,
+                        pathway_code,
+                        status,
+                        effective_time,
+                        updated_at,
+                        payload,
+                    ) = item
+                    _insert_contract_row(
+                        connection,
+                        identity=identity,
+                        patient_id=record_patient_id,
+                        pathway_code=pathway_code,
+                        status=status,
+                        effective_time=effective_time,
+                        updated_at=updated_at,
+                        payload=payload,
+                    )
+                    self._provenance_contract_bundle_fault(
+                        f"{fault_prefix}:after_contract:{index}"
+                    )
+                self._provenance_contract_bundle_fault(
+                    f"{fault_prefix}:before_commit"
+                )
+            self._provenance_contract_bundle_fault(f"{fault_prefix}:after_commit")
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_busy(exc):
+                raise ConcurrentWriteConflict(
+                    "Provenance contract database is busy; retry the same request"
+                ) from exc
+            raise
+        return True
+
+    def _provenance_contract_bundle_fault(self, stage: str) -> None:
+        """Test seam for derived-record rollback and post-commit replay."""
+
+        return None
 
     def get_contract(
         self,

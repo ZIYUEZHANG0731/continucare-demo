@@ -744,3 +744,51 @@ def test_summary_generation_and_review_provenance_pass_official_schema_when_avai
         patient_id=PATIENT_ID, resource_type="Provenance", current_only=False
     ):
         validate_official_json_schema(resource, schema_path)
+
+
+def test_summary_bundle_rolls_back_and_replays_after_commit(tmp_path):
+    response = _response("response-summary-atomic")
+    observation = _vomiting(1, observation_id="observation-summary-atomic")
+    repository, _, memory, summaries, _ = _services(
+        tmp_path, _snapshot(responses=[response], observations=[observation])
+    )
+    memory.rebuild(PATIENT_ID)
+    provenance_before = repository.list_fhir_resources(
+        patient_id=PATIENT_ID, resource_type="Provenance", current_only=False
+    )
+
+    def rollback_fault(stage):
+        if stage == "summary:after_provenance":
+            raise RuntimeError("fault:summary:after_provenance")
+
+    repository._provenance_contract_bundle_fault = rollback_fault
+    with pytest.raises(RuntimeError, match="summary:after_provenance"):
+        _generate(summaries)
+    assert repository.list_contracts("summary_draft", patient_id=PATIENT_ID) == []
+    assert repository.list_fhir_resources(
+        patient_id=PATIENT_ID, resource_type="Provenance", current_only=False
+    ) == provenance_before
+
+    def commit_fault(stage):
+        if stage == "summary:after_commit":
+            raise RuntimeError("fault:summary:after_commit")
+
+    repository._provenance_contract_bundle_fault = commit_fault
+    with pytest.raises(RuntimeError, match="summary:after_commit"):
+        _generate(summaries)
+    committed = repository.list_contracts(
+        "summary_draft", patient_id=PATIENT_ID
+    )
+    assert len(committed) == 1
+    assert len(
+        repository.list_fhir_resources(
+            patient_id=PATIENT_ID,
+            resource_type="Provenance",
+            current_only=False,
+        )
+    ) == len(provenance_before) + 1
+
+    repository._provenance_contract_bundle_fault = lambda stage: None
+    replay = _generate(summaries)
+    assert replay == committed[0]
+    assert len(repository.list_contracts("summary_draft", patient_id=PATIENT_ID)) == 1
