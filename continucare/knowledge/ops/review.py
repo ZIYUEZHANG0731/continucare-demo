@@ -54,6 +54,10 @@ _TYPED_REVIEW_EVIDENCE_DIGEST_PROFILES = {
         LedgerCollection.SNAPSHOT.value,
         "source_snapshot",
     ): DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+    (
+        LedgerCollection.EVIDENCE_CANDIDATE.value,
+        "evidence_candidate_v2",
+    ): DigestTrustProfile.EVIDENCE_CANDIDATE,
 }
 _TYPED_REVIEW_EVIDENCE_COLLECTIONS = frozenset(
     collection for collection, _ in _TYPED_REVIEW_EVIDENCE_DIGEST_PROFILES
@@ -1532,6 +1536,9 @@ def _assert_review_evidence_no_sensitive_data(
     if profile == DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT:
         _assert_source_snapshot_entry_no_sensitive_data(ledger, entry)
         return entry
+    if profile == DigestTrustProfile.EVIDENCE_CANDIDATE:
+        _assert_evidence_candidate_entry_no_sensitive_data(ledger, entry)
+        return entry
     raise KnowledgeOpsPolicyError("unsupported typed review evidence profile")
 
 
@@ -1555,6 +1562,60 @@ def _assert_source_snapshot_entry_no_sensitive_data(
     assert_no_sensitive_data(
         snapshot.model_dump(mode="json"),
         digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+    )
+
+
+def _assert_evidence_candidate_entry_no_sensitive_data(
+    ledger: AppendOnlyLedger,
+    entry: LedgerEntry,
+) -> None:
+    """Replay exact synthetic evidence lineage before trusting nested digests."""
+
+    from continucare.knowledge.ops.evidence import EvidenceCandidate
+
+    if (
+        entry.collection != LedgerCollection.EVIDENCE_CANDIDATE.value
+        or entry.payload_type != "evidence_candidate_v2"
+    ):
+        raise KnowledgeOpsPolicyError(
+            "EvidenceCandidate review evidence requires the exact v2 payload"
+        )
+    evidence = EvidenceCandidate.model_validate(entry.payload)
+    source_entry = _replay_typed_entry(
+        ledger,
+        evidence.source_candidate_ref,
+        collection=LedgerCollection.CANDIDATE,
+        payload_type="source_candidate",
+    )
+    snapshot_entry = _replay_typed_entry(
+        ledger,
+        evidence.source_snapshot_ref,
+        collection=LedgerCollection.SNAPSHOT,
+        payload_type="source_snapshot",
+    )
+    source = SourceCandidate.model_validate(source_entry.payload)
+    snapshot = SourceSnapshot.model_validate(snapshot_entry.payload)
+    if (
+        evidence.candidate_id != entry.record_id
+        or evidence.synthetic is not entry.synthetic
+        or source.candidate_id != evidence.source_candidate_ref.record_id
+        or snapshot.snapshot_id != evidence.source_snapshot_ref.record_id
+        or snapshot.candidate_ref != evidence.source_candidate_ref
+        or evidence.whole_record_sha256 != snapshot.content_sha256
+        or source.synthetic is not source_entry.synthetic
+        or snapshot.synthetic is not snapshot_entry.synthetic
+        or evidence.synthetic is not source.synthetic
+        or evidence.synthetic is not snapshot.synthetic
+    ):
+        raise KnowledgeOpsPolicyError("EvidenceCandidate review lineage differs")
+    assert_no_sensitive_data(source.model_dump(mode="json"))
+    assert_no_sensitive_data(
+        snapshot.model_dump(mode="json"),
+        digest_trust_profile=DigestTrustProfile.ACQUISITION_SOURCE_SNAPSHOT,
+    )
+    assert_no_sensitive_data(
+        evidence.model_dump(mode="json"),
+        digest_trust_profile=DigestTrustProfile.EVIDENCE_CANDIDATE,
     )
 
 

@@ -25,6 +25,8 @@ python3.11 -m venv .venv
 
 打开 Streamlit 输出的本地地址即可进入首页。运行数据默认保存在 `data/continucare.db`，该目录已被 Git 忽略。
 
+普通离线测试不下载外部文件；未设置 `FHIR_R4_SCHEMA_ZIP` 时，依赖 HL7 官方 JSON Schema 的 3 项测试会明确标记为 skipped。比赛提交或发布验收不能把这些 skip 当作通过，必须按下方“验收命令”下载并核对固定哈希后重新运行全量测试。
+
 ## 小米 MiMo 配置
 
 复制 `.env.example` 为被 Git 忽略的 `.env`，只在本机填入轮换后的密钥：
@@ -83,7 +85,7 @@ CONTINUCARE_EXTERNAL_EGRESS_ENABLED=false
 
 仅将 mode 改为 `test_tenant` 不足以创建外部 client；还必须同时设置对应 capability flag、全局 egress flag 和完整配置。偶然存在凭据不会自动启用。`test_tenant` 配置缺失时 fail-closed。当前仓库没有 `production` 模式；本轮也未用真实凭据或调用任何外部 API。
 
-## 三个核心价值
+## 核心价值与工程保障
 
 - 原始回答与 FHIR Observation 通过 `derivedFrom` 可追溯；
 - 患者端由 Questionnaire 动态渲染，结构化答案不依赖 LLM；
@@ -150,12 +152,28 @@ CONTINUCARE_EXTERNAL_EGRESS_ENABLED=false
 
 ## 验收命令
 
+以下命令均从仓库根目录运行。FHIR R4 Schema 是固定版本的外部验收材料，不提交进仓库；先验证 SHA-256，成功后才运行依赖它的测试：
+
 ```bash
-curl -L https://hl7.org/fhir/R4/fhir.schema.json.zip -o /tmp/fhir-r4-schema.zip
-FHIR_R4_SCHEMA_ZIP=/tmp/fhir-r4-schema.zip .venv/bin/python -m pytest -q
-.venv/bin/python scripts/validate_fhir_r4.py --schema /tmp/fhir-r4-schema.zip
+FHIR_R4_SCHEMA_PATH=/tmp/fhir-r4-schema.zip
+FHIR_R4_SCHEMA_SHA256=75e5560da3cf503895a44c8ca7af17a83b4cca6c2cb5ba1883d2aec0d1cb5ac6
+
+curl --fail --location --retry 3 \
+  https://hl7.org/fhir/R4/fhir.schema.json.zip \
+  --output "$FHIR_R4_SCHEMA_PATH"
+printf '%s  %s\n' "$FHIR_R4_SCHEMA_SHA256" "$FHIR_R4_SCHEMA_PATH" \
+  | shasum -a 256 --check
+
+FHIR_R4_SCHEMA_ZIP="$FHIR_R4_SCHEMA_PATH" \
+  .venv/bin/python -m pytest -q -p no:cacheprovider
+.venv/bin/python scripts/validate_fhir_r4.py \
+  --schema "$FHIR_R4_SCHEMA_PATH"
 .venv/bin/python scripts/evaluate_semantic_layer.py
 .venv/bin/streamlit run app.py
 ```
+
+哈希检查必须输出 `/tmp/fhir-r4-schema.zip: OK`。全量 pytest 必须以退出码 0 完成，且官方 Schema 可用时不应再出现上述 3 个 skip；独立校验器应逐项输出 `valid`。任一步失败都应停止验收，不得仅根据一次新下载结果修改仓库中的固定哈希。
+
+`/tmp` 可能在重启或系统清理后被删除；发生这种情况时重新执行下载和哈希检查即可。
 
 所有演示身份、消息和结果均为合成数据。禁止把运行数据库、密钥或真实患者信息提交到仓库。

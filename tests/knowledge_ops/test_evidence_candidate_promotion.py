@@ -277,6 +277,17 @@ def test_verified_phone_bearing_snapshot_digest_survives_machine_lineage(
         created_at=NOW + timedelta(minutes=4),
     )
     assert MachineDraftClaim.model_validate(ledger.get(claim_ref).payload)
+    packet_ref = ReviewPacketBuilder(bundle=bundle, ledger=ledger).build(
+        subject_kind="clinical_claim",
+        subject_ref=claim_ref,
+        gate="clinical_claim_approval",
+        scope=profile.scope,
+        generated_by="system:test",
+        known_limitations=("Synthetic digest trust regression.",),
+        evidence_refs=(evidence_ref,),
+        generated_at=NOW + timedelta(minutes=5),
+    )
+    assert ledger.get(packet_ref).payload_type == "review_packet"
 
 
 def test_digest_profile_does_not_trust_an_unreplayable_nested_ledger_ref(

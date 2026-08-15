@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 from uuid import NAMESPACE_URL, uuid5
 
 import certifi
@@ -42,6 +42,13 @@ from continucare.db import utc_now_iso
 
 
 JsonTransport = Callable[[str, dict[str, str], dict[str, Any], float], dict[str, Any]]
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Never forward a credential-bearing MiMo request to another URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class _StrictModel(BaseModel):
@@ -654,11 +661,17 @@ def _post_json(
     )
     try:
         tls_context = ssl.create_default_context(cafile=certifi.where())
-        with urlopen(
-            request, timeout=timeout_seconds, context=tls_context
-        ) as response:
+        opener = build_opener(
+            HTTPSHandler(context=tls_context),
+            _NoRedirectHandler(),
+        )
+        with opener.open(request, timeout=timeout_seconds) as response:
             body = response.read(2_000_001)
     except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise ModelRequestError(
+                f"MiMo request rejected HTTP redirect {exc.code}"
+            ) from exc
         raise ModelRequestError(f"MiMo request failed with HTTP {exc.code}") from exc
     except URLError as exc:
         reason_type = type(exc.reason).__name__
