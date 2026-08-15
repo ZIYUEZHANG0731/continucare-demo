@@ -1,5 +1,33 @@
 # M5-K Knowledge Operations P0–P2 Readiness
 
+> [!IMPORTANT]
+> **Historical snapshot — superseded for current capability status.** This
+> document records the state at completion of the initial P0–P2 readiness
+> slice. It is retained as historical delivery evidence and is not the
+> authoritative source for current capability status. Statements below that
+> source-specific connectors, real parsers, `EvidenceCandidate`, and Core
+> Symptom Catalog v2 were not started or deferred apply only to that historical
+> slice. Subsequent P1a connector/parser contracts for DailyMed, EMA,
+> MedlinePlus, PubMed, and PMC metadata, together with `EvidenceCandidate` and
+> Core Symptom Catalog v2, have been implemented and merged into mainline.
+>
+> Use the current capability matrix in
+> [`docs/32_knowledge_capability_review_guide.md`](32_knowledge_capability_review_guide.md)
+> as the authority. See
+> [`docs/30_knowledge_ops_p1_source_connectors.md`](30_knowledge_ops_p1_source_connectors.md)
+> for current P1a connector facts,
+> [`docs/31_knowledge_v2_alias_consumer_readiness.md`](31_knowledge_v2_alias_consumer_readiness.md)
+> for current alias readiness, and
+> [`docs/knowledge_v2_mainline_integration_validation_2026-08-14.md`](knowledge_v2_mainline_integration_validation_2026-08-14.md)
+> for mainline integration evidence. P1b live validation remains
+> `not_attempted`, and operational live acquisition remains disabled.
+> Implemented connector contracts do not establish real acquisition, rights
+> approval, formal release, or production readiness. No formal reviewer,
+> rights decision, or `KnowledgeRelease` exists, and v2 alias consumer/UI
+> integration remains unimplemented. The boundaries
+> `knowledge_effect=informational_only` and `runtime_authority=none` remain in
+> force.
+
 ## 1. Status and product boundary
 
 This slice extends the existing M5-K Knowledge Evidence foundation. It does not

@@ -1,6 +1,24 @@
 # HANDOFF
 
-> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。**最新权威状态：2026-08-14，A++ UI-1 至 UI-6 已完成 Full Validation，Knowledge v2 alias readiness 也已以保留 38 个历史提交的 `--no-ff` merge 合入主线并通过完整集成验证。** Knowledge v2 merge commit 为 `88c85b3fb103e13f0770f385f01a0f1916a135ff`；完整证据见 [`docs/knowledge_v2_mainline_integration_validation_2026-08-14.md`](docs/knowledge_v2_mainline_integration_validation_2026-08-14.md)。A++ UI 最终测试代码基线是 `cad99d98f5cc13947d6075d62a628e6fc410d873`，其证据见 [`docs/ui_a_plus_plus_full_validation_report_2026-08-14.md`](docs/ui_a_plus_plus_full_validation_report_2026-08-14.md)。后续不得再按旧历史中“A++ 尚未实施”或“Knowledge v2 尚未合入”的描述执行。
+> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。**最新权威状态：2026-08-15，独立全项目审核提出的 B-01 与 B-02 两项 blocker 均已处理；A++ UI-1 至 UI-6 已完成 Full Validation，Knowledge v2 alias readiness 也已合入主线并通过完整集成验证。** 审核收口见下方 `AUD-R2`；Knowledge v2 merge commit 为 `88c85b3fb103e13f0770f385f01a0f1916a135ff`，完整证据见 [`docs/knowledge_v2_mainline_integration_validation_2026-08-14.md`](docs/knowledge_v2_mainline_integration_validation_2026-08-14.md)。A++ UI 最终测试代码基线是 `cad99d98f5cc13947d6075d62a628e6fc410d873`，其证据见 [`docs/ui_a_plus_plus_full_validation_report_2026-08-14.md`](docs/ui_a_plus_plus_full_validation_report_2026-08-14.md)。后续不得再按旧历史中“A++ 尚未实施”“Knowledge v2 尚未合入”或 docs/28 的历史 P0–P2 状态描述执行。
+
+## AUD-R2. 独立全项目审核 blocker 收口（2026-08-15，已完成）
+
+- 独立全项目审核最初结论为 **BLOCKER**，包含 B-01 审计 Provenance 归属错误和
+  B-02 Knowledge 历史文档与当前能力状态矛盾两项 blocker。
+- B-01 已由 commit `ccbaac4d722039d1fcd95ad5341acdf3d7fc3819` 修复。验证结果为：
+  Audit targeted `40 passed`；业务回归 `115 passed, 1 skipped`；UI targeted
+  `243 passed`；全量 `906 passed, 3 skipped`；in-app Browser 真实完成
+  `0/9 → story_complete`；12 条事件的 Provenance 均精确归属。
+- B-02 已通过在
+  [`docs/28_knowledge_ops_p0_p1_p2_readiness.md`](docs/28_knowledge_ops_p0_p1_p2_readiness.md)
+  顶部明确标识历史快照，以及将当前能力权威路由到 docs/30、docs/31、docs/32
+  和主线集成报告完成修复。两个 blocker 均已处理。
+- 三项 non-blocking **尚未处理**，且不阻止进入队友 UI 意见收集：README 页面
+  名称陈旧；`clear_demo_session_state` 未清理部分当前 UI key；折叠状态的
+  `aria-controls` target 尚未进入 DOM。
+- v2 alias UI consumer integration 仍未实施。后续队友应先独立观察和提出意见，
+  不直接修改代码。
 
 ## K2. Knowledge v2 主线集成最新权威交接（2026-08-14，已完成）
 

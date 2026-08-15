@@ -133,7 +133,13 @@ Layer 4 和 runtime 均未导入新 v2 alias API。
 - [`docs/27_m5_k_symptom_knowledge_expansion.md`](27_m5_k_symptom_knowledge_expansion.md)：
   symptom-centered reference-only index 和外部来源边界。
 - [`docs/28_knowledge_ops_p0_p1_p2_readiness.md`](28_knowledge_ops_p0_p1_p2_readiness.md)：
-  P0–P2 governance/acquisition/review/release readiness 总体设计。
+  historical P0–P2 architecture/readiness baseline，用于理解初始治理、离线
+  acquisition、review/release 机制；其中的能力状态已由本指南、
+  [`docs/30_knowledge_ops_p1_source_connectors.md`](30_knowledge_ops_p1_source_connectors.md)、
+  [`docs/31_knowledge_v2_alias_consumer_readiness.md`](31_knowledge_v2_alias_consumer_readiness.md)
+  和
+  [`docs/knowledge_v2_mainline_integration_validation_2026-08-14.md`](knowledge_v2_mainline_integration_validation_2026-08-14.md)
+  取代。
 - [`docs/30_knowledge_ops_p1_source_connectors.md`](30_knowledge_ops_p1_source_connectors.md)：
   P1 connector、SSRF/privacy、digest trust、persistent Gaps 和最终修复证据。
 - [`docs/31_knowledge_v2_alias_consumer_readiness.md`](31_knowledge_v2_alias_consumer_readiness.md)：
