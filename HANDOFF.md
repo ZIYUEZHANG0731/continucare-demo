@@ -1,6 +1,50 @@
 # HANDOFF
 
-> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。**最新权威状态：2026-08-15，独立全项目审核提出的 B-01 与 B-02 两项 blocker 及三项 non-blocking 均已处理；A++ UI-1 至 UI-6 已完成 Full Validation，Knowledge v2 alias readiness 也已合入主线并通过完整集成验证。** 审核与 UI hardening 收口见下方 `AUD-R2`；Knowledge v2 merge commit 为 `88c85b3fb103e13f0770f385f01a0f1916a135ff`，完整证据见 [`docs/knowledge_v2_mainline_integration_validation_2026-08-14.md`](docs/knowledge_v2_mainline_integration_validation_2026-08-14.md)。A++ UI 最终测试代码基线是 `cad99d98f5cc13947d6075d62a628e6fc410d873`，其证据见 [`docs/ui_a_plus_plus_full_validation_report_2026-08-14.md`](docs/ui_a_plus_plus_full_validation_report_2026-08-14.md)。后续不得再按旧历史中“A++ 尚未实施”“Knowledge v2 尚未合入”或 docs/28 的历史 P0–P2 状态描述执行。
+> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。**最新权威状态：2026-08-15，最终独立全仓审核、完整运行验证、Claude Opus 高风险复核及其修复切片均已收口；当前比赛级合成原型结论为 PASS，无未解决代码级 blocker。** 最新代码提交与验证见下方 `AUD-R4`。此前 B-01/B-02、A++ UI-1 至 UI-6 和 Knowledge v2 alias readiness 的历史收口仍然有效；分别见 `AUD-R2`、`UI-6` 与 `K2`。后续不得按旧历史中“A++ 尚未实施”“Knowledge v2 尚未合入”或“最终审核修复尚未完成”的状态执行。
+
+## AUD-R4. 最终独立全仓审核与修复收口（2026-08-15，已完成）
+
+### AUD-R4.1 结论与提交
+
+- 最终审核以 `0f2b9d7cf10fff8c7bf1686235228e91a889245b` 为只读基线，完成全仓代码检查、全量测试、真实 Browser 工作流验证和 Claude Opus 高风险只读复核；随后用户在同一任务中明确授权修复与推送。
+- 事务、并发和安全重放修复提交：`f2dfe393fb2d2d60a79f2c22d9878098fa2522bf`，`fix(persistence): make care workflows atomic and replay-safe`。
+- 安全信任边界、脚本入口和 FHIR 验收说明提交：`e228d4e460468e86c149661b6ce186fb73a69474`，`fix(security): harden trust boundaries and validation tools`。
+- 本节所在提交只负责更新交接事实，不包含新的产品能力。当前无后续默认代码切片；用户计划于次日先与队友讨论正式参赛方案，再决定文档、截图、视频或飞书能力工作。
+
+### AUD-R4.2 已修复问题
+
+- `SQLiteStore` 将本轮识别的 AgentRun、患者决定、上下文材料与必需审计事实纳入原子命令；冲突或部分历史重放 fail closed，提交后响应丢失可安全返回既有结果，不重复写入。
+- Layer 4 将本轮识别的 Memory revision、Task/Rule、State、Summary 与对应 Provenance/版本记录改为原子 bundle，补齐事务内 CAS、故障注入回滚和 post-commit replay。
+- MiMo 凭据请求禁止 HTTP redirect，避免 `Authorization` 被转发到重定向目标；3xx 以稳定 `ModelRequestError` 拒绝。
+- Knowledge review 对 `evidence_candidate_v2` 的 digest 信任必须从 append-only ledger 精确回放 SourceCandidate 与 SourceSnapshot lineage，并重新执行 synthetic/sensitive-data 一致性检查。
+- `evaluate_semantic_layer.py`、`rehearse_demo.py` 和 `validate_fhir_r4.py` 可在无 editable import path 的隔离 Python 入口中运行；已增加入口回归测试。
+- README 现明确区分普通离线测试的 3 个条件 skip 与最终验收，固定官方 FHIR R4 schema SHA-256，并要求先验哈希、再执行零 skip 全量测试和独立校验器。
+
+### AUD-R4.3 最终验证证据
+
+```text
+官方 FHIR R4 schema SHA-256:
+75e5560da3cf503895a44c8ca7af17a83b4cca6c2cb5ba1883d2aec0d1cb5ac6
+
+全量 pytest（配置官方 schema）: 932 passed, 0 skipped
+compileall（continucare/app.py/pages/scripts）: 通过
+离线 Layer 3 semantic evaluation: 全部用例 passed
+连续离线 demo rehearsal: 3/3 passed
+官方 FHIR 独立校验器: 7 类示例资源全部 valid
+git diff --check / staged diff check: 通过
+```
+
+- 修复后的 Browser 核心故事、异常/重放路径和桌面/移动端检查均通过；没有真实患者、真实消息发送、真实飞书/Aily/Bitable、EMR 写入或部署。
+- Claude Opus 最终高风险复核没有提出剩余代码级 BLOCKER。Codex 最终裁决：只有会造成错误验收、错误能力声明、安全/隐私/数据完整性失真的关键文档—代码矛盾才是 blocker；单纯缺少医院生产化能力属于已披露限制，不阻止比赛级合成原型交付。
+- 当前结论仅是 **competition-grade synthetic engineering prototype PASS**，不是临床验证、医院试点、生产可用、医疗器械认证或已量化业务收益。
+
+### AUD-R4.4 数据、工作区与下一步边界
+
+- `data/continucare.db` 保持 SHA-256 `0d0b35a97d96faee19015d8917b6b5e42a65ff40a2dd99dca967d5b02e6ef585`、size `311296`、mtime epoch `1786644509`；无 journal/WAL/SHM。
+- `docs/ui_product_design_brief_2026-08-13.md` 继续保持受保护、未跟踪、未修改、未暂存，SHA-256 `e9e03bde1051f43ec8dbca2695716a70588b448e47b37e434015934121be03a6`。
+- 官方 FHIR schema 只存在本机临时路径 `/tmp/fhir-r4-schema.zip`，不进入 Git；临时文件消失后必须按 README 重新下载并核对固定哈希。
+- 官方 40 强模板要求的企业名称/命题原名、队名、成员分工和真实飞书能力仍需用户与队友确认。当前仓库只有飞书/Aily/Bitable 协议与 FakeTransport 证据，不得写成真实租户已联调。
+- 在用户和队友完成讨论前，不默认实施真实外部集成、公开部署、医院/患者数据、临床规则、Knowledge alias UI consumer 或其他生产化工作。
 
 ## AUD-R2. 独立全项目审核 blocker 收口（2026-08-15，已完成）
 
