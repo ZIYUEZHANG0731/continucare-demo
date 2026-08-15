@@ -111,13 +111,15 @@ def _event(
     event_id: str,
     created_at: str = "2026-08-14T09:00:00+00:00",
     actor_type: str = "deterministic_workflow",
+    entity_type: str = "Task",
+    entity_id: str = "task-1",
     details: dict | None = None,
 ) -> AuditEvent:
     return AuditEvent(
         event_id=event_id,
         patient_id="synthetic-patient-001",
-        entity_type="Task",
-        entity_id="task-1",
+        entity_type=entity_type,
+        entity_id=entity_id,
         event_type=event_type,
         actor_type=actor_type,
         details_json=details or {},
@@ -131,6 +133,25 @@ def _project(stage: CompetitionDemoStage, **updates):
     if stage in TASK_STATUSES:
         tasks = (_task(TASK_STATUSES[stage]),)
     return project_audit_trail(progress, tasks=tasks, **updates)
+
+
+def _provenance(provenance_id: str, *targets: str) -> dict:
+    return {
+        "resourceType": "Provenance",
+        "id": provenance_id,
+        "target": [{"reference": target} for target in targets],
+    }
+
+
+def _only_action(event: AuditEvent, *provenances: dict):
+    projection = project_audit_trail(
+        _progress(CompetitionDemoStage.TASK_REQUESTED),
+        events=(event,),
+        tasks=(_task("requested"),),
+        provenances=provenances,
+    )
+    assert len(projection.actions) == 1
+    return projection.actions[0]
 
 
 @pytest.mark.parametrize(
@@ -273,6 +294,164 @@ def test_action_time_order_uses_real_instants_across_offsets():
     )
 
     assert [item.event_id for item in projection.actions] == ["earlier", "later"]
+
+
+def test_task_resource_reference_does_not_match_longer_task_id_history():
+    action = _only_action(
+        _event("manual_review_task_created", event_id="task-created"),
+        _provenance("task-10-v1", "Task/task-10/_history/1"),
+    )
+
+    assert action.provenance_refs == ()
+
+
+@pytest.mark.parametrize("other_id", ("task-10", "task-100", "task-1-copy"))
+def test_task_resource_reference_does_not_match_any_shared_prefix_id(other_id):
+    action = _only_action(
+        _event("manual_review_task_created", event_id="task-created"),
+        _provenance("other-task", f"Task/{other_id}"),
+        _provenance("other-task-history", f"Task/{other_id}/_history/2"),
+    )
+
+    assert action.provenance_refs == ()
+
+
+def test_task_creation_links_only_patient_confirmation_resource_provenance():
+    action = _only_action(
+        _event("manual_review_task_created", event_id="task-created"),
+        _provenance("confirmed", "Task/task-1"),
+        _provenance("acknowledged", "Task/task-1/_history/2"),
+        _provenance("future", "Task/task-1/_history/5"),
+    )
+
+    assert action.provenance_refs == ("Provenance/confirmed",)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "version", "provenance_id"),
+    (
+        ("manual_review_task_acknowledged", "2", "acknowledged"),
+        ("manual_review_task_started", "4", "started"),
+        ("manual_review_outcome_recorded", "5", "outcome"),
+        ("manual_review_communication_approved", "5", "approved"),
+    ),
+)
+def test_task_lifecycle_event_with_direct_provenance_links_only_its_action(
+    event_type, version, provenance_id
+):
+    action = _only_action(
+        _event(
+            event_type,
+            event_id=f"event-{provenance_id}",
+            details={
+                "provenance_id": provenance_id,
+                "task_ref": f"Task/task-1/_history/{version}",
+                "task_version": version,
+            },
+        ),
+        _provenance("confirmed", "Task/task-1"),
+        _provenance("acknowledged", "Task/task-1/_history/2"),
+        _provenance("started", "Task/task-1/_history/3", "Task/task-1/_history/4"),
+        _provenance("outcome", "Task/task-1/_history/5", "Communication/message-1/_history/1"),
+        _provenance("approved", "Communication/message-1/_history/2"),
+    )
+
+    assert action.provenance_refs == (f"Provenance/{provenance_id}",)
+
+
+def test_task_v2_event_does_not_link_other_or_future_versions():
+    action = _only_action(
+        _event(
+            "manual_review_task_acknowledged",
+            event_id="task-v2",
+            details={
+                "provenance_id": "task-v2",
+                "task_ref": "Task/task-1/_history/2",
+                "task_version": "2",
+            },
+        ),
+        _provenance("task-v1", "Task/task-1/_history/1"),
+        _provenance("task-v2", "Task/task-1/_history/2"),
+        _provenance("task-v3", "Task/task-1/_history/3"),
+        _provenance("task-v4", "Task/task-1/_history/4"),
+    )
+
+    assert action.provenance_refs == ("Provenance/task-v2",)
+
+
+@pytest.mark.parametrize("version", ("1", "2"))
+def test_summary_generation_links_only_its_exact_summary_version(version):
+    action = _only_action(
+        _event(
+            "manual_review_brief_generated",
+            event_id=f"summary-v{version}",
+            entity_type="Layer4SummaryDraft",
+            entity_id="summary-1",
+            details={
+                "summary_ref": f"urn:continucare:summary:summary-1:version:{version}",
+                "summary_version": version,
+                "task_ref": "Task/task-1/_history/5",
+                "communication_ref": f"Communication/message-1/_history/{version}",
+            },
+        ),
+        _provenance("task-v5", "Task/task-1/_history/5"),
+        _provenance("communication-v1", "Communication/message-1/_history/1"),
+        _provenance("communication-v2", "Communication/message-1/_history/2"),
+        _provenance("summary-v1", "urn:continucare:summary:summary-1:version:1"),
+        _provenance("summary-v2", "urn:continucare:summary:summary-1:version:2"),
+    )
+
+    assert action.provenance_refs == (f"Provenance/summary-v{version}",)
+
+
+def test_doctor_review_uses_result_summary_version_for_exact_provenance():
+    action = _only_action(
+        _event(
+            "doctor_reviewed_summary",
+            event_id="doctor-review",
+            entity_type="Layer4SummaryDraft",
+            entity_id="summary-1",
+            actor_type="doctor",
+            details={
+                "source_summary_version": "1",
+                "result_summary_version": "2",
+            },
+        ),
+        _provenance("summary-v1", "urn:continucare:summary:summary-1:version:1"),
+        _provenance("doctor-review", "urn:continucare:summary:summary-1:version:2"),
+        _provenance("future-summary", "urn:continucare:summary:summary-1:version:3"),
+    )
+
+    assert action.provenance_refs == ("Provenance/doctor-review",)
+
+
+def test_missing_exact_task_version_does_not_fail_open_to_all_history():
+    action = _only_action(
+        _event("future_task_event", event_id="missing-exact-ref"),
+        _provenance("task-v1", "Task/task-1/_history/1"),
+        _provenance("task-v2", "Task/task-1/_history/2"),
+        _provenance("task-v3", "Task/task-1/_history/3"),
+    )
+
+    assert action.provenance_refs == ()
+
+
+def test_direct_provenance_is_stable_and_never_duplicated():
+    action = _only_action(
+        _event(
+            "manual_review_task_acknowledged",
+            event_id="direct-deduplicated",
+            details={
+                "provenance_id": "task-v2",
+                "task_ref": "Task/task-1/_history/2",
+                "task_version": "2",
+            },
+        ),
+        _provenance("task-v2", "Task/task-1/_history/2"),
+        _provenance("task-v2", "Task/task-1/_history/2"),
+    )
+
+    assert action.provenance_refs == ("Provenance/task-v2",)
 
 
 def test_unknown_event_and_mock_event_are_safe_in_first_layer():

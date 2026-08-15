@@ -526,21 +526,62 @@ def _audit_resource_version(details: dict[str, Any]) -> str | None:
     return None
 
 
+def _audit_exact_target_refs(event: Any, details: dict[str, Any]) -> tuple[str, ...]:
+    """Return only persisted, exact targets for the event's primary resource."""
+
+    entity_type = str(getattr(event, "entity_type", "") or "").strip()
+    entity_id = str(getattr(event, "entity_id", "") or "").strip()
+
+    summary_ref = str(details.get("summary_ref") or "").strip()
+    if summary_ref:
+        return (summary_ref,)
+
+    if entity_type in {"Layer4SummaryDraft", "Summary"}:
+        version = str(
+            details.get("result_summary_version")
+            or details.get("summary_version")
+            or details.get("resource_version")
+            or ""
+        ).strip()
+        if entity_id and version:
+            return (f"urn:continucare:summary:{entity_id}:version:{version}",)
+        return ()
+
+    explicit_ref = ""
+    if entity_type == "Task":
+        explicit_ref = str(details.get("task_ref") or "").strip()
+    elif entity_type == "Communication":
+        explicit_ref = str(details.get("communication_ref") or "").strip()
+    if explicit_ref:
+        return (explicit_ref,)
+
+    if not entity_type or not entity_id:
+        return ()
+    version = _audit_resource_version(details)
+    if version:
+        return (f"{entity_type}/{entity_id}/_history/{version}",)
+    return (f"{entity_type}/{entity_id}",)
+
+
 def _audit_provenance_refs(event: Any, provenances: tuple[dict[str, Any], ...]) -> tuple[str, ...]:
     details = getattr(event, "details_json", {}) or {}
-    entity_id = str(getattr(event, "entity_id", ""))
-    refs = []
     direct = str(details.get("provenance_id") or "").strip()
     if direct:
-        refs.append(f"Provenance/{direct}")
+        return (f"Provenance/{direct}",)
+
+    exact_targets = set(_audit_exact_target_refs(event, details))
+    if not exact_targets:
+        return ()
+
+    refs = []
     for item in provenances:
         provenance_id = str(item.get("id") or "").strip()
-        targets = [
+        targets = {
             str(target.get("reference") or "")
             for target in item.get("target", ())
             if isinstance(target, dict)
-        ]
-        if provenance_id and entity_id and any(entity_id in target for target in targets):
+        }
+        if provenance_id and exact_targets.intersection(targets):
             refs.append(f"Provenance/{provenance_id}")
     return tuple(dict.fromkeys(refs))
 
