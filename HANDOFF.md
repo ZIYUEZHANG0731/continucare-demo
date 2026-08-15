@@ -14,8 +14,9 @@
   [`docs/28_knowledge_ops_p0_p1_p2_readiness.md`](docs/28_knowledge_ops_p0_p1_p2_readiness.md)
   顶部明确标识历史快照，以及将当前能力权威路由到 docs/30、docs/31、docs/32
   和主线集成报告完成修复。两个 blocker 均已处理。
-- 三项 non-blocking **尚未处理**，且不阻止进入队友 UI 意见收集：README 页面
-  名称陈旧；`clear_demo_session_state` 未清理部分当前 UI key；折叠状态的
+- README 页面名称陈旧这一 non-blocking 已在 `AUD-R3` 文档真实性切片处理。
+- 剩余两项 non-blocking 尚未处理，且不阻止进入队友 UI 意见收集：
+  `clear_demo_session_state` 未清理部分当前 UI key；折叠状态的
   `aria-controls` target 尚未进入 DOM。
 - v2 alias UI consumer integration 仍未实施。后续队友应先独立观察和提出意见，
   不直接修改代码。

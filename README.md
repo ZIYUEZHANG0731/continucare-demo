@@ -2,13 +2,15 @@
 
 用版本化 FHIR R4 `Questionnaire` 动态驱动合成患者随访，并通过受控 Care Agent 把患者自由表达整理成待确认候选；患者确认后，第二层将答案保存为完整 `QuestionnaireResponse`，把明确事实确定性沉淀为可追溯的 `Observation`。
 
-> **安全边界：仅使用合成数据。系统不是医疗急救通道，不生成诊断、治疗或用药建议。**
+> **安全边界：仅使用合成数据。系统不是医疗急救通道，不诊断、不治疗、不分诊，也不生成用药建议。**
 
-当前首页主入口为 M5-D“开始完整比赛 Demo”：它会在用户明确同意后原子重置本地合成运行数据，只生成固定原话“我今天拉肚子。”的 Layer 3 未确认候选。患者确认、护士处理与批准、医生简报生成/刷新仍分别需要明确人工点击；进度从 SQLite 事实恢复，不依赖浏览器 session state。完整设计见 [M5-D 稳定的一键比赛 Demo](docs/28_m5_d_competition_demo.md)。
+当前仍是 Streamlit 本地合成 Web 原型，不是原生 App、临床试点或生产系统。首页名称为“合成演示导览”，主故事按五步展开：患者表达 → 患者确认 → 护士核对 → 医生速览 → 记录追溯。开始新一轮会在用户明确同意后原子替换本地合成运行数据，并生成固定原话“我今天拉肚子。”的未确认候选；患者确认、护士核对记录和未发送沟通文字、医生生成/刷新复诊速览仍分别需要明确人工点击。进度从 SQLite 事实恢复，不依赖浏览器 session state。Knowledge 是独立资料库，不属于五步完成度。完整设计见 [M5-D 稳定的一键比赛 Demo](docs/28_m5_d_competition_demo.md)。
 
 当前版本已接入小米 MiMo OpenAI-compatible 适配器；配置本地密钥时使用 `mimo-v2.5` JSON mode，分别承担受控抽取、Safety Critic 和患者语言改写。主抽取不可用时回退本地语义 Mock，辅助模型不可用时回退确定性硬规则或固定语言模板。无论哪种模式，Safety Agent 和患者确认门都不能绕过。
 
-M5-E 增加了可选飞书 Bot、Aily 和 Bitable 协议适配器、统一配置工厂与 FakeTransport 合同测试。默认配置为飞书/Aily `mock`、Bitable `disabled`，不读取 Token、不创建真实 transport、不认证、不探活、不发送或写入。代码已实现且 FakeTransport 合同已验证；真实租户验证和生产可用性均为否。详见 [飞书 / Aily 集成状态](docs/feishu_integration.md) 与 [M5-E 设计验收](docs/29_m5_e_optional_feishu_aily_adapters.md)。
+M5-E 增加了可选飞书 Bot、Aily 和 Bitable 协议适配器、统一配置工厂与 FakeTransport 合同测试。默认配置为飞书/Aily `mock`、Bitable `disabled`，不读取 Token、不创建真实 transport、不认证、不探活、不发送或写入；运行时 `SEND_ENABLED=False`，没有真实外部发送。代码已实现且 FakeTransport 合同已验证；真实租户验证和生产可用性均为否。详见 [飞书 / Aily 集成状态](docs/feishu_integration.md) 与 [M5-E 设计验收](docs/29_m5_e_optional_feishu_aily_adapters.md)。
+
+Knowledge v2 alias readiness 已合入代码主线，但 alias UI consumer integration 尚未实施；当前 Knowledge 页面仍展示既有四主题离线 bundle。Knowledge 保持 `knowledge_effect=informational_only`、`runtime_authority=none`，不授权运行时动作。
 
 ## 本地运行
 
@@ -95,11 +97,12 @@ CONTINUCARE_EXTERNAL_EGRESS_ENABLED=false
 
 ## 页面
 
-- 首页：先展示最终交付物，以及患者 → 护士 → 医生的闭环；
-- 患者随访：先展示本次结果、患者原话、记录事实和明确下一步；
-- 护士任务中心：先展示今天要处理什么、为什么进入队列以及任务最终结果；
-- 医生复诊简报：首屏用 30 秒呈现“患者报告、团队处理、复诊待确认”；
-- 工作流证据链：用人类可读的六阶段时间线还原结果形成过程，技术记录按需展开。
+- 合成演示导览：展示五步故事的当前角色、当前步骤和下一步；
+- 我的随访：展示患者原话、系统记法和明确的确认选择；
+- 护士工作台：处理例行记录核对，并核对尚未发送的沟通文字；
+- 复诊速览：分开呈现患者确认的事实、护理动作和尚未提供临床评估的边界；
+- 记录追溯：用人类可读的中文说明记录如何形成或停止，技术详情按需展开；
+- Knowledge 资料库 / 症状采集参考：独立只读，不读取患者故事，也不参与五步完成判定。
 
 ## 临床与标准依据
 
@@ -132,7 +135,7 @@ CONTINUCARE_EXTERNAL_EGRESS_ENABLED=false
 - 第四层第 3 步工程基线：双审批规则执行门、逐条件证据解释、Task 去重、版本化责任状态机及 Clinical Memory 历史；仓库无 active 临床规则，产品路径仍为 not_assessed
 - 第四层第 4 步工程基线：当前 Timeline 的确定性证据简报、生成时点门、Summary 版本链及医生接受/修改/拒绝；LLM 摘要仍未启用
 - 第四层第 5 步工程基线：版本化指标定义、current/stale/unknown/conflict 状态、单位一致的端点数值方向、快照版本链及 Provenance；不输出好转/恶化或风险解释
-- 第四层第 6 步工程基线：Timeline/State/Summary/Task 只读组合查询、patient/pathway 权限隔离、历史 as-of 回放、版本化证据图及组件级故障降级；尚未替换旧医生页面或接入真实 IAM/EMR
+- 第四层第 6 步工程基线：Timeline/State/Summary/Task 只读组合查询、patient/pathway 权限隔离、历史 as-of 回放、版本化证据图及组件级故障降级；真实 IAM/EMR 仍未接入
 - 旧 M0–M5 自由文本链继续作为兼容测试夹具，不是患者端主流程
 - M5-E：可选飞书/Aily/Bitable 合同、FakeTransport 与零 Token Mock fallback；真实租户联调仍未进行
 - M6：真实租户验收、回调与医院集成，仍不在本轮范围内
