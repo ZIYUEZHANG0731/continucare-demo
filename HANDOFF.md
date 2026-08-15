@@ -1,6 +1,6 @@
 # HANDOFF
 
-> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。**最新权威状态：2026-08-15，独立全项目审核提出的 B-01 与 B-02 两项 blocker 均已处理；A++ UI-1 至 UI-6 已完成 Full Validation，Knowledge v2 alias readiness 也已合入主线并通过完整集成验证。** 审核收口见下方 `AUD-R2`；Knowledge v2 merge commit 为 `88c85b3fb103e13f0770f385f01a0f1916a135ff`，完整证据见 [`docs/knowledge_v2_mainline_integration_validation_2026-08-14.md`](docs/knowledge_v2_mainline_integration_validation_2026-08-14.md)。A++ UI 最终测试代码基线是 `cad99d98f5cc13947d6075d62a628e6fc410d873`，其证据见 [`docs/ui_a_plus_plus_full_validation_report_2026-08-14.md`](docs/ui_a_plus_plus_full_validation_report_2026-08-14.md)。后续不得再按旧历史中“A++ 尚未实施”“Knowledge v2 尚未合入”或 docs/28 的历史 P0–P2 状态描述执行。
+> 给完全没有上下文的新会话使用。先完整阅读根目录 `AGENTS.md`，再阅读本文件。**最新权威状态：2026-08-15，独立全项目审核提出的 B-01 与 B-02 两项 blocker 及三项 non-blocking 均已处理；A++ UI-1 至 UI-6 已完成 Full Validation，Knowledge v2 alias readiness 也已合入主线并通过完整集成验证。** 审核与 UI hardening 收口见下方 `AUD-R2`；Knowledge v2 merge commit 为 `88c85b3fb103e13f0770f385f01a0f1916a135ff`，完整证据见 [`docs/knowledge_v2_mainline_integration_validation_2026-08-14.md`](docs/knowledge_v2_mainline_integration_validation_2026-08-14.md)。A++ UI 最终测试代码基线是 `cad99d98f5cc13947d6075d62a628e6fc410d873`，其证据见 [`docs/ui_a_plus_plus_full_validation_report_2026-08-14.md`](docs/ui_a_plus_plus_full_validation_report_2026-08-14.md)。后续不得再按旧历史中“A++ 尚未实施”“Knowledge v2 尚未合入”或 docs/28 的历史 P0–P2 状态描述执行。
 
 ## AUD-R2. 独立全项目审核 blocker 收口（2026-08-15，已完成）
 
@@ -15,9 +15,17 @@
   顶部明确标识历史快照，以及将当前能力权威路由到 docs/30、docs/31、docs/32
   和主线集成报告完成修复。两个 blocker 均已处理。
 - README 页面名称陈旧这一 non-blocking 已在 `AUD-R3` 文档真实性切片处理。
-- 剩余两项 non-blocking 尚未处理，且不阻止进入队友 UI 意见收集：
-  `clear_demo_session_state` 未清理部分当前 UI key；折叠状态的
-  `aria-controls` target 尚未进入 DOM。
+- 剩余两项 non-blocking 已由 UI-H1 代码 commit
+  `569c40851f4598182129dd4840d3ff7aec093b0f` 收口：显式重新开始会精确清理
+  patient / nurse / doctor 当前浏览器状态并保留 Knowledge 与无关状态；Disclosure
+  折叠态均有唯一 hidden inert target，展开态均绑定唯一真实可见内容 target，护士来源
+  与记录使用独立稳定 ID，未知 query fail closed。
+- UI-H1 最终验证为 Knowledge targeted `12 passed`、UI targeted `248 passed`、
+  全量 `911 passed, 3 skipped`，三个 skip 仍仅因未配置 `FHIR_R4_SCHEMA_ZIP`；
+  `compileall` 与 `git diff --check` 通过。此前 Browser 已验证 session reset 与
+  Nurse / Doctor / Audit；本次单独复验 Knowledge 折叠、展开、再次折叠和 unknown query，
+  `1280×720` / `390×844` 均无 console error/warn、overlay 或横向溢出，展开 target
+  locator 为 `visible=true`。工作区数据库与受保护 brief 均未变化。
 - v2 alias UI consumer integration 仍未实施。后续队友应先独立观察和提出意见，
   不直接修改代码。
 
