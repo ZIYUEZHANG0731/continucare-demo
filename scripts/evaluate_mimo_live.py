@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT_TEXT = str(PROJECT_ROOT)
+sys.path[:] = [item for item in sys.path if item != PROJECT_ROOT_TEXT]
+sys.path.insert(0, PROJECT_ROOT_TEXT)
 
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.agents.contracts import CandidateIssueAction

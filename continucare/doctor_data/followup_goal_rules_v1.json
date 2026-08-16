@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "ruleSetId": "continucare-followup-goals-v1.0.0",
+  "status": "clinical_review_draft",
+  "categories": [
+    {
+      "categoryId": "core_outcome",
+      "label": "核心疗效指标",
+      "description": "由疾病管理目标和治疗目标决定，避免只关注用药反应而漏掉主要结局。",
+      "order": 10
+    },
+    {
+      "categoryId": "medication_safety",
+      "label": "用药安全与耐受",
+      "description": "根据当前药物、适应证和适用人群，从受控知识包中匹配。",
+      "order": 20
+    },
+    {
+      "categoryId": "personalized",
+      "label": "患者个体化补充",
+      "description": "根据电子病历中的近期症状、合并情况与随访能力提高优先级。",
+      "order": 30
+    },
+    {
+      "categoryId": "doctor_custom",
+      "label": "医生自定义",
+      "description": "由医生结合本次诊疗判断添加，并保留创建者和版本记录。",
+      "order": 40
+    }
+  ],
+  "sources": [
+    {
+      "sourceId": "nhc-obesity-guideline-2024",
+      "title": "肥胖症诊疗指南（2024年版）",
+      "authority": "中华人民共和国国家卫生健康委员会",
+      "canonicalUrl": "https://www.nhc.gov.cn/cms-search/downFiles/c171fa2416864a21b69278fd04a33f21.pdf"
+    }
+  ],
+  "rules": [
+    {
+      "ruleId": "adult-chronic-weight-management-core-v1",
+      "match": {
+        "indications": ["chronic_weight_management"],
+        "populations": ["adult_cn_label_population"],
+        "pathwayCodes": ["GLP1-14D"]
+      },
+      "metrics": [
+        {
+          "metricId": "body_weight",
+          "displayName": "体重",
+          "clinicalIntent": "连续记录体重变化，用于评估体重管理目标；具备有效身高数据时可进一步计算BMI。",
+          "dataType": "quantity",
+          "timeWindow": "measurement_time",
+          "unit": "kg",
+          "chartKind": "line",
+          "categoryId": "core_outcome",
+          "priority": "核心必选",
+          "selectionPolicy": "required",
+          "defaultFrequency": "weekly",
+          "reason": "本次诊疗目标是成人长期体重管理，体重是直接反映治疗目标的核心结局指标。",
+          "contextRefs": ["condition-weight-management", "device-home-scale"],
+          "collection": {
+            "inputKind": "decimal",
+            "prompt": "请记录本次体重",
+            "minimum": 20,
+            "maximum": 400,
+            "unit": "kg",
+            "derivedMetrics": ["bmi_when_height_available"]
+          },
+          "evidence": [
+            {
+              "claimId": "nhc-obesity-anthropometry-weight-bmi-2024-001",
+              "claim": "肥胖症评估包含体重等人体测量指标，BMI按体重（kg）除以身高（m）的平方计算。",
+              "allowedUse": ["followup_metric_selection", "measurement_guidance"],
+              "sourceId": "nhc-obesity-guideline-2024",
+              "locator": "附件1 人体测量学指标测量及计算方法，第53页"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

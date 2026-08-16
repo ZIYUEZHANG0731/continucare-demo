@@ -25,6 +25,7 @@ from continucare.services.confirmed_review import ConfirmedReviewService
 from continucare.services.demo_scenarios import load_manual_review_scenario
 from continucare.services.manual_review_workflow import (
     MANUAL_REVIEW_DRAFT_TEMPLATE,
+    MANUAL_REVIEW_DRAFT_TEMPLATES,
     ManualReviewWorkflowService,
 )
 
@@ -223,6 +224,39 @@ def test_patient_visible_template_is_outcome_symmetric(tmp_path):
         payloads.append(result.communication["payload"])
 
     assert payloads == [[{"contentString": MANUAL_REVIEW_DRAFT_TEMPLATE}]] * 2
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status_reason"),
+    [
+        ("reviewed_no_escalation", "human-reviewed-no-escalation"),
+        ("clarification_required", "human-clarification-required"),
+        ("escalated_to_doctor", "human-escalated-to-doctor"),
+    ],
+)
+def test_manual_safety_review_dispositions_are_human_initiated_and_not_assessed(
+    tmp_path, outcome, status_reason
+):
+    db_path = tmp_path / f"{outcome}.db"
+    store, _, service, task = _scenario(db_path)
+    in_progress = _advance_to_in_progress(service, task)
+
+    result = service.record_outcome(
+        patient_id=DEMO_PATIENT_ID,
+        task_id=task["id"],
+        outcome=outcome,
+        note=f"护士人工选择：{outcome}",
+        occurred_at=_after(in_progress),
+    )
+
+    assert result.task["status"] == "completed"
+    assert result.task["statusReason"]["coding"][0]["code"] == status_reason
+    assert result.communication["payload"] == [
+        {"contentString": MANUAL_REVIEW_DRAFT_TEMPLATES[outcome]}
+    ]
+    assert result.audit_event.details_json["outcome"] == outcome
+    assert result.audit_event.details_json["clinical_assessment"] == "not_assessed"
+    assert store.list_alerts(DEMO_PATIENT_ID) == []
 
 
 @pytest.mark.parametrize("decision", ["rejected", "cancelled"])

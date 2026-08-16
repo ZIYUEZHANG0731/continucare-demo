@@ -1,0 +1,13 @@
+.git
+.venv
+**/__pycache__
+**/*.pyc
+patient-web
+doctor-web/node_modules
+doctor-web/dist
+data
+output
+submission
+tests
+docs
+assets

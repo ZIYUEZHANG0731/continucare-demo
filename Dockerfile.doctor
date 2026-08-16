@@ -1,0 +1,24 @@
+FROM node:22-alpine AS frontend
+WORKDIR /build/doctor-web
+COPY doctor-web/package.json doctor-web/package-lock.json ./
+RUN npm ci
+COPY doctor-web/ ./
+RUN npm run build
+
+FROM python:3.11-slim AS runtime
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    CONTINUCARE_DOCTOR_HOST=0.0.0.0 \
+    CONTINUCARE_DOCTOR_PORT=8080 \
+    CONTINUCARE_DB_PATH=/data/continucare.db
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY continucare/ ./continucare/
+COPY --from=frontend /build/doctor-web/dist/ ./doctor-web/dist/
+RUN pip install --no-cache-dir .
+RUN useradd --create-home --uid 10001 appuser && mkdir -p /data && chown appuser:appuser /data
+USER appuser
+EXPOSE 8080
+VOLUME ["/data"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+CMD ["uvicorn", "continucare.doctor_web:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]

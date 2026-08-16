@@ -2,16 +2,30 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT_TEXT = str(PROJECT_ROOT)
+sys.path[:] = [item for item in sys.path if item != PROJECT_ROOT_TEXT]
+sys.path.insert(0, PROJECT_ROOT_TEXT)
+
+import continucare
 import streamlit as st
 
+if Path(continucare.__file__).resolve().parent.parent != PROJECT_ROOT:
+    raise RuntimeError("Streamlit imported continucare from outside this project")
+
 from continucare.config import get_settings
+from continucare.db import initialize_database
 from continucare.demo_data import SCENARIOS
 from continucare.knowledge import load_builtin_bundle
+from continucare.product_ui import inject_product_styles, render_demo_role_hub
 from continucare.services.competition_demo import (
     CompetitionDemoStartError,
     load_technical_demo_atomically,
     read_competition_demo,
-    start_competition_demo,
+    reset_competition_demo,
 )
 from continucare.ui import (
     clear_demo_session_state,
@@ -21,31 +35,6 @@ from continucare.ui import (
 )
 
 
-def _start_new_demo(db_path) -> None:
-    with st.spinner("正在准备新的合成演示，请勿重复操作……"):
-        try:
-            start_competition_demo(db_path)
-        except CompetitionDemoStartError:
-            st.error("新一轮暂时无法开始，原来的演示记录没有被替换。请重试。")
-            return
-    clear_demo_session_state(st)
-    st.session_state["competition::notice"] = (
-        "新的合成演示已经准备好。下一步由患者确认待确认内容。"
-    )
-    st.rerun()
-
-
-def _render_start_action(db_path) -> None:
-    with st.container(key="cc_demo_start_action"):
-        if st.button(
-            "开始一轮合成演示",
-            type="primary",
-            width="stretch",
-            key="competition::start",
-        ):
-            _start_new_demo(db_path)
-
-
 st.set_page_config(
     page_title="ContinuCare｜合成演示导览",
     layout="wide",
@@ -53,7 +42,9 @@ st.set_page_config(
 )
 
 settings = get_settings()
+initialize_database(settings.db_path)
 inject_global_styles(st)
+inject_product_styles(st)
 progress = read_competition_demo(settings.db_path)
 try:
     load_builtin_bundle()
@@ -66,7 +57,7 @@ st.markdown(
     <header class="cc-demo-header">
       <h1>ContinuCare <span>｜合成演示导览</span></h1>
       <p>角色切换仅用于演示，不代表已实现身份认证或权限控制。</p>
-      <p class="cc-demo-boundary">不提供临床评估、诊断或风险分级；不会真实发送；外部系统为 Mock。</p>
+      <p class="cc-demo-boundary">不提供临床评估、诊断或风险分级；不会真实发送；业务外部系统为 Mock。患者在今日随访中发送合成回答时，系统默认调用豆包整理待确认内容。</p>
     </header>
     <p class="cc-demo-claim">患者说的话，一路跟到复诊速览。</p>
     """,
@@ -80,11 +71,13 @@ if notice:
 render_demo_guide(
     st,
     progress,
-    render_primary_action=(
-        (lambda: _render_start_action(settings.db_path))
-        if not progress.generation and not progress.integrity_issue
-        else None
-    ),
+    render_primary_action=None,
+)
+
+render_demo_role_hub(
+    st,
+    next_page=progress.next_page,
+    next_label=progress.next_label,
 )
 
 with st.expander(
@@ -138,7 +131,7 @@ with st.expander(
 ):
     if has_existing_story:
         st.warning(
-            "重新开始会替换本轮全部本地合成演示数据，包括记录追溯。"
+            "重置会替换本轮全部本地合成演示数据，包括记录追溯。"
             "代码和独立 Knowledge 资料不受影响。"
         )
     else:
@@ -151,13 +144,25 @@ with st.expander(
     if has_existing_story:
         with st.container(key="cc_demo_reset_action"):
             if st.button(
-                "替换并开始新一轮",
+                "清空本轮并返回医生启动前",
                 type="primary",
                 width="stretch",
                 disabled=not replace_confirmed,
-                key="competition::restart",
+                key="competition::reset_to_doctor",
             ):
-                _start_new_demo(settings.db_path)
+                try:
+                    reset_competition_demo(
+                        settings.db_path,
+                        expected_generation=progress.generation,
+                    )
+                except CompetitionDemoStartError as exc:
+                    st.error(str(exc))
+                else:
+                    clear_demo_session_state(st)
+                    st.session_state["competition::notice"] = (
+                        "本轮已清空。请从医生页面确认并启动新的随访方案。"
+                    )
+                    st.rerun()
 
     st.divider()
     st.markdown("#### 旧技术演示")

@@ -22,6 +22,28 @@ def load_fhir_artifact(file_name: str, resource_type: str) -> dict:
     return _load(file_name, resource_type)
 
 
+def load_questionnaire_for_reference(reference: str) -> dict:
+    """Resolve an exact packaged Questionnaire canonical|version reference."""
+
+    from continucare.pathways.registry import load_builtin_pathways
+
+    canonical, separator, version = reference.partition("|")
+    if not separator or not canonical or not version:
+        raise ValueError("Questionnaire reference must include canonical and version")
+    matches = []
+    for pathway in load_builtin_pathways().list():
+        for artifact in pathway.artifacts:
+            if (
+                artifact.resource_type == "Questionnaire"
+                and artifact.canonical == canonical
+                and artifact.version == version
+            ):
+                matches.append(artifact.file_name)
+    if len(set(matches)) != 1:
+        raise ValueError("Questionnaire reference is not uniquely governed")
+    return load_fhir_artifact(matches[0], "Questionnaire")
+
+
 def _load(name: str, resource_type: str) -> dict:
     data_dir = files("continucare.pathways.data.fhir")
     resource = json.loads(data_dir.joinpath(name).read_text("utf-8"))

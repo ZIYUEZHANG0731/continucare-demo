@@ -316,7 +316,7 @@ def build_summary_model_adapter(
     config: SemanticModelConfig | None = None,
 ) -> SummaryModelAdapter:
     config = config or SemanticModelConfig.from_environment()
-    if config.provider in {"xiaomi_mimo", "mimo"}:
+    if config.provider in {"xiaomi_mimo", "mimo", "volcengine_doubao", "doubao"}:
         return MiMoControlledSummaryAdapter(config)
     return UnconfiguredSummaryModelAdapter(config)
 

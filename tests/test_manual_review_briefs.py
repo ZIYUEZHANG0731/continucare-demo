@@ -10,7 +10,7 @@ from continucare.care_agent import CareAgentService
 from continucare.care_agent.model_api import SemanticModelConfig, UnconfiguredModelAdapter
 from continucare.care_engine import CareEngine
 from continucare.db import connect
-from continucare.demo_data import DEMO_PATIENT_ID
+from continucare.demo_data import DEMO_PATIENT_ID, MANUAL_REVIEW_MESSAGE
 from continucare.layer4 import (
     BRIEF_SUMMARY_KIND,
     DoctorReviewService,
@@ -31,7 +31,7 @@ from continucare.services.manual_review_workflow import ManualReviewWorkflowServ
 
 
 PATHWAY_CODE = "GLP1-14D"
-PATHWAY_VERSION = "1.0.0"
+PATHWAY_VERSION = "1.1.0"
 
 
 def _after(resource, seconds: int = 1) -> str:
@@ -136,8 +136,8 @@ def test_pending_and_ready_briefs_are_verbatim_versioned_and_traceable(tmp_path)
     assert pending.status == SummaryDraftStatus.SAFETY_REVIEWED
     assert pending.generation_mode == "deterministic"
     assert pending.model_name is None
-    assert pending.items[0].text == "我今天拉肚子。"
-    assert pending.items[0].evidence_refs[0].evidence_text == "我今天拉肚子。"
+    assert pending.items[0].text == MANUAL_REVIEW_MESSAGE
+    assert pending.items[0].evidence_refs[0].evidence_text == MANUAL_REVIEW_MESSAGE
     assert all(item.evidence_refs for item in pending.items)
     rendered = "\n".join(item.text for item in pending.items)
     assert "status=completed" in rendered

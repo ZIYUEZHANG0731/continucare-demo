@@ -67,6 +67,7 @@ class TemporalResolutionBasis(str, Enum):
     EXPLICIT_PATIENT_TEXT = "explicit_patient_text"
     PENDING_QUESTION = "pending_question"
     PATIENT_CONFIRMATION = "patient_confirmation"
+    PATIENT_SELECTION = "patient_selection"
 
 
 class PendingActionType(str, Enum):
@@ -87,7 +88,10 @@ class CandidateOrigin(str, Enum):
 
 class CandidateSource(str, Enum):
     DETERMINISTIC_MOCK = "deterministic_mock"
+    DETERMINISTIC_CATALOG = "deterministic_catalog"
+    PATIENT_SELECTION = "patient_selection"
     MIMO = "mimo"
+    DOUBAO = "doubao"
     AILY = "aily"
 
 
@@ -113,6 +117,10 @@ class TerminologyMatchContract(StrictModel):
     validation_status: str
     approval_status: str
     target_hospital_validation_required: bool = True
+    source_catalog_id: str | None = None
+    source_catalog_version: str | None = None
+    source_catalog_sha256: str | None = None
+    source_catalog_status: str | None = None
 
 
 class ReportedSymptomMention(StrictModel):
@@ -259,9 +267,12 @@ class SemanticTask(StrictModel):
     pathway_version: str
     questionnaire_canonical: str
     questionnaire_version: str
-    terminology_catalog_id: str | None = None
-    terminology_catalog_version: str | None = None
+    knowledge_release_id: str
+    terminology_catalog_id: str
+    terminology_catalog_version: str
+    terminology_catalog_sha256: str
     message_text: str = Field(min_length=1, max_length=4000)
+    focus_link_ids: list[str] = Field(default_factory=list)
     existing_answers: dict[str, Any] = Field(default_factory=dict)
     conversation_context: ConversationContext = Field(
         default_factory=ConversationContext
@@ -408,6 +419,10 @@ class AgentRunRecord(StrictModel):
     mode: str
     input_text: str
     input_hash: str
+    knowledge_release_id: str | None = None
+    terminology_catalog_id: str | None = None
+    terminology_catalog_version: str | None = None
+    terminology_catalog_sha256: str | None = None
     output_json: dict[str, Any]
     status: str
     model_provider: str | None = None

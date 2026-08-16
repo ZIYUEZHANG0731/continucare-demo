@@ -125,6 +125,75 @@ def test_agent_run_is_persisted_and_same_task_replays_idempotently(tmp_path):
     assert len(store.list_agent_runs(session.session_id)) == 1
     assert first.record.model_provider is None
     assert first.result.mode == "local_semantic_mock"
+    assert first.record.knowledge_release_id == first.task.knowledge_release_id
+    assert first.record.terminology_catalog_id == first.task.terminology_catalog_id
+    assert (
+        first.record.terminology_catalog_sha256
+        == first.task.terminology_catalog_sha256
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "knowledge_release_id",
+        "terminology_catalog_id",
+        "terminology_catalog_version",
+        "terminology_catalog_sha256",
+    ],
+)
+def test_agent_run_replay_fails_closed_on_stored_boundary_mismatch(
+    tmp_path, monkeypatch, field
+):
+    store, _, session, service = _service(tmp_path)
+    received_at = "2026-08-02T01:00:00+00:00"
+    first = service.analyze(
+        session.session_id,
+        "我现在没有腹痛。",
+        received_at=received_at,
+    )
+    with connect(store.db_path) as connection:
+        connection.execute(
+            f"UPDATE agent_runs SET {field} = ? WHERE run_id = ?",
+            ("tampered-release-boundary", first.result.run_id),
+        )
+
+    # Exercise the task-id replay path directly. The recent-turn shortcut has
+    # its own boundary guard, while this path protects post-commit retries.
+    monkeypatch.setattr(store, "list_agent_runs", lambda session_id: [])
+    with pytest.raises(
+        ValueError, match="AgentRun knowledge or terminology release mismatch"
+    ):
+        service.analyze(
+            session.session_id,
+            "我现在没有腹痛。",
+            received_at=received_at,
+        )
+
+    assert len(SQLiteStore(store.db_path).list_agent_runs(session.session_id)) == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "violation"),
+    [
+        ("knowledge_release_id", "knowledge_release_mismatch"),
+        ("terminology_catalog_id", "terminology_catalog_id_mismatch"),
+        ("terminology_catalog_version", "terminology_catalog_version_mismatch"),
+        ("terminology_catalog_sha256", "terminology_catalog_digest_mismatch"),
+    ],
+)
+def test_safety_agent_fails_closed_on_release_identity_mismatch(
+    tmp_path, field, violation
+):
+    _, _, session, service = _service(tmp_path)
+    interaction = service.analyze(session.session_id, "过去24小时我吐了2次。")
+    task = interaction.task.model_copy(update={field: "mismatched-release-value"})
+
+    reviewed = SafetyAgent().review(task, interaction.result)
+
+    assert reviewed.status == SemanticStatus.BLOCKED
+    assert reviewed.candidates == []
+    assert violation in reviewed.safety_violations
 
 
 def test_safety_agent_rejects_unknown_link_code_and_invalid_evidence(tmp_path):
@@ -290,7 +359,7 @@ def _audit_state(store):
 
 def test_rejected_candidate_cannot_later_be_confirmed(tmp_path):
     store, _, session, service = _service(tmp_path)
-    interaction = service.analyze(session.session_id, "我今天拉肚子。")
+    interaction = service.analyze(session.session_id, "我今天有恶心。")
     candidate = interaction.result.candidates[0]
 
     service.reject_candidates(interaction.result.run_id, [candidate.candidate_id])
@@ -323,7 +392,7 @@ def test_rejected_candidate_cannot_later_be_confirmed(tmp_path):
 
 def test_reject_candidates_strictly_rejects_invalid_and_cross_run_ids(tmp_path):
     store, _, session, service = _service(tmp_path)
-    first = service.analyze(session.session_id, "我今天拉肚子。")
+    first = service.analyze(session.session_id, "我今天有恶心。")
     second = service.analyze(session.session_id, "过去24小时我吐了2次。")
     first_id = first.result.candidates[0].candidate_id
     second_id = second.result.candidates[0].candidate_id
@@ -353,7 +422,6 @@ def test_reject_candidates_strictly_rejects_invalid_and_cross_run_ids(tmp_path):
     [
         "before_material",
         "after_answer_context",
-        "after_symptom_report",
         "after_session",
         "after_resolution:0",
         "after_resolution:1",
@@ -366,7 +434,7 @@ def test_conversation_decision_faults_roll_back_all_effects(tmp_path, fault_stag
     store, _, session, service = _service(tmp_path)
     interaction = service.analyze(
         session.session_id,
-        "过去24小时我吐了2次，今天拉肚子。",
+        "过去24小时我吐了2次，现在有点恶心。",
     )
     candidate_ids = [item.candidate_id for item in interaction.result.candidates]
     assert len(candidate_ids) >= 2
@@ -392,7 +460,7 @@ def test_concurrent_different_candidate_decisions_have_one_atomic_winner(tmp_pat
     store, _, session, service = _service(tmp_path)
     interaction = service.analyze(
         session.session_id,
-        "过去24小时我吐了2次，今天拉肚子。",
+        "过去24小时我吐了2次，现在有点恶心。",
     )
     candidate_ids = [item.candidate_id for item in interaction.result.candidates]
     barrier = Barrier(2)
@@ -441,7 +509,7 @@ def test_concurrent_different_candidate_decisions_have_one_atomic_winner(tmp_pat
 
 def test_conversation_decision_sqlite_busy_is_a_stable_conflict(tmp_path):
     store, _, session, service = _service(tmp_path)
-    interaction = service.analyze(session.session_id, "我今天拉肚子。")
+    interaction = service.analyze(session.session_id, "我今天有恶心。")
     candidate_id = interaction.result.candidates[0].candidate_id
     before_business = _business_state(store, session.session_id)
     before_audit = _audit_state(store)
@@ -460,7 +528,7 @@ def test_duplicate_confirmation_has_no_business_or_audit_side_effects(tmp_path):
     store, _, session, service = _service(tmp_path)
     interaction = service.analyze(
         session.session_id,
-        "过去24小时我吐了2次，今天拉肚子。",
+        "过去24小时我吐了2次，现在有点恶心。",
     )
     candidate_ids = [item.candidate_id for item in interaction.result.candidates]
 
@@ -478,8 +546,8 @@ def test_duplicate_confirmation_has_no_business_or_audit_side_effects(tmp_path):
         "updated_at"
     ]
     assert _audit_state(store) == audit_before
-    assert len(business_before["answer_contexts"]) == 1
-    assert len(business_before["symptom_reports"]) == 1
+    assert len(business_before["answer_contexts"]) == 3
+    assert business_before["symptom_reports"] == []
 
 
 def test_confirm_original_closes_all_actions_before_old_candidate_retry(tmp_path):

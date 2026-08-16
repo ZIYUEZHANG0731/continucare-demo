@@ -7,8 +7,13 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urlparse
+
+from continucare.demo_data import MANUAL_REVIEW_MEANING, MANUAL_REVIEW_MESSAGE
+
+if TYPE_CHECKING:
+    from continucare.presentation import L5GovernanceView, L5SubmissionView
 
 
 COMPETITION_STEP_LABELS = (
@@ -27,7 +32,7 @@ COMPETITION_STEP_LABELS = (
 DEMO_GUIDE_STEPS = (
     "患者表达",
     "患者确认",
-    "护士核对",
+    "护士人工复核",
     "医生速览",
     "记录追溯",
 )
@@ -57,12 +62,12 @@ PATIENT_EMERGENCY_NOTICE = (
 
 
 NURSE_ROLE_BOUNDARY = (
-    "这里核对的是患者记录，不判断风险，也不提供诊疗建议。"
+    "系统只把每份患者确认记录交给护士；是否需要补充或上报医生，由护士人工决定。"
 )
 
 
 NURSE_RESULT_BOUNDARY = (
-    "这里只记录核对结果，不形成诊断、风险等级或治疗建议。"
+    "护士结果是人工工作流决定，不形成系统风险等级、诊断或治疗建议；本次未上报也不表示患者安全。"
 )
 
 
@@ -96,9 +101,12 @@ DOCTOR_DECISION_ACTIONS = (
 
 _NURSE_KNOWN_STAGES = {
     "not_started",
+    "plan_activated",
     "candidate_ready",
     "candidate_unsure",
     "candidate_rejected",
+    "patient_collecting",
+    "patient_review_ready",
     "patient_confirmed",
     "task_requested",
     "nurse_received",
@@ -392,6 +400,9 @@ _AUDIT_EVENT_ORDER = {
     "care_session_started": 20,
     "semantic_analysis_completed": 30,
     "semantic_candidate_patient_decision": 40,
+    "supplemental_patient_report_confirmed": 45,
+    "supplemental_patient_report_discarded": 45,
+    "supplemental_patient_report_reviewed": 85,
     "questionnaire_response_completed": 50,
     "manual_review_task_created": 60,
     "manual_review_task_acknowledged": 70,
@@ -448,6 +459,7 @@ def _audit_action_language(event: Any) -> tuple[str, str, str, str | None, str |
         "synthetic_nurse_demo_user": "护士",
         "nurse_demo_user": "护士",
         "nurse": "护士",
+        "synthetic_nurse": "护士",
         "doctor_demo_user": "医生",
         "doctor": "医生",
         "mock_notifier": "模拟服务",
@@ -482,16 +494,22 @@ def _audit_action_language(event: Any) -> tuple[str, str, str, str | None, str |
             "rejected": "本轮已停止",
         }.get(decision, "决定已记录")
         return "患者", action, "只保存患者真实作出的决定。", "等待患者确认", after
+    if event_type == "supplemental_patient_report_confirmed":
+        return "患者", "确认补充上报", "保留独立原话及豆包整理来源；不改写已完成随访。", None, "等待人工复核"
+    if event_type == "supplemental_patient_report_discarded":
+        return "患者", "放弃这条补充上报", "未形成护士复核记录。", None, "可重新输入"
+    if event_type == "supplemental_patient_report_reviewed":
+        return "护士", "复核患者补充上报", "只确认已查看并保留证据；未形成临床风险判断。", "等待人工复核", "已人工复核"
     if event_type == "questionnaire_response_completed":
         return "系统", "保存患者确认记录", "确认记录及其最终来源已经保存。", "等待患者确认", "患者确认已保存"
     if event_type == "manual_review_task_created":
-        return "系统", "创建例行记录核对", "把已确认记录交给护士核对；不是风险警报。", "患者确认已保存", "等待护士接手"
+        return "系统", "创建人工安全复核任务", "把每份已确认记录交给护士人工查看；系统没有按数值判断异常。", "患者确认已保存", "等待护士接手"
     if event_type == "manual_review_task_acknowledged":
         return "护士", "接手记录核对", "护士成为当前记录核对的处理者。", "等待护士接手", "护士已接手"
     if event_type == "manual_review_task_started":
-        return "护士", "开始核对", "记录核对进入处理中。", "护士已接手", "正在核对"
+        return "护士", "开始人工安全复核", "护士开始查看患者确认事实并自行决定后续动作。", "护士已接手", "正在人工复核"
     if event_type == "manual_review_outcome_recorded":
-        return "护士", "记录核对结果", "保存受控核对结果，并形成未发送的沟通文字。", "正在核对", "沟通文字待核对"
+        return "护士", "记录人工复核结果", "保存护士人工决定，并形成未发送的沟通文字；系统仍未进行临床分级。", "正在人工复核", "沟通文字待核对"
     if event_type == "manual_review_communication_approved":
         return "护士", "核对沟通文字", "只确认文字进入后续演示流程；没有真实发送。", "沟通文字待核对", "沟通文字已核对"
     if event_type == "manual_review_brief_generated":
@@ -745,7 +763,7 @@ def project_audit_trail(
         "candidate_unsure": ("active", "目前等待患者明确决定", "患者选择了“不太确定”", "患者仍可在患者页确认或拒绝；尚未形成患者确认记录或护士任务。"),
         "candidate_rejected": ("stopped", "本轮已结束：患者没有确认这段记录", "患者选择了“不是这个意思”", "患者原话和决定记录会保留；本轮不能立即重新表述。"),
         "patient_confirmed": ("active", "患者已确认，等待记录核对", "患者确认记录已经保存", "临床评估仍未进行。"),
-        "task_requested": ("active", "目前等待护士接手", "例行记录核对已经创建", "这不是风险警报；页面查看不会接手任务。"),
+        "task_requested": ("active", "目前等待护士接手", "人工安全复核任务已经创建", "每份患者确认记录都会进入队列；这不是系统风险警报。"),
         "nurse_received": ("active", "护士已接手，等待开始核对", "护士已经记录接手动作", "当前只核对记录，不判断风险。"),
         "nurse_in_progress": ("active", "护士正在核对", "记录核对已经开始", "尚未形成临床评估、治疗建议或真实发送。"),
         "communication_pending": ("active", "沟通文字仍待人工核对", "护士核对结果已经记录", "沟通文字未发送；复诊速览尚未按当前来源生成。"),
@@ -1050,23 +1068,23 @@ def _project_nurse_task(
     action_specs = {
         "requested": (
             "等待接手",
-            "这是一条例行记录核对，按最初提交时间进入队列。",
+            "每份患者确认记录都会进入人工安全复核队列；系统没有判断这份记录是否异常。",
             "acknowledge",
-            "接手这项核对",
+            "接手这项安全复核",
             (("cancel", "取消任务"),),
         ),
         "received": (
             "已接手",
-            "下一步是开始核对患者已经确认的记录。",
+            "下一步由护士人工查看患者已经确认的记录。",
             "start",
-            "开始核对",
+            "开始人工复核",
             (("reject", "拒绝处理"), ("cancel", "取消任务")),
         ),
         "in-progress": (
-            "正在核对",
-            "请选择一个受控结果，并留下本次处理说明。",
+            "正在人工复核",
+            "完成检查清单后，由护士本人决定本次未上报、补充核实或上报医生。",
             "record_outcome",
-            "记录结果并生成沟通文字",
+            "保存护士人工决定",
             (("cancel", "取消任务"),),
         ),
     }
@@ -1127,7 +1145,7 @@ def _project_nurse_task(
             return NurseTaskProjection(
                 queue="completed",
                 tone="complete",
-                status_title="核对已完成",
+                status_title="人工安全复核已完成",
                 status_detail="沟通文字已经人工核对；本演示不会发送。",
                 primary_action="open_doctor",
                 primary_label="前往复诊速览",
@@ -1269,8 +1287,8 @@ def project_nurse_workbench(
         return NurseWorkbenchProjection(
             state="empty",
             tone="neutral",
-            notice_title="目前没有待核对记录",
-            notice_detail="新的例行记录核对会按最初提交时间出现在这里。",
+            notice_title="目前没有待复核记录",
+            notice_detail="新的患者确认记录会按最初提交时间进入人工安全复核队列。",
             pending_tasks=(),
             completed_tasks=(),
             selected_task_id=None,
@@ -1818,18 +1836,26 @@ def patient_recorded_meaning(candidate) -> str:
         else dict(candidate)
     )
     terminology_match = value.get("terminology_match") or {}
-    preferred = str(terminology_match.get("preferred_zh") or "").strip()
-    evidence = str(value.get("evidence_text") or "").strip()
+    preferred = str(terminology_match.get("preferred_zh") or "").strip().rstrip("。.!！?？")
+    evidence = str(value.get("evidence_text") or "").strip().rstrip("。.!！?？")
     expression = str(
         (value.get("effective_time") or {}).get("expression") or ""
     ).strip()
     answer = value.get("answer")
 
     if preferred and isinstance(answer, bool):
+        concept = preferred.removeprefix("我")
+        if expression and concept.startswith(expression):
+            concept = concept[len(expression) :]
+        for prefix in ("没有", "有"):
+            if concept.startswith(prefix):
+                concept = concept[len(prefix) :]
+                break
+        concept = concept.strip() or preferred
         verb = "有" if answer else "没有"
         if expression:
-            return f"{expression}{verb}{preferred}"
-        return f"{verb}{preferred}"
+            return f"{expression}{verb}{concept}"
+        return f"{verb}{concept}"
     if preferred:
         return preferred
     if evidence:
@@ -2065,17 +2091,17 @@ def project_demo_guide(progress) -> DemoGuideProjection:
     stage = getattr(progress.stage, "value", str(progress.stage))
     common_boundary = "尚未提供临床评估，也不会真实发送"
     patient_context = (
-        ("患者原话", "我今天拉肚子。"),
-        ("我们记成了", "今天有腹泻"),
+        ("患者原话", MANUAL_REVIEW_MESSAGE),
+        ("我们记成了", MANUAL_REVIEW_MEANING),
         ("当前边界", "确认表达是否记对，不是诊断或风险判断"),
     )
     nurse_context = (
-        ("患者确认的表述", "今天有腹泻"),
-        ("任务类型", "例行记录核对"),
+        ("患者确认的表述", MANUAL_REVIEW_MEANING),
+        ("任务类型", "患者确认记录人工安全复核"),
         ("当前边界", "这里只核对记录，不判断风险"),
     )
     doctor_context = (
-        ("患者确认的表述", "今天有腹泻"),
+        ("患者确认的表述", MANUAL_REVIEW_MEANING),
         ("护理动作", "护士已完成记录核对"),
         ("当前边界", "尚未提供临床评估"),
     )
@@ -2084,19 +2110,37 @@ def project_demo_guide(progress) -> DemoGuideProjection:
         return DemoGuideProjection(
             current_step=1,
             step_states=_linear_step_states(1),
-            current_role="演示者",
-            status_title="这次合成演示还没有开始",
-            status_detail="开始只会准备待患者确认的内容，不替任何角色作决定。",
+            current_role="医生",
+            status_title="等待医生启动本轮随访",
+            status_detail="医生确认的是合成随访路径，不是处方、治疗方案或风险判断。",
             context_lines=(
                 ("当前状态", "尚未准备本轮记录"),
-                ("下一步", "准备待患者确认的合成内容"),
+                ("下一步", "由医生确认并启动随访方案"),
                 ("当前边界", "不替患者、护士或医生作决定"),
             ),
             previous_event="还没有上一步；本轮尚未留下流程记录。",
-            next_destination="开始一轮合成演示。",
-            next_page=None,
-            next_label=None,
+            next_destination="前往医生端启动随访方案。",
+            next_page="pages/3_doctor_summary.py",
+            next_label="前往医生端",
             tone="neutral",
+        )
+    if stage == "plan_activated":
+        return DemoGuideProjection(
+            current_step=1,
+            step_states=_linear_step_states(1),
+            current_role="患者",
+            status_title="医生已启动本轮随访",
+            status_detail="患者现在可以提交固定合成反馈；豆包只生成待确认候选。",
+            context_lines=(
+                ("随访方案", "GLP-1 14 天合成随访"),
+                ("当前动作", "患者提交固定合成反馈"),
+                ("当前边界", "模型不会替患者确认，也不会直接创建护士任务"),
+            ),
+            previous_event="医生已确认并启动随访路径；临床风险仍为未评估。",
+            next_destination="前往患者端，明确点击调用豆包。",
+            next_page="pages/1_patient_followup.py",
+            next_label="前往患者端",
+            tone="active",
         )
     if stage == "candidate_ready":
         return DemoGuideProjection(
@@ -2132,12 +2176,12 @@ def project_demo_guide(progress) -> DemoGuideProjection:
             step_states=_linear_step_states(3),
             current_role="护士",
             status_title="等待护士接手",
-            status_detail="患者确认已保存，下一步是例行记录核对，不是风险警报。",
+            status_detail="患者确认已保存，下一步是护士人工安全复核；系统没有按数值判断异常。",
             context_lines=nurse_context,
-            previous_event="患者已经确认表述，例行记录核对任务已经准备好。",
-            next_destination="前往“护士工作台”接手这项核对。",
+            previous_event="患者已经确认表述，人工安全复核任务已经准备好。",
+            next_destination="前往“护士安全复核台”接手任务。",
             next_page="pages/2_nurse_risk_center.py",
-            next_label="前往护士工作台",
+            next_label="前往护士安全复核台",
             tone="active",
         )
     if stage == "nurse_received":
@@ -2148,8 +2192,8 @@ def project_demo_guide(progress) -> DemoGuideProjection:
             status_title="护士已接手",
             status_detail="这一步只核对记录，不判断风险，也不提供诊疗建议。",
             context_lines=nurse_context,
-            previous_event="护士已经接手这条例行记录核对。",
-            next_destination="返回“护士工作台”开始核对。",
+            previous_event="护士已经接手这条人工安全复核任务。",
+            next_destination="返回“护士安全复核台”开始人工复核。",
             next_page="pages/2_nurse_risk_center.py",
             next_label="继续护士核对",
             tone="active",
@@ -2163,7 +2207,7 @@ def project_demo_guide(progress) -> DemoGuideProjection:
             status_detail="核对结果只描述记录处理，不生成诊断、风险等级或治疗建议。",
             context_lines=nurse_context,
             previous_event="护士已接手并开始核对患者确认的记录。",
-            next_destination="返回“护士工作台”记录受控结果。",
+            next_destination="返回“护士安全复核台”保存护士人工决定。",
             next_page="pages/2_nurse_risk_center.py",
             next_label="继续护士核对",
             tone="active",
@@ -2191,9 +2235,9 @@ def project_demo_guide(progress) -> DemoGuideProjection:
             status_detail="速览不是临床结论；沟通文字也没有发送。",
             context_lines=doctor_context,
             previous_event="医生已按当前来源生成一版速览，来源关系保持不变。",
-            next_destination="返回“护士工作台”核对沟通文字。",
+            next_destination="返回“护士安全复核台”核对沟通文字。",
             next_page="pages/2_nurse_risk_center.py",
-            next_label="返回护士工作台",
+            next_label="返回护士安全复核台",
             tone="caution",
         )
     if stage == "communication_ready":
@@ -2706,6 +2750,99 @@ def inject_global_styles(st) -> None:
         }
         .stApp:has(.cc-patient-shell) .st-key-cc_patient_page [data-testid="stVerticalBlock"] {
             gap:.72rem;
+        }
+        .cc-ios-runtime {display:none;}
+        .stApp:has(.cc-ios-runtime) {
+            background:#E8ECEC;
+        }
+        .stApp:has(.cc-ios-runtime) [data-testid="stAppViewContainer"] {
+            background:#E8ECEC;
+        }
+        .stApp:has(.cc-ios-runtime) .block-container {
+            width:min(100%, 430px);
+            max-width:430px;
+            min-height:100dvh;
+            margin:0 auto;
+            padding:1rem 1.5rem 7rem;
+            border-radius:0;
+            background:#F7F9F9;
+            box-shadow:0 18px 60px rgba(23, 33, 38, .12);
+        }
+        .stApp:has(.cc-ios-runtime) h1 {
+            padding:.25rem 0 .2rem;
+            border:0;
+            font-family:-apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", sans-serif;
+            font-size:2rem;
+            line-height:1.2;
+            text-align:left;
+        }
+        .stApp:has(.cc-ios-runtime) h2,
+        .stApp:has(.cc-ios-runtime) h3 {
+            font-family:-apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", sans-serif;
+            letter-spacing:-.015em;
+        }
+        .stApp:has(.cc-ios-runtime) [data-testid="stChatMessage"] {
+            margin:.35rem 0;
+            padding:.9rem 1rem;
+            border:1px solid rgba(214, 222, 224, .72);
+            border-radius:20px;
+            background:#FFFFFF;
+            box-shadow:0 2px 8px rgba(23, 33, 38, .05);
+        }
+        .stApp:has(.cc-ios-runtime) [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) {
+            margin-left:3rem;
+            border-color:#006D70;
+            border-bottom-right-radius:6px;
+            background:#006D70;
+            color:#FFFFFF;
+        }
+        .stApp:has(.cc-ios-runtime) [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) p,
+        .stApp:has(.cc-ios-runtime) [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]) span {
+            color:#FFFFFF !important;
+        }
+        .stApp:has(.cc-ios-runtime) [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarAssistant"]) {
+            margin-right:2rem;
+            border-bottom-left-radius:6px;
+        }
+        .stApp:has(.cc-ios-runtime) [data-testid="stVerticalBlockBorderWrapper"] {
+            overflow:hidden;
+            border-color:#D6DEE0 !important;
+            border-radius:20px !important;
+            background:#FFFFFF;
+            box-shadow:0 2px 8px rgba(23, 33, 38, .05);
+        }
+        .stApp:has(.cc-ios-runtime) .stButton > button,
+        .stApp:has(.cc-ios-runtime) .stPageLink > a {
+            min-height:52px;
+            border-radius:16px !important;
+            font-family:-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+            font-size:1rem;
+            font-weight:650;
+        }
+        .stApp:has(.cc-ios-runtime) button[kind="primary"] {
+            border-color:#006D70 !important;
+            background:#006D70 !important;
+            color:#FFFFFF !important;
+        }
+        .stApp:has(.cc-ios-runtime) [data-testid="stChatInput"] {
+            border-color:#D6DEE0 !important;
+            border-radius:18px !important;
+            background:#FFFFFF !important;
+            box-shadow:0 8px 24px rgba(23, 33, 38, .10);
+        }
+        .stApp:has(.cc-ios-runtime) [data-testid="stAlert"] {
+            border-radius:16px;
+        }
+        .stApp:has(.cc-ios-runtime) [data-testid="stCheckbox"] {
+            padding:.2rem 0;
+        }
+        @media (min-width: 560px) {
+            .stApp:has(.cc-ios-runtime) .block-container {
+                min-height:calc(100dvh - 2rem);
+                margin:1rem auto;
+                border:1px solid rgba(214, 222, 224, .9);
+                border-radius:48px;
+            }
         }
         .cc-patient-status {
             margin:.1rem 0 .2rem; padding:.7rem .85rem; border-left:3px solid var(--cc-accent);
@@ -3557,13 +3694,78 @@ def inject_global_styles(st) -> None:
     )
 
 
+def render_l5_governance_panel(st, view: "L5GovernanceView") -> None:
+    """Render the same release, scope and review boundary for every L5 role."""
+
+    st.error(" · ".join(view.disclaimers))
+    with st.container(border=True):
+        st.markdown("#### 中国知识版本、适用范围与审核状态")
+        version_col, review_col = st.columns(2)
+        with version_col:
+            st.write(f"Pathway：`{view.pathway_code}` v`{view.pathway_version}`")
+            st.write(f"中国知识库 Release：`{view.knowledge_release_id}`")
+            st.write(f"知识发布状态：`{view.knowledge_status}`")
+        with review_col:
+            st.write(f"Pathway 状态：`{view.pathway_status}`")
+            st.write(f"当前审核状态：**{view.review_status}**")
+            st.write("临床规则：`not_assessed`（不创建临床 Alert）")
+        st.markdown("**产品范围**")
+        for product in view.products:
+            st.write(f"- {product}")
+        st.markdown("**适应证范围**")
+        st.write("、".join(view.indications) or "未声明")
+        st.markdown("**数据来源**")
+        for source in view.data_sources:
+            st.write(f"- {source}")
+
+
+def render_l5_submission_panel(
+    st,
+    submission: "L5SubmissionView | None",
+    *,
+    title: str = "最近一次原始回答与标准化 Observation",
+) -> None:
+    """Render raw answers and persisted Observation trace without inference."""
+
+    st.markdown(f"### {title}")
+    if submission is None:
+        st.info("尚无已完成的版本锁定随访；因此没有原始回答或标准化 Observation。")
+        return
+    st.caption(
+        f"QuestionnaireResponse/{submission.response_id} · "
+        f"{submission.response_status} · {submission.authored} · "
+        f"{submission.questionnaire}"
+    )
+    st.markdown("**原始患者回答（FHIR value[x]）**")
+    st.dataframe(
+        list(submission.raw_answer_rows),
+        hide_index=True,
+        width="stretch",
+    )
+    st.markdown("**标准化 Observation 与 L1 追溯**")
+    if submission.observation_rows:
+        st.dataframe(
+            list(submission.observation_rows),
+            hide_index=True,
+            width="stretch",
+        )
+    else:
+        st.info("原始回答已保存；本次没有形成发布映射范围内的 Observation。")
+    with st.expander("查看原始 FHIR JSON"):
+        st.markdown("**QuestionnaireResponse**")
+        st.json(submission.response_resource)
+        for resource in submission.observation_resources:
+            st.markdown(f"**Observation/{resource['id']}**")
+            st.json(resource)
+
+
 def render_mode_badges(st) -> None:
     model_label = html.escape(semantic_model_label())
     st.markdown(
         f"""
         <span class="cc-mode-chip">本地稳定演示</span>
         <span class="cc-mode-chip">{model_label}</span>
-        <span class="cc-mode-chip">Safety Agent v4 · 规则 + 可选 MiMo Critic</span>
+        <span class="cc-mode-chip">Safety Agent v4 · 规则 + 可选豆包 Critic</span>
         <span class="cc-mode-chip">SQLite 持久化</span>
         <span class="cc-mode-chip">外部适配器默认离线 · 未联调</span>
         """,
@@ -3692,5 +3894,10 @@ def semantic_model_label() -> str:
 
     adapter = build_model_adapter()
     if adapter.configured:
-        return f"MiMo {adapter.config.model_name} 已启用"
+        provider_label = (
+            "火山方舟豆包"
+            if adapter.config.provider == "volcengine_doubao"
+            else "小米 MiMo"
+        )
+        return f"{provider_label} {adapter.config.model_name} 已启用"
     return "Care Agent 语义 Mock 回退"

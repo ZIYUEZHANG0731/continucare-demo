@@ -11,11 +11,14 @@ from types import SimpleNamespace
 import pytest
 
 from continucare.adapters.sqlite_store import SQLiteStore
+from continucare.agents.contracts import SemanticResult, Temporality
 from continucare.care_agent import CareAgentService
+from continucare.agents.errors import ModelRequestError
+from continucare.care_agent.mimo_adapter import MiMoSemanticAdapter
 from continucare.care_agent.model_api import SemanticModelConfig, UnconfiguredModelAdapter
 from continucare.care_engine import CareEngine
 from continucare.db import connect, reset_demo
-from continucare.demo_data import DEMO_PATIENT_ID
+from continucare.demo_data import DEMO_PATIENT_ID, MANUAL_REVIEW_MESSAGE
 from continucare.layer4 import (
     Layer4SQLiteStore,
     ManualReviewBriefService,
@@ -28,12 +31,17 @@ from continucare.services.competition_demo import (
     CompetitionDemoConflict,
     CompetitionDemoProgress,
     CompetitionDemoStage,
+    activate_competition_plan,
     demo_write_guard,
     read_competition_demo,
+    submit_patient_chat_turn,
+    submit_activated_plan_feedback,
     start_competition_demo,
+    start_competition_demo_with_mimo,
 )
 from continucare.services.confirmed_review import ConfirmedReviewService
 from continucare.services.manual_review_workflow import ManualReviewWorkflowService
+from continucare.services.patient_checkin import record_explicit_unknown
 from continucare.ui import (
     COMPETITION_STEP_LABELS,
     DEMO_GUIDE_STEPS,
@@ -66,6 +74,74 @@ def _services(db_path):
     repository = Layer4SQLiteStore(db_path, initialize=False)
     workflow = ManualReviewWorkflowService(store, layer4_store=repository)
     return progress, store, confirmed, repository, workflow
+
+
+def _accept_current_chat_turn(db_path):
+    progress, store, confirmed, _, _ = _services(db_path)
+    record = store.get_agent_run(progress.run_id)
+    candidate_ids = [
+        item["candidate_id"] for item in record.output_json["candidates"]
+    ]
+    session = store.get_care_session(progress.session_id)
+    include_original = "free-text-report" not in session.answers
+    with demo_write_guard(db_path, expected_generation=progress.generation):
+        updated = confirmed.care_agent.confirm_candidates(
+            record.run_id,
+            candidate_ids,
+            include_original_text=include_original,
+            track_original_text_context=include_original,
+        )
+    return updated, record
+
+
+def _full_checkin_items(*, vomiting_count: int = 3):
+    return [
+        {
+            "link_id": "nausea-present",
+            "answer": True,
+            "evidence_text": "现在有轻度恶心",
+            "subject": "patient",
+            "temporality": "current",
+            "negated": False,
+        },
+        {
+            "link_id": "nausea-severity",
+            "answer": "LA6752-5",
+            "evidence_text": "轻度恶心",
+            "subject": "patient",
+            "temporality": "current",
+            "negated": False,
+        },
+        {
+            "link_id": "vomiting-count-24h",
+            "answer": vomiting_count,
+            "evidence_text": f"过去24小时呕吐了{vomiting_count}次",
+            "subject": "patient",
+            "temporality": "explicit_24h",
+            "negated": False,
+        },
+        {
+            "link_id": "fluid-intake-24h-estimated",
+            "answer": {
+                "value": 800,
+                "unit": "mL",
+                "system": "http://unitsofmeasure.org",
+                "code": "mL",
+            },
+            "evidence_text": "过去24小时喝了800毫升水",
+            "subject": "patient",
+            "temporality": "explicit_24h",
+            "negated": False,
+        },
+        {
+            "link_id": "abdominal-pain-present",
+            "answer": False,
+            "evidence_text": "现在没有腹痛",
+            "subject": "patient",
+            "temporality": "current",
+            "negated": True,
+        },
+    ]
 
 
 def _confirm(db_path):
@@ -104,7 +180,7 @@ def _complete_nurse(db_path):
 
 
 def _briefs(store, repository):
-    pathway = load_builtin_pathways().get("GLP1-14D", "1.0.0")
+    pathway = load_builtin_pathways().get("GLP1-14D")
     return ManualReviewBriefService(
         store,
         repository,
@@ -115,6 +191,78 @@ def _briefs(store, repository):
 
 def _file_hash(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _mimo_adapter(
+    monkeypatch, *, captured=None, fail=False, items=None, provider="xiaomi_mimo"
+):
+    doubao = provider == "volcengine_doubao"
+    key_env = (
+        "DOUBAO_COMPETITION_TEST_KEY"
+        if doubao
+        else "MIMO_COMPETITION_TEST_KEY"
+    )
+    monkeypatch.setenv(key_env, "synthetic-test-key")
+    config = SemanticModelConfig(
+        provider=provider,
+        model_name="doubao-seed-2-0-lite-260215" if doubao else "mimo-v2.5",
+        base_url=(
+            "https://ark.cn-beijing.volces.com/api/v3"
+            if doubao
+            else "https://api.xiaomimimo.com/v1"
+        ),
+        api_key_env=key_env,
+        prompt_version=(
+            "doubao-semantic-extraction-v1"
+            if doubao
+            else "mimo-semantic-extraction-v4"
+        ),
+        safety_llm_enabled=False,
+        language_llm_enabled=False,
+        summary_llm_enabled=False,
+        timeout_seconds=2,
+    )
+
+    def transport(url, headers, payload, timeout):
+        if captured is not None:
+            captured.update(
+                {"url": url, "payload": payload, "timeout": timeout}
+            )
+        if fail:
+            raise ModelRequestError("synthetic provider failure")
+        return {
+            "id": "mimo-competition-test",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(
+                            {
+                                "blocked": False,
+                                "items": items or [
+                                    {
+                                        "link_id": "nausea-present",
+                                        "answer": True,
+                                        "evidence_text": "恶心",
+                                        "subject": "patient",
+                                        "temporality": "current",
+                                        "negated": False,
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+            },
+        }
+
+    return MiMoSemanticAdapter(config, transport=transport)
 
 
 def _candidate_ids(db_path):
@@ -272,6 +420,1123 @@ def test_start_atomically_prepares_only_one_unreleased_local_candidate(
     with connect(db_path) as connection:
         run = connection.execute("SELECT mode, model_provider FROM agent_runs").fetchone()
     assert tuple(run) == ("local_semantic_mock", None)
+
+
+def test_online_start_uses_one_real_mimo_extraction_and_no_clinical_resources(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "competition-mimo.db"
+    captured = {}
+    adapter = _mimo_adapter(monkeypatch, captured=captured)
+
+    progress = start_competition_demo_with_mimo(
+        db_path,
+        expected_generation=None,
+        model_adapter=adapter,
+    )
+    store = SQLiteStore(db_path, initialize=False)
+    record = store.get_agent_run(progress.run_id)
+    result = record.output_json
+
+    assert progress.stage == CompetitionDemoStage.CANDIDATE_READY
+    assert progress.candidate_count == 1
+    assert progress.questionnaire_response_count == 0
+    assert progress.observation_count == 0
+    assert progress.manual_task_count == 0
+    assert progress.communication_count == 0
+    assert progress.alert_count == 0
+    assert progress.approved_clinical_rule_count == 0
+    assert record.input_text == MANUAL_REVIEW_MESSAGE
+    assert record.mode == "model_api:xiaomi_mimo"
+    assert record.model_provider == "xiaomi_mimo"
+    assert record.model_name == "mimo-v2.5"
+    assert result["mode"] == "model_api:xiaomi_mimo"
+    assert result["candidates"][0]["source_mode"] == "mimo"
+    extraction = [
+        item for item in result["stage_traces"] if item["stage"] == "care_extraction"
+    ]
+    assert len(extraction) == 1
+    assert extraction[0]["mode"] == "model_api:xiaomi_mimo"
+    assert captured["url"] == "https://api.xiaomimimo.com/v1/chat/completions"
+    assert MANUAL_REVIEW_MESSAGE in captured["payload"]["messages"][-1]["content"]
+
+
+def test_online_start_rejects_model_fallback_and_preserves_old_story(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "competition-mimo-fallback.db"
+    previous = start_competition_demo(db_path)
+    before = _file_hash(db_path)
+    adapter = _mimo_adapter(monkeypatch, fail=True)
+
+    with pytest.raises(
+        competition_demo.CompetitionDemoStartError,
+        match="豆包在线生成未通过安全契约",
+    ):
+        start_competition_demo_with_mimo(
+            db_path,
+            expected_generation=previous.generation,
+            model_adapter=adapter,
+        )
+
+    assert _file_hash(db_path) == before
+    assert read_competition_demo(db_path).generation == previous.generation
+
+
+def test_online_start_rejects_unofficial_configuration_before_transport(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "competition-mimo-unofficial.db"
+    previous = start_competition_demo(db_path)
+    before = _file_hash(db_path)
+    monkeypatch.setenv("MIMO_COMPETITION_TEST_KEY", "synthetic-test-key")
+    called = False
+
+    def transport(*args):
+        nonlocal called
+        called = True
+        raise AssertionError("unofficial configuration reached transport")
+
+    adapter = MiMoSemanticAdapter(
+        SemanticModelConfig(
+            provider="xiaomi_mimo",
+            model_name="mimo-v2.5",
+            base_url="https://example.com/v1",
+            api_key_env="MIMO_COMPETITION_TEST_KEY",
+        ),
+        transport=transport,
+    )
+    with pytest.raises(
+        competition_demo.CompetitionDemoStartError,
+        match="尚未正确配置",
+    ):
+        start_competition_demo_with_mimo(
+            db_path,
+            expected_generation=previous.generation,
+            model_adapter=adapter,
+        )
+
+    assert called is False
+    assert _file_hash(db_path) == before
+    assert read_competition_demo(db_path).generation == previous.generation
+
+
+def test_doctor_activation_is_the_first_atomic_shared_workflow_fact(tmp_path):
+    db_path = tmp_path / "doctor-first.db"
+
+    progress = activate_competition_plan(db_path, expected_generation=None)
+
+    assert progress.stage == CompetitionDemoStage.PLAN_ACTIVATED
+    assert progress.plan_activated is True
+    assert progress.plan_actor == "simulated_doctor"
+    assert progress.generation == f"{progress.session_id}:pending"
+    assert progress.run_id is None
+    assert progress.questionnaire_response_count == 0
+    assert progress.observation_count == 0
+    assert progress.manual_task_count == 0
+    assert progress.communication_count == 0
+    assert progress.alert_count == 0
+    with connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT event_type, actor_type, details_json FROM audit_events "
+            "WHERE entity_id = ? ORDER BY event_type",
+            (progress.session_id,),
+        ).fetchall()
+    assert [(row["event_type"], row["actor_type"]) for row in rows] == [
+        ("care_session_started", "deterministic_care_engine"),
+        ("doctor_pathway_activated", "simulated_doctor"),
+    ]
+    details = json.loads(rows[1]["details_json"])
+    assert details["decision"] == "activated"
+    assert details["synthetic_only"] is True
+    assert details["clinical_risk_assessment"] == "not_assessed"
+    assert details["external_send"] == "disabled"
+
+
+def test_patient_submission_preserves_activation_and_only_creates_candidate(tmp_path):
+    db_path = tmp_path / "doctor-patient.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+
+    progress = submit_activated_plan_feedback(
+        db_path,
+        expected_generation=activated.generation,
+        use_mimo=False,
+    )
+
+    assert progress.stage == CompetitionDemoStage.CANDIDATE_READY
+    assert progress.plan_activated is True
+    assert progress.session_id == activated.session_id
+    assert progress.candidate_count >= 1
+    assert progress.questionnaire_response_count == 0
+    assert progress.observation_count == 0
+    assert progress.manual_task_count == 0
+    assert progress.communication_count == 0
+    assert progress.alert_count == 0
+
+
+@pytest.mark.parametrize("provider", ["xiaomi_mimo", "volcengine_doubao"])
+def test_default_mimo_chat_confirms_draft_then_atomically_submits_to_nurse(
+    monkeypatch, tmp_path, provider
+):
+    db_path = tmp_path / "patient-chat.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    message = (
+        "我现在有轻度恶心，过去24小时呕吐了2次，"
+        "现在有腹痛。"
+    )
+    items = [
+        {
+            "link_id": "nausea-present",
+            "answer": True,
+            "evidence_text": "现在有轻度恶心",
+            "subject": "patient",
+            "temporality": "current",
+            "negated": False,
+        },
+        {
+            "link_id": "nausea-severity",
+            "answer": "LA6752-5",
+            "evidence_text": "轻度恶心",
+            "subject": "patient",
+            "temporality": "current",
+            "negated": False,
+        },
+        {
+            "link_id": "vomiting-count-24h",
+            "answer": 2,
+            "evidence_text": "过去24小时呕吐了2次",
+            "subject": "patient",
+            "temporality": "explicit_24h",
+            "negated": False,
+        },
+        {
+            "link_id": "abdominal-pain-present",
+            "answer": True,
+            "evidence_text": "现在有腹痛",
+            "subject": "patient",
+            "temporality": "current",
+            "negated": False,
+        },
+    ]
+    candidate = submit_patient_chat_turn(
+        db_path,
+        expected_generation=activated.generation,
+        message_text=message,
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(monkeypatch, items=items, provider=provider),
+    )
+    assert candidate.stage == CompetitionDemoStage.CANDIDATE_READY
+    assert candidate.questionnaire_response_count == 0
+    assert candidate.observation_count == 0
+    assert candidate.manual_task_count == 0
+
+    progress, store, confirmed, _, _ = _services(db_path)
+    record = store.get_agent_run(progress.run_id)
+    candidate_ids = [item["candidate_id"] for item in record.output_json["candidates"]]
+    with demo_write_guard(db_path, expected_generation=progress.generation):
+        confirmed.care_agent.confirm_candidates(
+            record.run_id,
+            candidate_ids,
+            include_original_text=True,
+            track_original_text_context=True,
+        )
+    collecting = read_competition_demo(db_path)
+    assert collecting.stage == CompetitionDemoStage.PATIENT_COLLECTING
+    skip_path = tmp_path / "patient-chat-skip.db"
+    with sqlite3.connect(db_path) as source, sqlite3.connect(skip_path) as target:
+        source.backup(target)
+    skip_progress, skip_store, skip_confirmed, _, _ = _services(skip_path)
+    skip_session = skip_store.get_care_session(skip_progress.session_id)
+    with demo_write_guard(skip_path, expected_generation=skip_progress.generation):
+        record_explicit_unknown(
+            skip_store, skip_session, "fluid-intake-24h-estimated"
+        )
+    skip_ready = read_competition_demo(skip_path)
+    assert skip_ready.stage == CompetitionDemoStage.PATIENT_REVIEW_READY
+    with demo_write_guard(skip_path, expected_generation=skip_ready.generation):
+        skip_submitted = skip_confirmed.submit_confirmed_draft(skip_session.session_id)
+    assert read_competition_demo(skip_path).observation_count == 4
+    assert len(skip_submitted.observations) == 4
+
+    fluid_text = "过去24小时摄入800毫升液体"
+    fluid_item = {
+        "link_id": "fluid-intake-24h-estimated",
+        "answer": {
+            "value": 800,
+            "unit": "mL",
+            "system": "http://unitsofmeasure.org",
+            "code": "mL",
+        },
+        "evidence_text": fluid_text,
+        "subject": "patient",
+        "temporality": "explicit_24h",
+        "negated": False,
+    }
+    second = submit_patient_chat_turn(
+        db_path,
+        expected_generation=collecting.generation,
+        message_text=fluid_text,
+        synthetic_confirmed=True,
+        target_link_id="fluid-intake-24h-estimated",
+        model_adapter=_mimo_adapter(
+            monkeypatch, items=[fluid_item], provider=provider
+        ),
+    )
+    second_record = store.get_agent_run(second.run_id)
+    second_ids = [
+        item["candidate_id"] for item in second_record.output_json["candidates"]
+    ]
+    with demo_write_guard(db_path, expected_generation=second.generation):
+        confirmed.care_agent.confirm_candidates(
+            second.run_id, second_ids, include_original_text=False
+        )
+    ready = read_competition_demo(db_path)
+    assert ready.stage == CompetitionDemoStage.PATIENT_REVIEW_READY
+    assert ready.questionnaire_response_count == 0
+    assert ready.observation_count == 0
+    assert ready.manual_task_count == 0
+
+    boundary_path = tmp_path / "patient-chat-boundary.db"
+    with sqlite3.connect(db_path) as source, sqlite3.connect(boundary_path) as target:
+        source.backup(target)
+    with connect(boundary_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO alerts (
+                alert_id, patient_id, severity, title, trigger_rule_id,
+                trigger_reason, evidence_refs_json, owner_role, status, created_at
+            ) VALUES (
+                'forbidden-alert', ?, 'high', '不得存在', 'none',
+                'boundary-test', '[]', 'nurse', 'open', ?
+            )
+            """,
+            (DEMO_PATIENT_ID, datetime.now().astimezone().isoformat()),
+        )
+    boundary_progress, boundary_store, boundary_confirmed, _, _ = _services(
+        boundary_path
+    )
+    boundary_session = boundary_store.get_care_session(boundary_progress.session_id)
+    with pytest.raises(ValueError, match="frozen patient check-in boundary"):
+        with demo_write_guard(
+            boundary_path, expected_generation=boundary_progress.generation
+        ):
+            boundary_confirmed.submit_confirmed_draft(boundary_session.session_id)
+    assert read_competition_demo(boundary_path).questionnaire_response_count == 0
+    assert read_competition_demo(boundary_path).manual_task_count == 0
+
+    current_session = store.get_care_session(ready.session_id)
+    assert fluid_text not in current_session.answers["free-text-report"]
+    with demo_write_guard(db_path, expected_generation=ready.generation):
+        submitted = confirmed.submit_confirmed_draft(current_session.session_id)
+    requested = read_competition_demo(db_path)
+    assert requested.stage == CompetitionDemoStage.TASK_REQUESTED
+    assert requested.questionnaire_response_count == 1
+    assert requested.observation_count == 5
+    assert requested.manual_task_count == 1
+    assert requested.alert_count == 0
+    assert submitted.task["priority"] == "routine"
+
+
+def test_patient_short_answer_is_extracted_against_the_current_question(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "focused-short-answer.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    captured = {}
+
+    candidate = submit_patient_chat_turn(
+        db_path,
+        expected_generation=activated.generation,
+        message_text="有",
+        synthetic_confirmed=True,
+        target_link_id="nausea-present",
+        model_adapter=_mimo_adapter(
+            monkeypatch,
+            captured=captured,
+            items=[
+                {
+                    "link_id": "nausea-present",
+                    "answer": True,
+                    "evidence_text": "有",
+                    "subject": "patient",
+                    "temporality": "current",
+                    "negated": False,
+                }
+            ],
+        ),
+    )
+
+    assert candidate.stage == CompetitionDemoStage.CANDIDATE_READY
+    record = SQLiteStore(db_path, initialize=False).get_agent_run(candidate.run_id)
+    assert record.input_text == "有"
+    assert [item["link_id"] for item in record.output_json["candidates"]] == [
+        "nausea-present"
+    ]
+    system_prompt = captured["payload"]["messages"][0]["content"]
+    assert "focused follow-up answer" in system_prompt
+    assert '"link_id":"nausea-present"' in system_prompt
+    assert '"link_id":"vomiting-count-24h"' not in system_prompt
+    assert candidate.questionnaire_response_count == 0
+    assert candidate.observation_count == 0
+    assert candidate.manual_task_count == 0
+    assert candidate.alert_count == 0
+
+
+def test_patient_correction_uses_short_term_memory_and_keeps_a_continuous_lineage(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "patient-correction-chain.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    opening_text = (
+        "我现在有轻度恶心，过去24小时呕吐了3次，"
+        "过去24小时喝了800毫升水，现在没有腹痛。"
+    )
+    submit_patient_chat_turn(
+        db_path,
+        expected_generation=activated.generation,
+        message_text=opening_text,
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(
+            monkeypatch, items=_full_checkin_items(vomiting_count=3)
+        ),
+    )
+    _accept_current_chat_turn(db_path)
+    ready = read_competition_demo(db_path)
+    assert ready.stage == CompetitionDemoStage.PATIENT_REVIEW_READY
+
+    captured = {}
+    first_revision = submit_patient_chat_turn(
+        db_path,
+        expected_generation=ready.generation,
+        message_text="把过去24小时呕吐次数改成2次",
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(
+            monkeypatch,
+            captured=captured,
+            items=[
+                {
+                    "link_id": "vomiting-count-24h",
+                    "answer": 2,
+                    "evidence_text": "改成2次",
+                    "subject": "patient",
+                    "temporality": "explicit_24h",
+                    "negated": False,
+                }
+            ],
+        ),
+    )
+    store = SQLiteStore(db_path, initialize=False)
+    unchanged = store.get_care_session(first_revision.session_id)
+    assert unchanged.answers["vomiting-count-24h"] == 3
+    request_context = json.loads(
+        captured["payload"]["messages"][1]["content"].split(
+            "\npatient_text:", 1
+        )[0].removeprefix("conversation_context:\n")
+    )
+    assert request_context["current_confirmed_draft"] == {
+        "vomiting-count-24h": 3
+    }
+    assert request_context["current_questions"][0]["link_id"] == (
+        "vomiting-count-24h"
+    )
+
+    updated, first_revision_record = _accept_current_chat_turn(db_path)
+    assert updated.answers["vomiting-count-24h"] == 2
+    ready_again = read_competition_demo(db_path)
+    second_revision = submit_patient_chat_turn(
+        db_path,
+        expected_generation=ready_again.generation,
+        message_text="刚才说错了，改成1次",
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(
+            monkeypatch,
+            items=[
+                {
+                    "link_id": "vomiting-count-24h",
+                    "answer": 1,
+                    "evidence_text": "改成1次",
+                    "subject": "patient",
+                    "temporality": "explicit_24h",
+                    "negated": False,
+                }
+            ],
+        ),
+    )
+    assert second_revision.stage == CompetitionDemoStage.CANDIDATE_READY
+    final_draft, second_revision_record = _accept_current_chat_turn(db_path)
+    assert final_draft.answers["vomiting-count-24h"] == 1
+
+    history = store.list_answer_context_history(final_draft.session_id)
+    vomiting_history = [
+        item for item in history if item.link_id == "vomiting-count-24h"
+    ]
+    assert [item.answer for item in vomiting_history] == [3, 2, 1]
+    assert [item.status for item in vomiting_history] == [
+        "superseded",
+        "superseded",
+        "active",
+    ]
+    corrections = [
+        item
+        for item in store.list_audit_events(DEMO_PATIENT_ID)
+        if item.event_type == "patient_answer_corrected"
+    ]
+    assert len(corrections) == 2
+    assert {
+        item.details_json["previous_source_run_id"] for item in corrections
+    } == {
+        vomiting_history[0].source_run_id,
+        first_revision_record.run_id,
+    }
+
+    progress, _, confirmed, _, _ = _services(db_path)
+    with demo_write_guard(db_path, expected_generation=progress.generation):
+        submitted = confirmed.submit_confirmed_draft(final_draft.session_id)
+    provenance_refs = {
+        item["what"]["reference"]
+        for item in submitted.provenance.get("entity", [])
+    }
+    assert f"urn:continucare:agent-run:{first_revision_record.run_id}" in provenance_refs
+    assert f"urn:continucare:agent-run:{second_revision_record.run_id}" in provenance_refs
+    assert all(
+        f"urn:continucare:audit-event:{item.event_id}" in provenance_refs
+        for item in corrections
+    )
+
+
+def test_implicit_correction_refuses_to_guess_after_a_multi_field_confirmation(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "patient-ambiguous-correction.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    submit_patient_chat_turn(
+        db_path,
+        expected_generation=activated.generation,
+        message_text=(
+            "我现在有轻度恶心，过去24小时呕吐了3次，"
+            "过去24小时喝了800毫升水，现在没有腹痛。"
+        ),
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(
+            monkeypatch, items=_full_checkin_items(vomiting_count=3)
+        ),
+    )
+    _accept_current_chat_turn(db_path)
+    ready = read_competition_demo(db_path)
+
+    with pytest.raises(ValueError, match="请说清要修改哪个指标"):
+        submit_patient_chat_turn(
+            db_path,
+            expected_generation=ready.generation,
+            message_text="刚才说错了，改成2次",
+            synthetic_confirmed=True,
+            model_adapter=_mimo_adapter(monkeypatch, items=[]),
+        )
+
+    current = SQLiteStore(db_path, initialize=False).get_care_session(
+        ready.session_id
+    )
+    assert current.answers["vomiting-count-24h"] == 3
+
+
+def test_selected_revision_field_overrides_implicit_latest_turn_inference(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "patient-selected-revision.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    submit_patient_chat_turn(
+        db_path,
+        expected_generation=activated.generation,
+        message_text=(
+            "我现在有轻度恶心，过去24小时呕吐了3次，"
+            "过去24小时喝了800毫升水，现在没有腹痛。"
+        ),
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(
+            monkeypatch, items=_full_checkin_items(vomiting_count=3)
+        ),
+    )
+    _accept_current_chat_turn(db_path)
+    ready = read_competition_demo(db_path)
+    assert ready.stage == CompetitionDemoStage.PATIENT_REVIEW_READY
+
+    captured = {}
+    pending = submit_patient_chat_turn(
+        db_path,
+        expected_generation=ready.generation,
+        message_text="改成2次",
+        synthetic_confirmed=True,
+        selected_revision_link_id="vomiting-count-24h",
+        model_adapter=_mimo_adapter(
+            monkeypatch,
+            captured=captured,
+            items=[
+                {
+                    "link_id": "vomiting-count-24h",
+                    "answer": 2,
+                    "evidence_text": "改成2次",
+                    "subject": "patient",
+                    "temporality": "explicit_24h",
+                    "negated": False,
+                }
+            ],
+        ),
+    )
+    assert pending.stage == CompetitionDemoStage.CANDIDATE_READY
+    payload_context = json.loads(
+        captured["payload"]["messages"][1]["content"].split(
+            "\npatient_text:", 1
+        )[0].removeprefix("conversation_context:\n")
+    )
+    assert payload_context["current_confirmed_draft"] == {
+        "vomiting-count-24h": 3
+    }
+    updated, _ = _accept_current_chat_turn(db_path)
+    assert updated.answers["vomiting-count-24h"] == 2
+
+
+def test_selected_revision_prompt_treats_direct_correction_as_health_answer(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "patient-selected-abdominal-revision.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    submit_patient_chat_turn(
+        db_path,
+        expected_generation=activated.generation,
+        message_text=(
+            "我现在有轻度恶心，过去24小时呕吐了3次，"
+            "过去24小时喝了800毫升水，现在没有腹痛。"
+        ),
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(
+            monkeypatch, items=_full_checkin_items(vomiting_count=3)
+        ),
+    )
+    _accept_current_chat_turn(db_path)
+    ready = read_competition_demo(db_path)
+    captured = {}
+
+    pending = submit_patient_chat_turn(
+        db_path,
+        expected_generation=ready.generation,
+        message_text="改成有腹痛",
+        synthetic_confirmed=True,
+        selected_revision_link_id="abdominal-pain-present",
+        model_adapter=_mimo_adapter(
+            monkeypatch,
+            captured=captured,
+            items=[
+                {
+                    "link_id": "abdominal-pain-present",
+                    "answer": True,
+                    "evidence_text": "有腹痛",
+                    "subject": "patient",
+                    "temporality": "current",
+                    "negated": False,
+                }
+            ],
+        ),
+    )
+
+    assert pending.stage == CompetitionDemoStage.CANDIDATE_READY
+    system_prompt = captured["payload"]["messages"][0]["content"]
+    assert "改成有腹痛" in system_prompt
+    assert "legitimate health answer" in system_prompt
+    assert '"link_id":"abdominal-pain-present"' in system_prompt
+
+
+def test_selected_revision_soft_handoff_preserves_ready_draft(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "patient-selected-revision-handoff.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    submit_patient_chat_turn(
+        db_path,
+        expected_generation=activated.generation,
+        message_text=(
+            "我现在有轻度恶心，过去24小时呕吐了3次，"
+            "过去24小时喝了800毫升水，现在没有腹痛。"
+        ),
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(
+            monkeypatch, items=_full_checkin_items(vomiting_count=3)
+        ),
+    )
+    original, _ = _accept_current_chat_turn(db_path)
+    ready = read_competition_demo(db_path)
+
+    after = submit_patient_chat_turn(
+        db_path,
+        expected_generation=ready.generation,
+        message_text="这项我暂时说不清楚",
+        synthetic_confirmed=True,
+        selected_revision_link_id="abdominal-pain-present",
+        model_adapter=_mimo_adapter(monkeypatch, items=[]),
+    )
+
+    assert after.stage == CompetitionDemoStage.PATIENT_REVIEW_READY
+    assert after.run_id == ready.run_id
+    store = SQLiteStore(db_path, initialize=False)
+    current = store.get_care_session(after.session_id)
+    assert current.answers == original.answers
+    assert store.list_observations(DEMO_PATIENT_ID) == []
+    with sqlite3.connect(db_path) as connection:
+        report = connection.execute(
+            "SELECT report_kind, handoff_reason_code, status "
+            "FROM patient_supplemental_reports"
+        ).fetchone()
+        alert_count = connection.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+    assert report == ("semantic_handoff", "no_structured_match", "requested")
+    assert alert_count == 0
+
+
+def test_patient_severity_choice_overrides_model_proposal_and_enters_provenance(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "patient-severity-selection.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    submit_patient_chat_turn(
+        db_path,
+        expected_generation=activated.generation,
+        message_text=(
+            "我现在有轻度恶心，过去24小时呕吐了3次，"
+            "过去24小时喝了800毫升水，现在没有腹痛。"
+        ),
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(
+            monkeypatch, items=_full_checkin_items(vomiting_count=3)
+        ),
+    )
+    progress, store, confirmed, _, _ = _services(db_path)
+    record = store.get_agent_run(progress.run_id)
+    candidate_ids = [
+        item["candidate_id"] for item in record.output_json["candidates"]
+    ]
+    with demo_write_guard(db_path, expected_generation=progress.generation):
+        updated = confirmed.care_agent.confirm_candidates(
+            record.run_id,
+            candidate_ids,
+            include_original_text=True,
+            track_original_text_context=True,
+            answer_overrides={"nausea-severity": "LA6751-7"},
+        )
+
+    assert updated.answers["nausea-present"] is True
+    assert updated.answers["nausea-severity"] == "LA6751-7"
+    stored_result = SemanticResult.model_validate(record.output_json)
+    model_severity = next(
+        item for item in stored_result.candidates if item.link_id == "nausea-severity"
+    )
+    assert model_severity.answer == "LA6752-5"
+    selected_context = next(
+        item
+        for item in store.list_active_answer_contexts(updated.session_id)
+        if item.link_id == "nausea-severity"
+    )
+    assert selected_context.answer == "LA6751-7"
+    assert selected_context.resolution_basis == "patient_confirmation"
+    selection_events = [
+        item
+        for item in store.list_audit_events(updated.patient_id)
+        if item.event_type == "patient_answer_selected"
+    ]
+    assert len(selection_events) == 1
+    assert selection_events[0].details_json["selections"] == [
+        {
+            "candidate_id": model_severity.candidate_id,
+            "link_id": "nausea-severity",
+            "model_answer": "LA6752-5",
+            "patient_selected_answer": "LA6751-7",
+        }
+    ]
+
+    ready = read_competition_demo(db_path)
+    assert ready.stage == CompetitionDemoStage.PATIENT_REVIEW_READY
+    with demo_write_guard(db_path, expected_generation=ready.generation):
+        submitted = confirmed.submit_confirmed_draft(updated.session_id)
+    provenance_refs = {
+        item["what"]["reference"]
+        for item in submitted.provenance.get("entity", [])
+    }
+    assert (
+        f"urn:continucare:audit-event:{selection_events[0].event_id}"
+        in provenance_refs
+    )
+
+
+def test_parent_answer_correction_atomically_invalidates_disabled_child(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "patient-dependent-invalidation.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    submit_patient_chat_turn(
+        db_path,
+        expected_generation=activated.generation,
+        message_text=(
+            "我现在有轻度恶心，过去24小时呕吐了3次，"
+            "过去24小时喝了800毫升水，现在没有腹痛。"
+        ),
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(
+            monkeypatch, items=_full_checkin_items(vomiting_count=3)
+        ),
+    )
+    _accept_current_chat_turn(db_path)
+    ready = read_competition_demo(db_path)
+    submit_patient_chat_turn(
+        db_path,
+        expected_generation=ready.generation,
+        message_text="更正一下，我现在没有恶心",
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(
+            monkeypatch,
+            items=[
+                {
+                    "link_id": "nausea-present",
+                    "answer": False,
+                    "evidence_text": "现在没有恶心",
+                    "subject": "patient",
+                    "temporality": "current",
+                    "negated": True,
+                }
+            ],
+        ),
+    )
+    updated, _ = _accept_current_chat_turn(db_path)
+    assert updated.answers["nausea-present"] is False
+    assert "nausea-severity" not in updated.answers
+    store = SQLiteStore(db_path, initialize=False)
+    assert {
+        item.link_id for item in store.list_active_answer_contexts(updated.session_id)
+    } == {
+        "free-text-report",
+        "nausea-present",
+        "vomiting-count-24h",
+        "fluid-intake-24h-estimated",
+        "abdominal-pain-present",
+    }
+    severity_history = [
+        item
+        for item in store.list_answer_context_history(updated.session_id)
+        if item.link_id == "nausea-severity"
+    ]
+    assert len(severity_history) == 1
+    assert severity_history[0].status == "superseded"
+    invalidations = [
+        item
+        for item in store.list_audit_events(DEMO_PATIENT_ID)
+        if item.event_type == "patient_answers_dependency_invalidated"
+    ]
+    assert len(invalidations) == 1
+    assert invalidations[0].details_json["invalidations"][0]["link_id"] == (
+        "nausea-severity"
+    )
+
+    progress, _, confirmed, _, _ = _services(db_path)
+    assert progress.stage == CompetitionDemoStage.PATIENT_REVIEW_READY
+    with demo_write_guard(db_path, expected_generation=progress.generation):
+        submitted = confirmed.submit_confirmed_draft(updated.session_id)
+    assert len(submitted.observations) == 4
+
+
+def test_dependency_invalidation_fault_rolls_back_the_entire_patient_decision(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "patient-invalidation-rollback.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    submit_patient_chat_turn(
+        db_path,
+        expected_generation=activated.generation,
+        message_text=(
+            "我现在有轻度恶心，过去24小时呕吐了3次，"
+            "过去24小时喝了800毫升水，现在没有腹痛。"
+        ),
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(
+            monkeypatch, items=_full_checkin_items(vomiting_count=3)
+        ),
+    )
+    _accept_current_chat_turn(db_path)
+    ready = read_competition_demo(db_path)
+    pending = submit_patient_chat_turn(
+        db_path,
+        expected_generation=ready.generation,
+        message_text="更正一下，我现在没有恶心",
+        synthetic_confirmed=True,
+        model_adapter=_mimo_adapter(
+            monkeypatch,
+            items=[
+                {
+                    "link_id": "nausea-present",
+                    "answer": False,
+                    "evidence_text": "现在没有恶心",
+                    "subject": "patient",
+                    "temporality": "current",
+                    "negated": True,
+                }
+            ],
+        ),
+    )
+    progress, store, confirmed, _, _ = _services(db_path)
+    record = store.get_agent_run(pending.run_id)
+    candidate_ids = [
+        item["candidate_id"] for item in record.output_json["candidates"]
+    ]
+
+    def fault(stage):
+        if stage.startswith("after_dependency_invalidation"):
+            raise RuntimeError("injected decision fault")
+
+    monkeypatch.setattr(store, "_conversation_decision_fault", fault)
+    with pytest.raises(RuntimeError, match="injected decision fault"):
+        with demo_write_guard(db_path, expected_generation=progress.generation):
+            confirmed.care_agent.confirm_candidates(
+                record.run_id,
+                candidate_ids,
+                include_original_text=False,
+            )
+
+    unchanged = store.get_care_session(progress.session_id)
+    assert unchanged.answers["nausea-present"] is True
+    assert unchanged.answers["nausea-severity"] == "LA6752-5"
+    active = store.list_active_answer_contexts(progress.session_id)
+    assert "nausea-severity" in {item.link_id for item in active}
+    assert store.conversation_action_decisions(progress.session_id).get(
+        candidate_ids[0]
+    ) is None
+    assert not any(
+        item.event_type
+        in {"patient_answer_corrected", "patient_answers_dependency_invalidated"}
+        for item in store.list_audit_events(DEMO_PATIENT_ID)
+    )
+
+
+def test_patient_first_turn_can_answer_the_whole_opening_question(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "focused-opening-answer.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    captured = {}
+    message = "现在没有恶心，过去24小时吐了1次，过去24小时喝了大概3升水，现在没有腹痛。"
+
+    candidate = submit_patient_chat_turn(
+        db_path,
+        expected_generation=activated.generation,
+        message_text=message,
+        synthetic_confirmed=True,
+        target_link_id="nausea-present",
+        model_adapter=_mimo_adapter(
+            monkeypatch,
+            captured=captured,
+            items=[
+                {
+                    "link_id": "nausea-present",
+                    "answer": False,
+                    "evidence_text": "现在没有恶心",
+                    "subject": "patient",
+                    "temporality": "unspecified",
+                    "negated": True,
+                },
+                {
+                    "link_id": "vomiting-count-24h",
+                    "answer": 1,
+                    "evidence_text": "过去24小时吐了1次",
+                    "subject": "patient",
+                    "temporality": "unspecified",
+                    "negated": False,
+                },
+                {
+                    "link_id": "fluid-intake-24h-estimated",
+                    "answer": {
+                        "value": 3000,
+                        "unit": "mL",
+                        "system": "http://unitsofmeasure.org",
+                        "code": "mL",
+                    },
+                    "evidence_text": "过去24小时喝了大概3升水",
+                    "subject": "patient",
+                    "temporality": "unspecified",
+                    "negated": False,
+                },
+                {
+                    "link_id": "abdominal-pain-present",
+                    "answer": False,
+                    "evidence_text": "现在没有腹痛",
+                    "subject": "patient",
+                    "temporality": "unspecified",
+                    "negated": True,
+                },
+            ],
+        ),
+    )
+
+    assert candidate.stage == CompetitionDemoStage.CANDIDATE_READY
+    record = SQLiteStore(db_path, initialize=False).get_agent_run(candidate.run_id)
+    result = SemanticResult.model_validate(record.output_json)
+    assert {item.link_id for item in result.candidates} == {
+        "nausea-present",
+        "vomiting-count-24h",
+        "fluid-intake-24h-estimated",
+        "abdominal-pain-present",
+    }
+    assert not result.clarifications
+    assert all(
+        item.temporality.value in {"current", "explicit_24h"}
+        for item in result.candidates
+    )
+    system_prompt = captured["payload"]["messages"][0]["content"]
+    assert '"link_id":"nausea-present"' in system_prompt
+    assert '"link_id":"fluid-intake-24h-estimated"' in system_prompt
+    assert candidate.questionnaire_response_count == 0
+    assert candidate.observation_count == 0
+    assert candidate.manual_task_count == 0
+    assert candidate.alert_count == 0
+
+
+def test_patient_product_clarification_is_persisted_and_explicitly_resolved(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "patient-clarification.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    monkeypatch.setattr(
+        "continucare.care_agent.mimo_adapter._local_temporality",
+        lambda *_args, **_kwargs: Temporality.UNSPECIFIED,
+    )
+
+    pending = submit_patient_chat_turn(
+        db_path,
+        expected_generation=activated.generation,
+        message_text="恶心",
+        synthetic_confirmed=True,
+        target_link_id="nausea-present",
+        model_adapter=_mimo_adapter(
+            monkeypatch,
+            items=[
+                {
+                    "link_id": "nausea-present",
+                    "answer": True,
+                    "evidence_text": "恶心",
+                    "subject": "patient",
+                    "temporality": "unspecified",
+                    "negated": False,
+                }
+            ],
+        ),
+    )
+
+    assert pending.stage == CompetitionDemoStage.CANDIDATE_READY
+    assert pending.candidate_count == 0
+    store = SQLiteStore(db_path, initialize=False)
+    record = store.get_agent_run(pending.run_id)
+    result = SemanticResult.model_validate(record.output_json)
+    assert len(result.clarifications) == 1
+    clarification = result.clarifications[0]
+    assert clarification.proposed_candidate.link_id == "nausea-present"
+
+    _, _, confirmed, _, _ = _services(db_path)
+    with demo_write_guard(db_path, expected_generation=pending.generation):
+        updated = confirmed.care_agent.resolve_clarification(
+            record.run_id,
+            clarification.clarification_id,
+            "yes_current",
+            include_original_text=True,
+            track_original_text_context=True,
+        )
+
+    collecting = read_competition_demo(db_path)
+    assert collecting.stage == CompetitionDemoStage.PATIENT_COLLECTING
+    assert collecting.generation != pending.generation
+    assert updated.answers["nausea-present"] is True
+    assert updated.answers["free-text-report"] == "恶心"
+    assert collecting.questionnaire_response_count == 0
+    assert collecting.observation_count == 0
+    assert collecting.manual_task_count == 0
+    assert collecting.alert_count == 0
+
+
+def test_patient_mimo_fallback_is_rejected_and_preserves_doctor_activation(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "doctor-patient-fallback.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    before = _file_hash(db_path)
+
+    with pytest.raises(
+        competition_demo.CompetitionDemoStartError,
+        match="医生已启动的方案保持不变",
+    ):
+        submit_activated_plan_feedback(
+            db_path,
+            expected_generation=activated.generation,
+            use_mimo=True,
+            model_adapter=_mimo_adapter(monkeypatch, fail=True),
+        )
+
+    assert _file_hash(db_path) == before
+    current = read_competition_demo(db_path)
+    assert current.stage == CompetitionDemoStage.PLAN_ACTIVATED
+    assert current.generation == activated.generation
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "我叫张三，今天有恶心",
+        "住址：北京市朝阳区，今天有恶心",
+        "病历号 A12345，今天有恶心",
+        "医保号 998877，今天有恶心",
+        "护照 E12345678，今天有恶心",
+    ],
+)
+def test_patient_chat_blocks_obvious_identifiers_before_send(message, tmp_path):
+    db_path = tmp_path / "patient-privacy.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    before = _file_hash(db_path)
+
+    with pytest.raises(ValueError, match="未发送，也未保存"):
+        submit_patient_chat_turn(
+            db_path,
+            expected_generation=activated.generation,
+            message_text=message,
+            synthetic_confirmed=True,
+        )
+
+    assert _file_hash(db_path) == before
+
+
+def test_two_patient_tabs_share_generation_and_only_one_calls_mimo(monkeypatch, tmp_path):
+    db_path = tmp_path / "doctor-patient-race.db"
+    activated = activate_competition_plan(db_path, expected_generation=None)
+    calls = []
+    adapter = _mimo_adapter(monkeypatch, captured={})
+    original_transport = adapter.transport
+
+    def counted_transport(*args, **kwargs):
+        calls.append(1)
+        return original_transport(*args, **kwargs)
+
+    adapter.transport = counted_transport
+
+    def submit():
+        return submit_activated_plan_feedback(
+            db_path,
+            expected_generation=activated.generation,
+            use_mimo=True,
+            model_adapter=adapter,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [future for future in (executor.submit(submit), executor.submit(submit))]
+        outcomes = []
+        for future in results:
+            try:
+                outcomes.append(future.result())
+            except CompetitionDemoConflict as exc:
+                outcomes.append(exc)
+
+    assert sum(isinstance(item, CompetitionDemoProgress) for item in outcomes) == 1
+    assert sum(isinstance(item, CompetitionDemoConflict) for item in outcomes) == 1
+    assert len(calls) == 1
 
 
 def test_failed_start_keeps_the_previous_story_byte_for_byte(monkeypatch, tmp_path):
@@ -946,7 +2211,8 @@ def test_shared_progress_renderer_and_home_use_terminal_contract(monkeypatch):
 @pytest.mark.parametrize(
     ("stage", "current_step", "current_role", "tone"),
     [
-        (CompetitionDemoStage.NOT_STARTED, 1, "演示者", "neutral"),
+        (CompetitionDemoStage.NOT_STARTED, 1, "医生", "neutral"),
+        (CompetitionDemoStage.PLAN_ACTIVATED, 1, "患者", "active"),
         (CompetitionDemoStage.CANDIDATE_READY, 2, "患者", "active"),
         (CompetitionDemoStage.CANDIDATE_UNSURE, 2, "患者", "caution"),
         (CompetitionDemoStage.PATIENT_CONFIRMED, 3, "护士", "active"),
@@ -999,7 +2265,7 @@ def test_home_guide_is_human_language_accessible_and_knowledge_independent():
     assert DEMO_GUIDE_STEPS == (
         "患者表达",
         "患者确认",
-        "护士核对",
+        "护士人工复核",
         "医生速览",
         "记录追溯",
     )
@@ -1077,12 +2343,13 @@ def test_home_source_keeps_reset_and_technical_details_secondary():
         "utf-8"
     )
 
-    assert '"开始一轮合成演示"' in app_source
+    assert '"用 MiMo 开始一轮合成演示"' not in app_source
+    assert '"离线开始一轮合成演示"' not in app_source
     assert '"管理本地演示数据"' in app_source
     assert '"我知道当前这轮合成演示记录会被替换。"' in app_source
-    assert '"替换并开始新一轮"' in app_source
-    assert "正在准备新的合成演示，请勿重复操作……" in app_source
-    assert "新一轮暂时无法开始，原来的演示记录没有被替换。请重试。" in app_source
+    assert '"清空本轮并返回医生启动前"' in app_source
+    assert "activate_competition_plan" not in app_source
+    assert "患者在今日随访中发送合成回答时，系统默认调用豆包" in app_source
     assert '"技术详情：外部适配器与当前配置"' in app_source
     assert '"再用 20 秒看负向路径"' in app_source
     assert "按角色查看同一故事" not in app_source

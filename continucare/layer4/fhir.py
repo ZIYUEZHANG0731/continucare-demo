@@ -396,13 +396,13 @@ def build_patient_confirmed_review_task(
             "coding": [
                 {
                     "system": "urn:continucare:task-code",
-                    "code": "patient-confirmed-review",
-                    "display": "Patient-confirmed report review",
+                    "code": "manual-safety-review",
+                    "display": "Manual safety review of patient-confirmed report",
                 }
             ],
-            "text": "人工复核患者已确认报告",
+            "text": "护士人工安全复核患者确认记录",
         },
-        "description": "人工复核患者已确认报告",
+        "description": "每份患者确认记录均由护士人工安全复核；系统不进行临床分级",
         "for": _reference(f"Patient/{patient_id}"),
         "authoredOn": authored_on,
         "requester": _reference(f"Patient/{patient_id}"),

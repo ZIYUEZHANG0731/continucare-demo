@@ -10,6 +10,7 @@ from continucare.agents.contracts import (
     AgentStageTrace,
     CandidateIssue,
     CandidateIssueAction,
+    CandidateSource,
     ClarificationKind,
     ClarificationOption,
     ClarificationRequest,
@@ -26,12 +27,15 @@ from continucare.care_agent.mimo_enhancements import (
     governed_missing_findings,
     questionnaire_item_enabled,
 )
+from continucare.care_agent.release import LAYER3_RELEASE
 from continucare.care_agent.numbers import (
     count_from_evidence,
     millilitres_from_evidence,
     parse_number_token,
 )
 from continucare.fhir.terminology import UCUM
+from continucare.services.patient_checkin import exact_focused_boolean_answer
+from continucare.terminology.catalog import DYNAMIC_LINK_PREFIX
 
 
 _INSTRUCTION_PATTERN = re.compile(
@@ -40,6 +44,7 @@ _INSTRUCTION_PATTERN = re.compile(
 )
 
 _FIELD_LABELS = {
+    "body-weight": "体重",
     "nausea-present": "当前是否恶心",
     "nausea-severity": "当前恶心程度",
     "vomiting-count-24h": "过去24小时呕吐次数",
@@ -47,6 +52,7 @@ _FIELD_LABELS = {
     "abdominal-pain-present": "当前是否腹痛",
 }
 _FIELD_EVIDENCE_PATTERNS = {
+    "body-weight": re.compile(r"体重|kg|KG|公斤|千克"),
     "nausea-present": re.compile(r"恶心|反胃|想吐"),
     "nausea-severity": re.compile(r"恶心|反胃|想吐"),
     "vomiting-count-24h": re.compile(r"呕吐|吐了?|吐过"),
@@ -92,6 +98,7 @@ class SafetyAgent:
         "fluid-intake-24h-estimated",
     }
     _CURRENT_LINKS = {
+        "body-weight",
         "nausea-present",
         "nausea-severity",
         "abdominal-pain-present",
@@ -233,7 +240,7 @@ class SafetyAgent:
             agent_version=self.VERSION,
             mode=outcome.mode,
             status=decision.overall_verdict,
-            model_provider="xiaomi_mimo",
+            model_provider=self.critic.config.provider,
             model_name=self.critic.config.model_name,
             prompt_version=outcome.prompt_version,
             model_usage=outcome.model_usage,
@@ -264,6 +271,43 @@ class SafetyAgent:
 
     def review(self, task: SemanticTask, draft: SemanticResult) -> SemanticResult:
         violations = list(draft.safety_violations)
+        boundary_errors = []
+        expected_catalog_id = LAYER3_RELEASE.terminology_catalog_id
+        expected_catalog_version = LAYER3_RELEASE.terminology_catalog_version
+        expected_catalog_sha256 = LAYER3_RELEASE.terminology_catalog_sha256
+        composite_terminology_scope = task.task_id.startswith(
+            ("supplemental:", "patient-checkin:")
+        )
+        if composite_terminology_scope:
+            from continucare.terminology import (
+                load_supplemental_terminology_backend,
+                terminology_catalog_sha256,
+            )
+
+            supplemental_catalog = load_supplemental_terminology_backend().catalog
+            expected_catalog_id = supplemental_catalog.catalog_id
+            expected_catalog_version = supplemental_catalog.version
+            expected_catalog_sha256 = terminology_catalog_sha256(
+                supplemental_catalog
+            )
+        if task.knowledge_release_id != LAYER3_RELEASE.knowledge_release_id:
+            boundary_errors.append("knowledge_release_mismatch")
+        if task.terminology_catalog_id != expected_catalog_id:
+            boundary_errors.append("terminology_catalog_id_mismatch")
+        if task.terminology_catalog_version != expected_catalog_version:
+            boundary_errors.append("terminology_catalog_version_mismatch")
+        if task.terminology_catalog_sha256 != expected_catalog_sha256:
+            boundary_errors.append("terminology_catalog_digest_mismatch")
+        if boundary_errors:
+            return draft.model_copy(
+                update={
+                    "status": SemanticStatus.BLOCKED,
+                    "candidates": [],
+                    "clarifications": [],
+                    "safety_violations": sorted(set([*violations, *boundary_errors])),
+                    "safety_agent_version": self.VERSION,
+                }
+            )
         candidate_issues = list(draft.candidate_issues)
         duplicate_ids = _conflicting_link_ids(draft.candidates)
         safe_candidates: list[SemanticCandidate] = []
@@ -361,11 +405,20 @@ class SafetyAgent:
         if not candidate.requires_patient_confirmation:
             errors.append(f"{prefix}:confirmation_required")
         context_bound = _valid_context_binding(task, candidate)
+        focus_bound = (
+            bool(task.focus_link_ids)
+            and candidate.link_id in task.focus_link_ids
+            and _focused_answer_matches_evidence(item, candidate)
+        )
         if candidate.context_binding is not None and not context_bound:
             errors.append(f"{prefix}:invalid_context_binding")
         if not _evidence_matches(task.message_text, candidate):
             errors.append(f"{prefix}:invalid_evidence_span")
-        elif not _evidence_supports_field(candidate) and not context_bound:
+        elif (
+            not _evidence_supports_field(candidate)
+            and not context_bound
+            and not focus_bound
+        ):
             errors.append(f"{prefix}:evidence_concept_mismatch")
         if any(word in candidate.patient_message for word in self._FORBIDDEN_PATIENT_WORDING):
             errors.append(f"{prefix}:unsafe_patient_wording")
@@ -403,10 +456,19 @@ class SafetyAgent:
                     errors.append(f"{prefix}:terminology_target_code_mismatch")
                 if match.validation_status != "repository_release_validated":
                     errors.append(f"{prefix}:terminology_code_not_validated")
+                if task.task_id.startswith(("supplemental:", "patient-checkin:")):
+                    errors.extend(
+                        f"{prefix}:{item}"
+                        for item in _supplemental_source_errors(candidate)
+                    )
 
         answer_errors = _answer_errors(item, candidate.answer)
         errors.extend(f"{prefix}:{error}" for error in answer_errors)
-        if not answer_errors and not _answer_matches_evidence(item, candidate):
+        if (
+            not answer_errors
+            and not _answer_matches_evidence(item, candidate)
+            and not focus_bound
+        ):
             errors.append(f"{prefix}:answer_evidence_mismatch")
         if candidate.link_id in self._EXPLICIT_24H_LINKS:
             if not (
@@ -448,11 +510,16 @@ def _answer_errors(item, answer: Any) -> list[str]:
     if item.item_type == "quantity":
         if not isinstance(answer, dict) or type(answer.get("value")) not in {int, float}:
             return ["answer_type_quantity"]
+        expected_unit = "kg" if item.link_id == "body-weight" else "mL"
         if (
             answer.get("system") != UCUM
-            or answer.get("code") != "mL"
-            or answer.get("unit") != "mL"
+            or answer.get("code") != expected_unit
+            or answer.get("unit") != expected_unit
             or answer["value"] < 0
+            or (
+                item.link_id == "body-weight"
+                and not 20 <= answer["value"] <= 400
+            )
         ):
             return ["quantity_unit_not_governed"]
     return []
@@ -469,7 +536,26 @@ def _answer_matches_evidence(item, candidate: SemanticCandidate) -> bool:
             value = parse_number_token(match.group(0)) if match else None
         return value == candidate.answer
     if item.item_type == "quantity":
-        value = millilitres_from_evidence(candidate.evidence_text)
+        if item.link_id == "body-weight":
+            # The focused body-weight question may inherit kg for a bare
+            # number, but an explicitly conflicting unit must never be
+            # silently relabelled as kg by the model.
+            evidence_without_kg = re.sub(
+                r"(?:\bkg\b|公斤|千克)",
+                "",
+                candidate.evidence_text,
+                flags=re.IGNORECASE,
+            )
+            if re.search(
+                r"(?:\blbs?\b|\bg\b|磅|斤|克)",
+                evidence_without_kg,
+                flags=re.IGNORECASE,
+            ):
+                return False
+            match = re.search(r"\d+(?:\.\d+)?", candidate.evidence_text)
+            value = float(match.group(0)) if match else None
+        else:
+            value = millilitres_from_evidence(candidate.evidence_text)
         if value is None and candidate.context_binding is not None:
             match = re.search(
                 r"\d+(?:\.\d+)?|[零〇一二两三四五六七八九十]+",
@@ -488,6 +574,21 @@ def _answer_matches_evidence(item, candidate: SemanticCandidate) -> bool:
         }
         return matched_codes == {candidate.answer}
     return True
+
+
+def _focused_answer_matches_evidence(item, candidate: SemanticCandidate) -> bool:
+    """Validate a short answer only against one explicitly focused question."""
+
+    if item.item_type != "boolean":
+        return _answer_matches_evidence(item, candidate)
+    resolved = exact_focused_boolean_answer(
+        item.link_id, candidate.evidence_text
+    )
+    return (
+        resolved is not None
+        and resolved is candidate.answer
+        and candidate.negated == (candidate.answer is False)
+    )
 
 
 def _evidence_matches(text: str, candidate: SemanticCandidate) -> bool:
@@ -518,6 +619,39 @@ def _valid_context_binding(
 def _evidence_supports_field(candidate: SemanticCandidate) -> bool:
     pattern = _FIELD_EVIDENCE_PATTERNS.get(candidate.link_id)
     return pattern is None or bool(pattern.search(candidate.evidence_text))
+
+
+def _supplemental_source_errors(candidate: SemanticCandidate) -> list[str]:
+    """Prove whether a supplemental match came from CN fixed or prototype dynamic."""
+
+    from continucare.terminology import (
+        load_cn_glp1_terminology_catalog,
+        load_glp1_symptom_catalog,
+        terminology_catalog_sha256,
+    )
+
+    match = candidate.terminology_match
+    if match is None:
+        return ["supplemental_source_missing"]
+    expected = (
+        load_glp1_symptom_catalog()
+        if candidate.link_id.startswith(DYNAMIC_LINK_PREFIX)
+        else load_cn_glp1_terminology_catalog()
+    )
+    errors = []
+    if (
+        match.source_catalog_id != expected.catalog_id
+        or match.source_catalog_version != expected.version
+        or match.source_catalog_sha256 != terminology_catalog_sha256(expected)
+        or match.source_catalog_status != expected.status
+    ):
+        errors.append("supplemental_source_catalog_mismatch")
+    if candidate.link_id.startswith(DYNAMIC_LINK_PREFIX) and (
+        match.approval_status != "prototype-verified"
+        or not match.target_hospital_validation_required
+    ):
+        errors.append("dynamic_concept_governance_mismatch")
+    return errors
 
 
 def _evidence_negation_matches(candidate: SemanticCandidate) -> bool:

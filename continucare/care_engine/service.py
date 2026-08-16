@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from zoneinfo import ZoneInfo
@@ -26,8 +26,18 @@ from continucare.models import (
     Observation,
 )
 from continucare.pathways import load_builtin_pathways, load_fhir_artifact
-from continucare.pathways.mappings import load_observation_mapping
+from continucare.pathways.mappings import (
+    ObservationMappingPolicy,
+    load_observation_mapping,
+)
+from continucare.knowledge import (
+    compile_observation_mappings,
+    compile_questionnaire,
+    load_cn_glp1_release,
+    validate_packaged_release,
+)
 from continucare.services.audit import build_audit_event, record_audit_event
+from continucare.terminology import load_cn_glp1_terminology_catalog
 
 
 class CareSubmissionResult(BaseModel):
@@ -57,6 +67,8 @@ class CareEngine:
     def __init__(self, store):
         self.store = store
         self.registry = load_builtin_pathways()
+        self.knowledge_release = load_cn_glp1_release().release
+        validate_packaged_release(self.knowledge_release)
 
     def start_or_resume(
         self,
@@ -71,21 +83,33 @@ class CareEngine:
             patient_id, patient.pathway_code
         )
         if existing:
+            if existing.knowledge_release_id != self.knowledge_release.manifest.release_id:
+                raise ValueError("active CareSession is locked to another knowledge release")
             return existing
 
         if not allow_repeat_same_day:
             anchor = datetime.fromisoformat(now or utc_now_iso()).astimezone(
                 ZoneInfo(patient_timezone)
             )
-            latest = next(iter(self.store.list_care_sessions(patient_id)), None)
+            latest = next(
+                (
+                    item
+                    for item in self.store.list_care_sessions(patient_id)
+                    if item.parent_session_id is None
+                ),
+                None,
+            )
             if latest is not None and latest.status == CareSessionStatus.COMPLETED:
                 completed = datetime.fromisoformat(
                     latest.completed_at or latest.updated_at
                 ).astimezone(ZoneInfo(patient_timezone))
                 if completed.date() == anchor.date():
+                    self._assert_current_release(latest)
                     return latest
 
         pathway = self.registry.get(patient.pathway_code)
+        if pathway.knowledge_release_id != self.knowledge_release.manifest.release_id:
+            raise ValueError("Pathway knowledge release does not match validated L1 release")
         questionnaire = self._questionnaire(pathway.code, pathway.version)
         now = now or utc_now_iso()
         session = CareSession(
@@ -95,13 +119,12 @@ class CareEngine:
             pathway_version=pathway.version,
             questionnaire_canonical=questionnaire["url"],
             questionnaire_version=questionnaire.get("version", ""),
+            knowledge_release_id=self.knowledge_release.manifest.release_id,
             answers={},
             created_at=now,
             updated_at=now,
         )
-        self.store.save_care_session(session)
-        record_audit_event(
-            self.store,
+        started_event = build_audit_event(
             patient_id=patient_id,
             entity_type="CareSession",
             entity_id=session.session_id,
@@ -113,11 +136,160 @@ class CareEngine:
                 "questionnaire": (
                     f"{session.questionnaire_canonical}|{session.questionnaire_version}"
                 ),
+                "knowledge_release_id": session.knowledge_release_id,
             },
+            created_at=now,
         )
+        self.store.create_care_session_bundle(session, [started_event])
+        return session
+
+    def start_next_locked_checkin(
+        self,
+        previous_session_id: str,
+        *,
+        patient_timezone: str = "Asia/Shanghai",
+        now: str | None = None,
+    ) -> CareSession:
+        """Start exactly the next local day without changing the locked plan artifacts."""
+
+        previous = self.store.get_care_session(previous_session_id)
+        if previous is None or previous.parent_session_id is not None:
+            raise ValueError("上一天的随访会话不存在")
+        if previous.status != CareSessionStatus.COMPLETED:
+            raise ValueError("上一天的随访尚未完成")
+        if self.store.get_active_care_session(
+            previous.patient_id, previous.pathway_code
+        ) is not None:
+            raise ValueError("已有进行中的随访会话")
+
+        patient = self._synthetic_patient(previous.patient_id)
+        if patient.pathway_code != previous.pathway_code:
+            raise ValueError("患者当前路径与锁定随访路径不一致")
+        # This validates that the exact locked release, pathway and
+        # Questionnaire are still available. It deliberately does not look up
+        # whichever pathway version happens to be current today.
+        self.questionnaire_for_session(previous)
+
+        anchor = datetime.fromisoformat(now or utc_now_iso())
+        if anchor.tzinfo is None:
+            raise ValueError("下一天随访时间必须包含时区")
+        completed = datetime.fromisoformat(
+            previous.completed_at or previous.updated_at
+        )
+        if completed.tzinfo is None:
+            raise ValueError("上一天随访完成时间必须包含时区")
+        local_zone = ZoneInfo(patient_timezone)
+        if anchor.astimezone(local_zone).date() != (
+            completed.astimezone(local_zone).date() + timedelta(days=1)
+        ):
+            raise ValueError("下一次随访必须是患者当地日历的次日")
+
+        created_at = anchor.astimezone(timezone.utc).isoformat()
+        session = CareSession(
+            session_id=f"session-{uuid4().hex}",
+            patient_id=previous.patient_id,
+            pathway_code=previous.pathway_code,
+            pathway_version=previous.pathway_version,
+            questionnaire_canonical=previous.questionnaire_canonical,
+            questionnaire_version=previous.questionnaire_version,
+            knowledge_release_id=previous.knowledge_release_id,
+            answers={},
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        started_event = build_audit_event(
+            patient_id=session.patient_id,
+            entity_type="CareSession",
+            entity_id=session.session_id,
+            event_type="care_session_started",
+            actor_type="deterministic_care_engine",
+            details={
+                "pathway_code": session.pathway_code,
+                "pathway_version": session.pathway_version,
+                "questionnaire": (
+                    f"{session.questionnaire_canonical}|{session.questionnaire_version}"
+                ),
+                "knowledge_release_id": session.knowledge_release_id,
+                "previous_session_id": previous.session_id,
+            },
+            created_at=created_at,
+        )
+        self.store.create_care_session_bundle(session, [started_event])
+        return session
+
+    def activate_followup_plan(
+        self,
+        patient_id: str,
+        *,
+        actor_type: str = "simulated_doctor",
+        now: str | None = None,
+    ) -> CareSession:
+        """Create the locked synthetic plan and doctor activation atomically."""
+
+        patient = self._synthetic_patient(patient_id)
+        existing = self.store.get_active_care_session(
+            patient_id, patient.pathway_code
+        )
+        if existing is not None:
+            raise ValueError("follow-up plan is already active")
+
+        pathway = self.registry.get(patient.pathway_code)
+        if pathway.knowledge_release_id != self.knowledge_release.manifest.release_id:
+            raise ValueError("Pathway knowledge release does not match validated L1 release")
+        questionnaire = self._questionnaire(pathway.code, pathway.version)
+        activated_at = now or utc_now_iso()
+        session = CareSession(
+            session_id=f"session-{uuid4().hex}",
+            patient_id=patient_id,
+            pathway_code=pathway.code,
+            pathway_version=pathway.version,
+            questionnaire_canonical=questionnaire["url"],
+            questionnaire_version=questionnaire.get("version", ""),
+            knowledge_release_id=self.knowledge_release.manifest.release_id,
+            answers={},
+            created_at=activated_at,
+            updated_at=activated_at,
+        )
+        questionnaire_ref = (
+            f"{session.questionnaire_canonical}|{session.questionnaire_version}"
+        )
+        common_details = {
+            "pathway_code": session.pathway_code,
+            "pathway_version": session.pathway_version,
+            "questionnaire": questionnaire_ref,
+            "knowledge_release_id": session.knowledge_release_id,
+        }
+        events = [
+            build_audit_event(
+                patient_id=patient_id,
+                entity_type="CareSession",
+                entity_id=session.session_id,
+                event_type="care_session_started",
+                actor_type="deterministic_care_engine",
+                details=common_details,
+                created_at=activated_at,
+            ),
+            build_audit_event(
+                patient_id=patient_id,
+                entity_type="CareSession",
+                entity_id=session.session_id,
+                event_type="doctor_pathway_activated",
+                actor_type=actor_type,
+                details={
+                    **common_details,
+                    "decision": "activated",
+                    "synthetic_only": True,
+                    "clinical_risk_assessment": "not_assessed",
+                    "external_send": "disabled",
+                },
+                created_at=activated_at,
+            ),
+        ]
+        self.store.create_care_session_bundle(session, events)
         return session
 
     def questionnaire_for_session(self, session: CareSession) -> dict[str, Any]:
+        self._assert_current_release(session)
         questionnaire = self._questionnaire(
             session.pathway_code, session.pathway_version
         )
@@ -271,13 +443,7 @@ class CareEngine:
             answers=answers,
             status="completed",
         )
-        pathway = self.registry.get(session.pathway_code, session.pathway_version)
-        policy = load_observation_mapping(pathway.observation_mapping_file)
-        if (
-            policy.pathway_code != session.pathway_code
-            or policy.pathway_version != session.pathway_version
-        ):
-            raise ValueError("Observation mapping policy does not match care session")
+        policy = self.observation_mapping_for_session(session)
         contexts = (
             answer_contexts
             if answer_contexts is not None
@@ -319,6 +485,36 @@ class CareEngine:
             completed_at=now,
         )
 
+    def observation_mapping_for_session(
+        self, session: CareSession
+    ) -> ObservationMappingPolicy:
+        """Resolve the exact Observation mapping locked by this session."""
+
+        pathway = self.registry.get(session.pathway_code, session.pathway_version)
+        if (
+            pathway.knowledge_release_id == self.knowledge_release.manifest.release_id
+            and pathway.observation_mapping_file.endswith(
+                "glp1_followup_observation_mapping_v1.json"
+            )
+        ):
+            compiled_mapping = compile_observation_mappings(self.knowledge_release)
+            policy = ObservationMappingPolicy.model_validate(
+                {
+                    "pathway_code": compiled_mapping["pathway_code"],
+                    "pathway_version": compiled_mapping["pathway_version"],
+                    "questionnaire": compiled_mapping["questionnaire"],
+                    "mappings": compiled_mapping["mappings"],
+                }
+            )
+        else:
+            policy = load_observation_mapping(pathway.observation_mapping_file)
+        if (
+            policy.pathway_code != session.pathway_code
+            or policy.pathway_version != session.pathway_version
+        ):
+            raise ValueError("Observation mapping policy does not match care session")
+        return policy
+
     def _patient_reported_symptom_observations(
         self,
         *,
@@ -328,16 +524,36 @@ class CareEngine:
     ) -> list[Observation]:
         """Map patient-confirmed catalog concepts not preselected by the Pathway."""
 
+        # Dynamic symptom reports remain a legacy synthetic-demo path. They are
+        # not part of the CN product-scoped L1 release and must not be described
+        # as Chinese label evidence or used for clinical interpretation. Honor
+        # an explicitly supplied snapshot so confirmed-review preparation does
+        # not re-read mutable session state after its decision was assembled.
         reports = (
             reports
             if reports is not None
             else self.store.list_active_symptom_reports(session.session_id)
         )
+        catalog = load_cn_glp1_terminology_catalog()
+        if session.knowledge_release_id != catalog.version:
+            raise ValueError(
+                "Layer-3 terminology whitelist does not match CareSession release"
+            )
+        allowed_concepts = {item.concept_id for item in catalog.concepts}
         source_text, _ = questionnaire_response_summary(
             response, self.questionnaire_for_session(session)
         )
         observations: list[Observation] = []
         for report in reports:
+            match = report.terminology_match or {}
+            if (
+                match.get("catalog_id") != catalog.catalog_id
+                or match.get("catalog_version") != catalog.version
+                or report.concept_id not in allowed_concepts
+            ):
+                # Preserve the confirmed report and QuestionnaireResponse text,
+                # but do not emit a coded fact outside the locked CN whitelist.
+                continue
             evidence_start = source_text.find(report.evidence_text)
             if evidence_start < 0:
                 raise ValueError("患者自述症状原文未保留在 QuestionnaireResponse 中")
@@ -429,8 +645,13 @@ class CareEngine:
             raise ValueError("随访会话不存在")
         if session.status != CareSessionStatus.IN_PROGRESS:
             raise ValueError("只有进行中的随访可以修改或提交")
+        self._assert_current_release(session)
         self._synthetic_patient(session.patient_id)
         return session
+
+    def _assert_current_release(self, session: CareSession) -> None:
+        if session.knowledge_release_id != self.knowledge_release.manifest.release_id:
+            raise ValueError("CareSession is locked to another knowledge release")
 
     def _synthetic_patient(self, patient_id: str):
         patient = self.store.get_patient(patient_id)
@@ -448,7 +669,12 @@ class CareEngine:
                 f"Pathway {pathway_code} {pathway_version} must publish one Questionnaire"
             )
         reference = references[0]
-        questionnaire = load_fhir_artifact(reference.file_name, "Questionnaire")
+        if pathway.knowledge_release_id == self.knowledge_release.manifest.release_id:
+            questionnaire = compile_questionnaire(
+                self.knowledge_release, template_file=reference.file_name
+            )
+        else:
+            questionnaire = load_fhir_artifact(reference.file_name, "Questionnaire")
         if (
             questionnaire.get("url") != reference.canonical
             or questionnaire.get("version") != reference.version

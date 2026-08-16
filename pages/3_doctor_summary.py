@@ -5,13 +5,35 @@ from __future__ import annotations
 import html
 import json
 import sqlite3
+import sys
+from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT_TEXT = str(PROJECT_ROOT)
+sys.path[:] = [item for item in sys.path if item != PROJECT_ROOT_TEXT]
+sys.path.insert(0, PROJECT_ROOT_TEXT)
+
+import continucare
 import streamlit as st
+
+if Path(continucare.__file__).resolve().parent.parent != PROJECT_ROOT:
+    raise RuntimeError("Streamlit imported continucare from outside this project")
 
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.config import get_settings
-from continucare.db import utc_now_iso
+from continucare.db import initialize_database, utc_now_iso
 from continucare.demo_data import DEMO_PATIENT_ID
+from continucare.doctor_ui import (
+    build_doctor_followup_overview,
+    build_doctor_metric_dashboard,
+    inject_doctor_surface_styles,
+    render_activation_steps,
+    render_doctor_header,
+    render_doctor_followup_overview,
+    render_doctor_metric_dashboard,
+    render_waiting_panel,
+    render_workspace_heading,
+)
 from continucare.errors import ConcurrentWriteConflict
 from continucare.layer4 import (
     BRIEF_SUMMARY_KIND,
@@ -26,15 +48,22 @@ from continucare.layer4 import (
 )
 from continucare.layer4.contracts import DoctorReviewDecision
 from continucare.pathways import load_builtin_pathways
+from continucare.presentation import (
+    observation_evidence_text,
+)
+from continucare.product_mvp import ProductRole, build_product_context
 from continucare.services.competition_demo import (
+    CompetitionDemoStartError,
     CompetitionDemoConflict,
     CompetitionDemoProgress,
+    CompetitionDemoStage,
+    activate_competition_plan,
     demo_write_guard,
     read_competition_demo,
 )
+from continucare.services.supplemental_reports import read_supplemental_reports
 from continucare.ui import (
     DOCTOR_DECISION_ACTIONS,
-    DOCTOR_ROLE_BOUNDARY,
     build_doctor_modified_items,
     doctor_summary_text,
     inject_global_styles,
@@ -206,15 +235,20 @@ def _show_feedback() -> None:
 def _render_notice(projection) -> None:
     if not projection.notice_title:
         return
+    title = projection.notice_title
+    detail_text = projection.notice_detail
+    if title == "还没有可生成速览的已完成记录核对。":
+        title = "护理记录待核对"
+        detail_text = "护理核对完成后，将在数据小结下方补充护理记录摘要。"
     detail = (
-        f"<p>{html.escape(projection.notice_detail)}</p>"
-        if projection.notice_detail
+        f"<p>{html.escape(detail_text)}</p>"
+        if detail_text
         else ""
     )
     st.markdown(
         f"""
         <section class="cc-doctor-notice cc-doctor-notice--{projection.tone}" aria-live="polite">
-          <h2>{html.escape(projection.notice_title)}</h2>
+          <h2>{html.escape(title)}</h2>
           {detail}
         </section>
         """,
@@ -223,15 +257,18 @@ def _render_notice(projection) -> None:
 
 
 def _render_facts(projection) -> None:
+    visible_facts = tuple(
+        item for item in projection.facts if item.label != "当前边界"
+    )
     rows = "".join(
         "<div class=\"cc-doctor-fact\">"
         f"<dt>{html.escape(item.label)}</dt>"
         f"<dd>{html.escape(item.value)}</dd>"
         "</div>"
-        for item in projection.facts
+        for item in visible_facts
     )
     st.markdown(
-        f'<dl class="cc-doctor-facts" aria-label="复诊前的三项事实">{rows}</dl>',
+        f'<dl class="cc-doctor-facts" aria-label="本轮随访摘要">{rows}</dl>',
         unsafe_allow_html=True,
     )
 
@@ -355,21 +392,69 @@ def _render_outcomes(projection) -> None:
     )
 
 
+def _render_supplemental_panel(store, progress) -> None:
+    if not progress.session_id or store is None:
+        return
+    supplemental = read_supplemental_reports(
+        settings.db_path,
+        session_id=progress.session_id,
+    )
+    if supplemental.integrity_issue:
+        st.error("患者补充上报记录暂时不可安全读取。")
+        return
+    if not supplemental.reports:
+        return
+    with st.container(key="cc_doctor_supplemental"):
+        st.markdown("### 随访后的补充上报")
+        for item in reversed(supplemental.reports):
+            status = "护士已复核" if item.status == "reviewed" else "待护士人工复核"
+            st.markdown(f"**{status}** · {html.escape(item.created_at)}")
+            st.write(item.original_text)
+            if item.structured_items:
+                st.caption(
+                    "患者确认后的结构化事实："
+                    + "、".join(
+                        sorted(
+                            {
+                                str(value.get("link_id") or value.get("linkId"))
+                                for value in item.structured_items
+                            }
+                        )
+                    )
+                )
+            else:
+                st.caption("暂未形成结构化指标")
+            if item.questionnaire_response_id:
+                st.caption(
+                    "FHIR QuestionnaireResponse/"
+                    f"{item.questionnaire_response_id}"
+                )
+                observations = store.list_observations_for_message(
+                    item.questionnaire_response_id
+                )
+                if observations:
+                    for observation in observations:
+                        st.write(f"- {observation_evidence_text(observation)}")
+                        terminology = observation.evidence.terminology_match or {}
+                        if terminology.get("source_catalog_status") == "draft-prototype-verified":
+                            st.caption("该指标使用当前知识库版本完成标准化")
+                else:
+                    st.caption("本条记录暂无标准化指标")
+            else:
+                st.warning("该记录的来源明细暂不可用")
+
+
 st.set_page_config(
     page_title="复诊速览 · ContinuCare",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 inject_global_styles(st)
-st.markdown('<span class="cc-doctor-shell" aria-hidden="true"></span>', unsafe_allow_html=True)
-st.title("复诊速览")
-st.markdown(
-    f'<p class="cc-doctor-boundary">{html.escape(DOCTOR_ROLE_BOUNDARY)}</p>',
-    unsafe_allow_html=True,
-)
-_show_feedback()
+inject_doctor_surface_styles(st)
 
 settings = get_settings()
+initialize_database(settings.db_path)
+store = SQLiteStore(settings.db_path, initialize=False) if settings.db_path.is_file() else None
 source_error = None
 try:
     progress = read_competition_demo(settings.db_path)
@@ -378,6 +463,67 @@ except (LookupError, OSError, ValueError, sqlite3.Error):
         integrity_issue="复诊来源完整性检查未通过",
     )
     source_error = "复诊来源完整性检查未通过"
+
+render_doctor_header(
+    st,
+    build_product_context(store, ProductRole.DOCTOR),
+    progress,
+)
+with st.container(key="cc_doctor_legacy_title"):
+    st.title("复诊速览")
+_show_feedback()
+with st.container(key="cc_doctor_refresh_bar"):
+    _, refresh_column = st.columns([5, 1])
+    with refresh_column:
+        if st.button("刷新共享状态", key="cc_doctor_refresh_shared", width="stretch"):
+            st.rerun()
+
+if progress.integrity_issue:
+    st.error("共享流程记录暂时不可读取；本页不会继续写入。请到总台查看边界状态。")
+    st.stop()
+
+if not progress.plan_activated:
+    with st.container(key="cc_doctor_activation_card"):
+        render_activation_steps(st)
+        replace_ok = True
+        if progress.generation:
+            st.warning("当前有一轮旧合成演示。启动新方案会明确替换旧演示记录。")
+            replace_ok = st.checkbox(
+                "我确认替换当前旧合成演示。",
+                key="cc_doctor_activation_replace",
+            )
+        if st.button(
+            "确认并启动随访方案",
+            type="primary",
+            width="stretch",
+            disabled=not replace_ok,
+            key="cc_doctor_activate_plan",
+        ):
+            try:
+                with st.spinner("正在锁定随访版本并通知患者端……"):
+                    activate_competition_plan(
+                        settings.db_path,
+                        expected_generation=progress.generation,
+                    )
+            except (CompetitionDemoConflict, CompetitionDemoStartError) as exc:
+                st.error(str(exc))
+            else:
+                st.session_state["cc_doctor_feedback"] = (
+                    "随访方案已启动。现在可以切到患者页面提交合成反馈。"
+                )
+                st.rerun()
+        st.caption("启动后患者端会读取同一份本地合成记录，无需重复录入。")
+    st.stop()
+
+if progress.stage == CompetitionDemoStage.PLAN_ACTIVATED:
+    with st.container(key="cc_doctor_waiting_card"):
+        render_waiting_panel(st)
+        st.page_link(
+            "pages/1_patient_followup.py",
+            label="打开患者端查看任务",
+            width="stretch",
+        )
+    st.stop()
 tasks: tuple[dict, ...] = ()
 summary = None
 previous_text = None
@@ -386,18 +532,27 @@ review_source = None
 statement = None
 quote = None
 nursing_detail = None
+nurse_escalation_notice = None
 stale = False
 trace = None
 view_degraded = False
+metric_observations = ()
 
 if settings.db_path.is_file():
     try:
-        store = SQLiteStore(settings.db_path, initialize=False)
+        assert store is not None
         repository = Layer4SQLiteStore(settings.db_path, initialize=False)
         patient = store.get_patient(DEMO_PATIENT_ID)
         if patient is None:
             raise ValueError("synthetic patient source missing")
         pathway = load_builtin_pathways().get(patient.pathway_code)
+        metric_observations = tuple(
+            store.list_final_observations(
+                DEMO_PATIENT_ID,
+                pathway_code=pathway.code,
+                pathway_version=pathway.version,
+            )
+        )
         briefs = ManualReviewBriefService(
             store,
             repository,
@@ -440,6 +595,11 @@ if settings.db_path.is_file():
                 else "沟通文字已经护士核对；本演示没有发送。"
             )
             nursing_detail = f"受控处理结果：{snapshot.outcome_label}。{readiness}"
+            if snapshot.outcome == "escalated_to_doctor":
+                nurse_escalation_notice = (
+                    "护士已人工上报这份患者确认记录，请医生查看患者原话、"
+                    "护士说明和来源证据。系统未进行临床风险分级。"
+                )
         elif task:
             nursing_detail = f"当前护理动作：{task.get('status') or '状态未记录'}。"
 
@@ -492,17 +652,22 @@ projection = project_doctor_visit_brief(
     unresolved_references=tuple(trace.unresolved_references) if trace else (),
     trace_truncated=bool(trace and trace.truncated),
 )
+metric_dashboard = build_doctor_metric_dashboard(metric_observations)
+followup_overview = build_doctor_followup_overview(metric_dashboard)
 
+render_workspace_heading(st, summary_version=projection.summary_version)
+if nurse_escalation_notice:
+    st.warning(nurse_escalation_notice)
 with st.container(key="cc_doctor_workspace"):
     main_column, source_column = st.columns([4.7, 1], gap="large", vertical_alignment="top")
     with main_column:
-        _render_facts(projection)
+        render_doctor_followup_overview(st, followup_overview)
         _render_notice(projection)
         if projection.summary_text:
             st.markdown(
                 f"""
                 <section class="cc-doctor-summary" aria-live="polite">
-                  <h2>当前速览</h2>
+                  <h2>护理记录摘要</h2>
                   <p>{html.escape(projection.summary_text)}</p>
                 </section>
                 """,
@@ -537,11 +702,16 @@ with st.container(key="cc_doctor_workspace"):
             with st.container(key="cc_doctor_nurse_link"):
                 st.page_link(
                     "pages/2_nurse_risk_center.py",
-                    label="返回护士工作台核对文字",
+                    label="返回护士安全复核台核对文字",
                     width="stretch",
                 )
 
 _render_source_detail(selected_source, projection, summary, trace)
+
+render_doctor_metric_dashboard(
+    st,
+    metric_dashboard,
+)
 
 if projection.show_decisions and summary is not None:
     st.markdown(
@@ -665,27 +835,12 @@ if projection.state in {
 }:
     _render_outcomes(projection)
 
+_render_supplemental_panel(store, progress)
+
 if projection.state == "story_complete":
     with st.container(key="cc_doctor_home_link"):
         st.page_link(
             "app.py",
             label="返回演示导览，按需明确重新开始",
-            width="stretch",
-        )
-
-if projection.show_knowledge_link:
-    st.markdown(
-        """
-        <section class="cc-doctor-knowledge">
-          <h2>独立资料</h2>
-          <p>只读，不携带患者上下文，不参与本轮状态。</p>
-        </section>
-        """,
-        unsafe_allow_html=True,
-    )
-    with st.container(key="cc_doctor_knowledge_link"):
-        st.page_link(
-            "pages/5_knowledge_evidence.py",
-            label="打开独立 Knowledge 资料库",
             width="stretch",
         )

@@ -4,9 +4,9 @@
 
 > **安全边界：仅使用合成数据。系统不是医疗急救通道，不诊断、不治疗、不分诊，也不生成用药建议。**
 
-当前仍是 Streamlit 本地合成 Web 原型，不是原生 App、临床试点或生产系统。首页名称为“合成演示导览”，主故事按五步展开：患者表达 → 患者确认 → 护士核对 → 医生速览 → 记录追溯。开始新一轮会在用户明确同意后原子替换本地合成运行数据，并生成固定原话“我今天拉肚子。”的未确认候选；患者确认、护士核对记录和未发送沟通文字、医生生成/刷新复诊速览仍分别需要明确人工点击。进度从 SQLite 事实恢复，不依赖浏览器 session state。Knowledge 是独立资料库，不属于五步完成度。完整设计见 [M5-D 稳定的一键比赛 Demo](docs/28_m5_d_competition_demo.md)。
+当前是仅使用合成数据的本地 Web 原型，不是原生 App、临床试点或生产系统。患者端、护士端和医生端均已提供独立 React 界面：患者与护士由同源 Starlette 服务承载，医生端由独立的受控服务承载；三端通过同一个 SQLite 事实库和版本化记录链协作。医生确认方案会原子地开启患者随访，患者最终确认会生成护士任务，护士人工上报会进入医生端“护理协作”待办。Streamlit 仅保留为综合演示壳、追溯和资料库页面。主故事仍按五步展开：医生开启 → 患者表达与确认 → 护士核对 → 医生查看上报 → 记录追溯。进度从 SQLite 事实恢复，不依赖浏览器 session state。Knowledge 是独立资料库，不属于五步完成度。完整设计见 [M5-D 稳定的一键比赛 Demo](docs/28_m5_d_competition_demo.md)。
 
-当前版本已接入小米 MiMo OpenAI-compatible 适配器；配置本地密钥时使用 `mimo-v2.5` JSON mode，分别承担受控抽取、Safety Critic 和患者语言改写。主抽取不可用时回退本地语义 Mock，辅助模型不可用时回退确定性硬规则或固定语言模板。无论哪种模式，Safety Agent 和患者确认门都不能绕过。
+当前版本默认接入火山方舟豆包 OpenAI-compatible 接口，使用 `doubao-seed-2-0-lite-260215` JSON mode，分别承担受控抽取、Safety Critic 和患者语言改写；原小米 MiMo 配置仍兼容。主抽取不可用时回退本地语义 Mock，辅助模型不可用时回退确定性硬规则或固定语言模板。无论哪种模式，Safety Agent 和患者确认门都不能绕过。
 
 M5-E 增加了可选飞书 Bot、Aily 和 Bitable 协议适配器、统一配置工厂与 FakeTransport 合同测试。默认配置为飞书/Aily `mock`、Bitable `disabled`，不读取 Token、不创建真实 transport、不认证、不探活、不发送或写入；运行时 `SEND_ENABLED=False`，没有真实外部发送。代码已实现且 FakeTransport 合同已验证；真实租户验证和生产可用性均为否。详见 [飞书 / Aily 集成状态](docs/feishu_integration.md) 与 [M5-E 设计验收](docs/29_m5_e_optional_feishu_aily_adapters.md)。
 
@@ -14,7 +14,33 @@ Knowledge v2 alias readiness 已合入代码主线，但 alias UI consumer integ
 
 ## 本地运行
 
-要求 Python 3.11+。
+要求 Python 3.11+ 和 Node.js 20+。
+
+先构建两个前端：
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+cd patient-web
+npm install
+npm run build
+cd ..
+cd doctor-web
+npm install
+npm run build
+cd ..
+```
+
+在两个终端中使用同一个数据库路径启动服务：
+
+```bash
+CONTINUCARE_DB_PATH=data/continucare.db .venv/bin/python -m continucare.patient_web
+CONTINUCARE_DB_PATH=data/continucare.db .venv/bin/python -m continucare.doctor_web
+```
+
+三个入口分别为：患者端 `http://127.0.0.1:8510/`、护士端 `http://127.0.0.1:8510/nurse`、医生端 `http://127.0.0.1:8520/`。演示时先在医生端确认方案，再到患者端提交，护士上报后可直接从护士端打开医生协作待办。浏览器只接收面向相应角色的中文内容；所有写操作由服务端重新校验当前状态和角色边界。
+
+如需运行仍保留的综合 Streamlit 演示壳：
 
 ```bash
 python3.11 -m venv .venv
@@ -23,27 +49,28 @@ python3.11 -m venv .venv
 .venv/bin/streamlit run app.py
 ```
 
-打开 Streamlit 输出的本地地址即可进入首页。运行数据默认保存在 `data/continucare.db`，该目录已被 Git 忽略。
+运行数据默认保存在 `data/continucare.db`，该目录已被 Git 忽略。
 
 普通离线测试不下载外部文件；未设置 `FHIR_R4_SCHEMA_ZIP` 时，依赖 HL7 官方 JSON Schema 的 3 项测试会明确标记为 skipped。比赛提交或发布验收不能把这些 skip 当作通过，必须按下方“验收命令”下载并核对固定哈希后重新运行全量测试。
 
-## 小米 MiMo 配置
+## 火山方舟豆包配置
 
 复制 `.env.example` 为被 Git 忽略的 `.env`，只在本机填入轮换后的密钥：
 
 ```dotenv
-CONTINUCARE_LLM_PROVIDER=xiaomi_mimo
-CONTINUCARE_LLM_MODEL=mimo-v2.5
-CONTINUCARE_LLM_BASE_URL=https://api.xiaomimimo.com/v1
-CONTINUCARE_LLM_API_KEY_ENV=MIMO_API_KEY
-MIMO_API_KEY=your-rotated-key
-CONTINUCARE_LLM_PROMPT_VERSION=mimo-semantic-extraction-v4
+CONTINUCARE_LLM_PROVIDER=volcengine_doubao
+CONTINUCARE_LLM_MODEL=doubao-seed-2-0-lite-260215
+CONTINUCARE_LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+CONTINUCARE_LLM_API_KEY_ENV=ARK_API_KEY
+ARK_API_KEY=your-rotated-key
+CONTINUCARE_LLM_PROMPT_VERSION=doubao-semantic-extraction-v1
 CONTINUCARE_USE_SAFETY_LLM=true
-CONTINUCARE_SAFETY_PROMPT_VERSION=mimo-safety-critic-v2
+CONTINUCARE_SAFETY_PROMPT_VERSION=doubao-safety-critic-v1
 CONTINUCARE_USE_LANGUAGE_LLM=true
-CONTINUCARE_LANGUAGE_PROMPT_VERSION=mimo-language-rewrite-v1
+CONTINUCARE_LANGUAGE_PROMPT_VERSION=doubao-language-rewrite-v1
 CONTINUCARE_USE_SUMMARY_LLM=false
-CONTINUCARE_SUMMARY_PROMPT_VERSION=mimo-summary-outline-v1
+CONTINUCARE_SUMMARY_PROMPT_VERSION=doubao-summary-outline-v1
+CONTINUCARE_LLM_TIMEOUT_SECONDS=60
 ```
 
 最小联通测试：
@@ -52,7 +79,7 @@ CONTINUCARE_SUMMARY_PROMPT_VERSION=mimo-summary-outline-v1
 .venv/bin/python scripts/mimo_smoke_test.py
 ```
 
-10例合成文本的真实模型回归：
+原 MiMo 冻结基线的 10 例合成文本回归（仅用于兼容性复验，不适用于当前豆包配置）：
 
 ```bash
 .venv/bin/python scripts/evaluate_mimo_live.py --fail-on-mismatch
@@ -60,13 +87,13 @@ CONTINUCARE_SUMMARY_PROMPT_VERSION=mimo-summary-outline-v1
 
 评测报告默认写入 `/tmp/continucare-mimo-live-evaluation.json`。该结果属于工程验证，不能替代临床验证。
 
-同一 MiMo 配置用于 Care 抽取、Safety Critic 与患者语言改写，但三者使用独立 Prompt 和严格 JSON 合同。Safety LLM 只能降级候选，不能推翻确定性硬规则；它发现有逐字证据的遗漏时，只能触发已发布 linkId 的定向补抽取。第三层以每日随访 occurrence 保存本次全部对话，并把已完成 Observation 作为只读跨日上下文；历史记录不能成为今天候选的证据。“今天/昨天/过去24小时”按患者时区解析并贯通到 Observation `effective[x]`。语言改写会本地锁定数字、单位、症状、程度、肯否和时间，不满足事实完整性时自动回退固定模板。
+同一受支持模型配置用于 Care 抽取、Safety Critic 与患者语言改写，但三者使用独立 Prompt 和严格 JSON 合同。Safety LLM 只能降级候选，不能推翻确定性硬规则；它发现有逐字证据的遗漏时，只能触发已发布 linkId 的定向补抽取。第三层以每日随访 occurrence 保存本次全部对话，并把已完成 Observation 作为只读跨日上下文；历史记录不能成为今天候选的证据。“今天/昨天/过去24小时”按患者时区解析并贯通到 Observation `effective[x]`。语言改写会本地锁定数字、单位、症状、程度、肯否和时间，不满足事实完整性时自动回退固定模板。
 
 第四层另提供默认关闭的受控 Summary LLM：它面对任意数量的动态事实清单，只能返回已有 `fact_id` 的分组和顺序，不能生成正文、风险或建议。事实遗漏、伪造 ID、跨栏目移动、模型故障或超过容量门时，系统使用完整事实清单确定性回退。
 
 受控 Summary 已使用官方 MiMo API 完成固定合成数据验收：5/5 用例、64/64 条事实恰好覆盖一次，包括未知医生自定义指标、事实文本提示注入、40 指标容量场景和完整服务/存储/Provenance 链路。该结果是工程验收，不是临床验证；提交配置仍默认关闭真实 Summary 调用。
 
-MiMo 不生成医学代码。已知 Questionnaire 字段和患者自述新症状都必须经过 `continucare/terminology/data/glp1_symptom_catalog_v1.json` 检索与版本校验：唯一命中后显示确认卡，多候选（例如“头晕”）显示语义区分按钮，未命中则只保留原话并等待术语/医生复核。当前目录是基于官方 GLP-1 药品标签建立的原型覆盖集，不声称穷尽所有可能症状；医院部署时通过同一后端协议接入其 FHIR 术语服务器。
+MiMo 不生成医学代码。中国 GLP1-14D 的定时随访只加载由 L1 Release 编译的 5 个固定 Questionnaire `linkId` 白名单，并锁定 knowledge release 与白名单 SHA-256。完成定时随访后的“随时补充上报”使用一个显式的合成演示复合边界：固定 5 项仍委托中国 L1 白名单；Pathway 外患者原话只可检索 `continucare/terminology/data/glp1_symptom_catalog_v1.json` 的原型概念。后者必须经患者选定/确认，写入独立补充 QuestionnaireResponse 和 Observation，并保留目录版本、SHA-256、`draft-prototype-verified` 与“目标医院待验证”状态；它不继承中国 knowledge release 或 Observation Mapping，也不能被宣称为中国产品证据。两套目录都未安全命中时只保存患者确认原话，不伪造 Observation。
 
 2026-08-02 的冻结配置 10 例单轮合成数据评测达到业务结果 10/10、完整三 Prompt 链路 10/10、原始模型输出 10/10。Layer 3 工程发布清单、原始报告和 Git 回滚标签固定为 `continucare-layer3-v1.0.0` / `layer3-v1.0.0`。该结果是工程回归，不是临床验证。
 
@@ -92,8 +119,8 @@ CONTINUCARE_EXTERNAL_EGRESS_ENABLED=false
 - 对话式自由表达只生成候选，患者确认前不写入第二层；
 - Agent 输出通过 linkId/code、enableWhen、证据跨度、候选值、主语、否定、时间和单位安全检查；
 - 随访会话锁定 Pathway/Questionnaire 版本，支持草稿恢复和幂等提交；
-- LOINC、SNOMED CT 与 UCUM 映射有独立权威信源包；
-- GLP-1 症状目录对已知与新增症状统一检索，保留目录版本、命中别名、code 与确认来源；
+- LOINC 2.82 与 UCUM 映射已锁定；SNOMED CT 固定代码仅限合成工程测试，Edition、中国适用性和许可仍待核验；
+- 定时随访只使用中国固定白名单；合成补充上报可使用明确标记为原型、待医院验证的动态症状目录，未安全命中则不生成 Observation；
 - 没有获批临床规则时采取 fail-closed，不输出风险等级或 Alert；
 - Summary 审阅和 Mock 通知进入本地审计链。
 
@@ -101,12 +128,16 @@ CONTINUCARE_EXTERNAL_EGRESS_ENABLED=false
 
 - 合成演示导览：展示五步故事的当前角色、当前步骤和下一步；
 - 我的随访：展示患者原话、系统记法和明确的确认选择；
-- 护士工作台：处理例行记录核对，并核对尚未发送的沟通文字；
+- 护士安全复核台（独立网页 `/nurse`）：人工检查中文随访答案，标记异常并决定继续观察或上报医生；软件不设未经批准的临床阈值、不自动预警、不代替护士判断；
 - 复诊速览：分开呈现患者确认的事实、护理动作和尚未提供临床评估的边界；
 - 记录追溯：用人类可读的中文说明记录如何形成或停止，技术详情按需展开；
 - Knowledge 资料库 / 症状采集参考：独立只读，不读取患者故事，也不参与五步完成判定。
 
 ## 临床与标准依据
+
+下载资料已接入版本化的中国 GLP-1 L1 知识层 `cn-glp1-l1-v1.0.3`：运行时读取结构化 JSON 和编译后的 FHIR 契约，不直接解析 PDF/ZIP。当前按批准文号登记 15 条中国产品记录：6 条 `verified`，9 条 `incomplete`。穆峰达 8 条和度易达 2 条已绑定现行中文说明书，但穆峰达一次性预填充笔 4 条还缺文号—规格逐项原子证据；诺和盈 5 条仍缺最新完整说明书。GLP1-14D 问卷和 Observation Mapping 已绑定 `metric_id`、`evidence_claim_id` 与知识版本；PRO-CTCAE 只保留来源和 11 个非运行指标元数据，许可范围确认前公开版本不包含原文或衍生 Questionnaire。CTCAE、FDA 标签和 FAERS 不进入自动临床判断。
+
+- [中国 GLP-1 L1 知识版本与运行边界](docs/clinical/cn_glp1/README.md)
 
 - [整体六层方案与端到端工作流](docs/14_layered_solution_blueprint.md)
 - [第一层验收报告](docs/15_layer_1_acceptance.md)
@@ -166,9 +197,20 @@ printf '%s  %s\n' "$FHIR_R4_SCHEMA_SHA256" "$FHIR_R4_SCHEMA_PATH" \
 
 FHIR_R4_SCHEMA_ZIP="$FHIR_R4_SCHEMA_PATH" \
   .venv/bin/python -m pytest -q -p no:cacheprovider
-.venv/bin/python scripts/validate_fhir_r4.py \
+.venv/bin/python -m scripts.validate_fhir_r4 \
   --schema "$FHIR_R4_SCHEMA_PATH"
-.venv/bin/python scripts/evaluate_semantic_layer.py
+
+# 公开 checkout：先从受控 JSON 重建，再核验
+.venv/bin/python -m scripts.validate_cn_glp1_knowledge --skip-source-files
+.venv/bin/python -m scripts.build_cn_glp1_knowledge
+.venv/bin/python -m scripts.build_cn_glp1_knowledge --check
+
+# 持有受控本地 source pack 时，再做原件哈希核验
+.venv/bin/python -m scripts.check_cn_glp1_sources
+
+.venv/bin/python -m scripts.evaluate_semantic_layer
+npm --prefix patient-web run build
+.venv/bin/python -m continucare.patient_web
 .venv/bin/streamlit run app.py
 ```
 
@@ -176,4 +218,4 @@ FHIR_R4_SCHEMA_ZIP="$FHIR_R4_SCHEMA_PATH" \
 
 `/tmp` 可能在重启或系统清理后被删除；发生这种情况时重新执行下载和哈希检查即可。
 
-所有演示身份、消息和结果均为合成数据。禁止把运行数据库、密钥或真实患者信息提交到仓库。
+所有演示身份、消息和结果均为合成数据。禁止把运行数据库、密钥或真实患者信息提交到仓库。比赛包必须从已审查的 Git 文件集合用 `git archive` 或显式 allowlist 生成，不能对当前工作区执行递归 `zip`，因为本地 `output/` 可能包含受限核验原件和历史候选包。

@@ -1,0 +1,212 @@
+{
+  "resourceType": "Questionnaire",
+  "id": "glp1-14d-followup-v1-1",
+  "url": "urn:uuid:7f28b4c6-49a1-4cef-b6c3-37d24660f7a4",
+  "version": "1.1.0",
+  "name": "GLP1FourteenDayFollowUp",
+  "title": "GLP-1治疗后14天患者报告采集（临床审核草案）",
+  "status": "draft",
+  "experimental": true,
+  "date": "2026-08-14",
+  "publisher": "ContinuCare",
+  "description": "FHIR R4合成数据采集草案。当前中国路径仅绑定诺和盈公开批准资料且缺现行完整法定说明书；境外资料不支持中国运行时临床判断。未经适用医院临床、药学和术语审核，不得用于真实患者。",
+  "extension": [
+    {
+      "url": "urn:continucare:StructureDefinition:knowledge-release-id",
+      "valueString": "cn-glp1-l1-v1.0.3"
+    }
+  ],
+  "subjectType": ["Patient"],
+  "item": [
+    {
+      "linkId": "body-weight",
+      "extension": [
+        {"url": "urn:continucare:StructureDefinition:metric-id", "valueString": "body_weight"},
+        {"url": "urn:continucare:StructureDefinition:goal-rule-claim-id", "valueString": "nhc-obesity-anthropometry-weight-bmi-2024-001"},
+        {"url": "http://hl7.org/fhir/StructureDefinition/minValue", "valueDecimal": 20},
+        {"url": "http://hl7.org/fhir/StructureDefinition/maxValue", "valueDecimal": 400},
+        {"url": "http://hl7.org/fhir/StructureDefinition/questionnaire-unit", "valueCoding": {"system": "http://unitsofmeasure.org", "code": "kg", "display": "kg"}}
+      ],
+      "code": [
+        {"system": "http://loinc.org", "version": "2.82", "code": "29463-7", "display": "Body weight"}
+      ],
+      "text": "请输入本次体重（kg）",
+      "type": "quantity"
+    },
+    {
+      "linkId": "nausea-present",
+      "extension": [
+        {"url": "urn:continucare:StructureDefinition:metric-id", "valueString": "nausea_present_now"},
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "continucare-glp1-14d-wording-2026-001"},
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "cn-wegovy-gi-monitoring-domain-2025-001"}
+      ],
+      "code": [
+        {
+          "system": "http://snomed.info/sct",
+          "code": "422587007",
+          "display": "Nausea",
+          "version": "20250201"
+        }
+      ],
+      "text": "现在有恶心吗？",
+      "type": "boolean"
+    },
+    {
+      "linkId": "nausea-severity",
+      "extension": [
+        {"url": "urn:continucare:StructureDefinition:metric-id", "valueString": "nausea_severity_current"},
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "continucare-glp1-14d-wording-2026-001"},
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "loinc-2.82-observation-codes-001"},
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "cn-wegovy-gi-monitoring-domain-2025-001"}
+      ],
+      "code": [
+        {
+          "system": "http://loinc.org",
+          "version": "2.82",
+          "code": "81660-3",
+          "display": "Nausea [Presence]"
+        }
+      ],
+      "text": "恶心程度最接近哪一项？",
+      "type": "choice",
+      "enableWhen": [
+        {
+          "question": "nausea-present",
+          "operator": "=",
+          "answerBoolean": true
+        }
+      ],
+      "answerOption": [
+        {
+          "extension": [
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "轻度"
+            },
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "轻微"
+            },
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "有点"
+            }
+          ],
+          "valueCoding": {
+            "system": "http://loinc.org",
+            "version": "2.82",
+            "code": "LA6752-5",
+            "display": "Mild"
+          }
+        },
+        {
+          "extension": [
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "中度"
+            },
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "一般"
+            },
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "比较明显"
+            }
+          ],
+          "valueCoding": {
+            "system": "http://loinc.org",
+            "version": "2.82",
+            "code": "LA6751-7",
+            "display": "Moderate"
+          }
+        },
+        {
+          "extension": [
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "重度"
+            },
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "严重"
+            },
+            {
+              "url": "urn:continucare:StructureDefinition:answer-semantic-alias",
+              "valueString": "非常严重"
+            }
+          ],
+          "valueCoding": {
+            "system": "http://loinc.org",
+            "version": "2.82",
+            "code": "LA6750-9",
+            "display": "Severe"
+          }
+        }
+      ]
+    },
+    {
+      "linkId": "vomiting-count-24h",
+      "extension": [
+        {"url": "urn:continucare:StructureDefinition:metric-id", "valueString": "vomiting_count_24h"},
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "loinc-2.82-observation-codes-001"},
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "cn-wegovy-gi-monitoring-domain-2025-001"},
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "continucare-glp1-14d-wording-2026-001"}
+      ],
+      "code": [
+        {
+          "system": "http://loinc.org",
+          "version": "2.82",
+          "code": "94070-0",
+          "display": "Emesis count 24 hour"
+        }
+      ],
+      "text": "过去24小时呕吐了几次？",
+      "type": "integer"
+    },
+    {
+      "linkId": "fluid-intake-24h-estimated",
+      "extension": [
+        {"url": "urn:continucare:StructureDefinition:metric-id", "valueString": "fluid_intake_24h_estimated"},
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "loinc-2.82-observation-codes-001"},
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "cn-wegovy-gi-monitoring-domain-2025-001"}
+      ],
+      "code": [
+        {
+          "system": "http://loinc.org",
+          "version": "2.82",
+          "code": "75301-2",
+          "display": "Fluid intake 24 hour Estimated"
+        }
+      ],
+      "text": "估计过去24小时一共摄入了多少毫升液体？不确定时可以留空并在补充说明中描述。",
+      "type": "quantity"
+    },
+    {
+      "linkId": "abdominal-pain-present",
+      "extension": [
+        {"url": "urn:continucare:StructureDefinition:metric-id", "valueString": "abdominal_pain_present_now"},
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "continucare-glp1-14d-wording-2026-001"},
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "cn-wegovy-gi-monitoring-domain-2025-001"}
+      ],
+      "code": [
+        {
+          "system": "http://snomed.info/sct",
+          "code": "21522001",
+          "display": "Abdominal pain (finding)",
+          "version": "20250201"
+        }
+      ],
+      "text": "现在有腹痛吗？",
+      "type": "boolean"
+    },
+    {
+      "linkId": "free-text-report",
+      "extension": [
+        {"url": "urn:continucare:StructureDefinition:evidence-claim-id", "valueString": "continucare-glp1-14d-wording-2026-001"}
+      ],
+      "text": "请描述今天的身体状态",
+      "type": "text"
+    }
+  ]
+}

@@ -291,7 +291,7 @@ def test_actions_include_only_real_events_and_sort_forward_with_stable_ties():
         "提交原话",
         "准备新的合成演示记录",
         "选择确认",
-        "创建例行记录核对",
+        "创建人工安全复核任务",
     ]
 
 

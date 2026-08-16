@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from continucare.agents.contracts import (
     AgentRunRecord,
@@ -18,6 +18,7 @@ from continucare.agents.contracts import (
     AnswerOptionContract,
     CodingContract,
     CandidateOrigin,
+    CandidateSource,
     ClarificationKind,
     ClarificationOption,
     ClarificationRequest,
@@ -73,6 +74,7 @@ from continucare.errors import ConcurrentWriteConflict
 from continucare.fhir.questionnaires import (
     build_questionnaire_response,
     flatten_questionnaire_items,
+    visible_questionnaire_items,
 )
 from continucare.services.audit import build_audit_event
 from continucare.models import (
@@ -80,10 +82,14 @@ from continucare.models import (
     CareSession,
     ConfirmedAnswerContext,
     ConfirmedSymptomReport,
+    ProvisionalAnswerContext,
+    ProvisionalSymptomReport,
 )
 from continucare.fhir.terminology import UCUM
 from continucare.terminology import (
     RepositoryTerminologyBackend,
+    load_cn_glp1_terminology_catalog,
+    terminology_catalog_sha256,
 )
 from continucare.terminology.catalog import (
     DYNAMIC_LINK_PREFIX,
@@ -105,6 +111,27 @@ class SemanticInteraction(BaseModel):
     idempotent_replay: bool = False
 
 
+class DraftAnswerCorrection(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    correction_id: str
+    link_id: str
+    previous_answer: Any
+    replacement_answer: Any
+    previous_source_run_id: str
+    correction_source_run_id: str
+    raw_text: str
+
+
+class DraftAnswerInvalidation(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    link_id: str
+    previous_answer: Any
+    previous_source_run_id: str
+    invalidated_by_link_ids: list[str]
+
+
 class ConfirmedCandidatePlan(BaseModel):
     """Patient-confirmed Layer-3 material, validated but not yet persisted."""
 
@@ -116,6 +143,24 @@ class ConfirmedCandidatePlan(BaseModel):
     answers: dict[str, Any]
     answer_contexts: list[ConfirmedAnswerContext]
     symptom_reports: list[ConfirmedSymptomReport]
+    corrections: list[DraftAnswerCorrection] = Field(default_factory=list)
+    invalidations: list[DraftAnswerInvalidation] = Field(default_factory=list)
+    resolved_at: str
+
+
+class ProvisionalCandidatePlan(BaseModel):
+    """Model-organized material that still requires one final patient submit."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    record: AgentRunRecord
+    session: CareSession
+    candidates: list[SemanticCandidate]
+    answers: dict[str, Any]
+    answer_contexts: list[ProvisionalAnswerContext]
+    symptom_reports: list[ProvisionalSymptomReport]
+    corrections: list[DraftAnswerCorrection] = Field(default_factory=list)
+    invalidations: list[DraftAnswerInvalidation] = Field(default_factory=list)
     resolved_at: str
 
 
@@ -142,7 +187,9 @@ class CareAgentService:
         self.safety = SafetyAgent(critic=selected_critic)
         self.language_rewriter = language_rewriter or MiMoLanguageRewriter(config)
         self.patient_timezone = patient_timezone or get_settings().patient_timezone
-        self.terminology = terminology_backend or RepositoryTerminologyBackend()
+        self.terminology = terminology_backend or RepositoryTerminologyBackend(
+            load_cn_glp1_terminology_catalog()
+        )
         registry = AgentRegistry()
         registry.register(
             RegisteredAgent(
@@ -169,8 +216,90 @@ class CareAgentService:
         message_text: str,
         *,
         received_at: str | None = None,
+        candidate_only: bool = False,
+        focus_link_ids: list[str] | None = None,
     ) -> SemanticInteraction:
-        session = self._session(session_id)
+        return self._analyze(
+            session_id,
+            message_text,
+            received_at=received_at,
+            candidate_only=candidate_only,
+            focus_link_ids=focus_link_ids,
+            allow_completed_anchor=False,
+            task_namespace=None,
+        )
+
+    def analyze_supplemental(
+        self,
+        session_id: str,
+        message_text: str,
+        *,
+        received_at: str | None = None,
+        focus_link_ids: list[str] | None = None,
+    ) -> SemanticInteraction:
+        """Prepare a candidate-only turn in a child supplemental occurrence."""
+
+        session = self.store.get_care_session(session_id)
+        if (
+            session is None
+            or session.status.value != "in_progress"
+            or not session.parent_session_id
+        ):
+            raise ValueError("补充上报必须使用独立的进行中 occurrence")
+        anchor = self.store.get_care_session(session.parent_session_id)
+        if (
+            anchor is None
+            or anchor.status.value != "completed"
+            or anchor.patient_id != session.patient_id
+            or anchor.pathway_code != session.pathway_code
+            or anchor.pathway_version != session.pathway_version
+        ):
+            raise ValueError("补充上报的已完成日随访锚点不可信")
+
+        return self._analyze(
+            session_id,
+            message_text,
+            received_at=received_at,
+            candidate_only=True,
+            focus_link_ids=focus_link_ids,
+            allow_completed_anchor=False,
+            task_namespace="supplemental",
+        )
+
+    def analyze_patient_checkin(
+        self,
+        session_id: str,
+        message_text: str,
+        *,
+        received_at: str | None = None,
+        focus_link_ids: list[str] | None = None,
+    ) -> SemanticInteraction:
+        """Prepare one product-chat draft turn under the composite catalog boundary."""
+
+        return self._analyze(
+            session_id,
+            message_text,
+            received_at=received_at,
+            candidate_only=True,
+            focus_link_ids=focus_link_ids,
+            allow_completed_anchor=False,
+            task_namespace="patient-checkin",
+        )
+
+    def _analyze(
+        self,
+        session_id: str,
+        message_text: str,
+        *,
+        received_at: str | None,
+        candidate_only: bool,
+        focus_link_ids: list[str] | None,
+        allow_completed_anchor: bool,
+        task_namespace: str | None,
+    ) -> SemanticInteraction:
+        session = self._session(
+            session_id, allow_completed_anchor=allow_completed_anchor
+        )
         questionnaire = self.care_engine.questionnaire_for_session(session)
         task = self._build_task(
             session,
@@ -178,6 +307,28 @@ class CareAgentService:
             message_text,
             received_at=received_at,
         )
+        normalized_focus = sorted(set(focus_link_ids or []))
+        focus_suffix = ""
+        if normalized_focus:
+            allowed_link_ids = {item.link_id for item in task.allowed_items}
+            if any(link_id not in allowed_link_ids for link_id in normalized_focus):
+                raise ValueError("聚焦采集字段不属于当前锁定问卷")
+            focus_digest = hashlib.sha256(
+                json.dumps(
+                    normalized_focus, ensure_ascii=False, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+            focus_suffix = f":focus:{focus_digest}"
+            task = task.model_copy(
+                update={
+                    "task_id": f"{task.task_id}{focus_suffix}",
+                    "focus_link_ids": normalized_focus,
+                }
+            )
+        if task_namespace:
+            task = task.model_copy(
+                update={"task_id": f"{task_namespace}:{task.task_id}"}
+            )
         latest_turn = (
             task.conversation_context.recent_turns[-1]
             if task.conversation_context.recent_turns
@@ -185,7 +336,12 @@ class CareAgentService:
         )
         if latest_turn is not None and latest_turn.message_text == task.message_text:
             latest_record = self.store.get_agent_run(latest_turn.run_id)
-            if latest_record is not None:
+            if latest_record is not None and self._record_matches_task(
+                latest_record, task
+            ) and (
+                not task_namespace
+                or latest_record.task_id.startswith(f"{task_namespace}:")
+            ) and (not focus_suffix or latest_record.task_id.endswith(focus_suffix)):
                 latest_result = SemanticResult.model_validate(
                     latest_record.output_json
                 )
@@ -203,7 +359,7 @@ class CareAgentService:
         if existing:
             return self._verified_replay(task, existing)
 
-        contextual = self._contextual_resolution(task)
+        contextual = None if candidate_only else self._contextual_resolution(task)
         if contextual is not None:
             result, source_record, candidates, actions, decision, option_id = contextual
             now = utc_now_iso()
@@ -267,9 +423,22 @@ class CareAgentService:
             )
             return SemanticInteraction(task=task, result=result, record=record)
 
-        contextual_draft = self._contextual_answer_candidate(task)
+        contextual_draft = None if candidate_only else self._contextual_answer_candidate(task)
         if contextual_draft is None:
-            care_outcome = self.runtime.run("care_agent", task)
+            if normalized_focus:
+                started_at = utc_now_iso()
+                focused_draft = self.agent.extract_focused(task, normalized_focus)
+                if focused_draft is None:
+                    raise ValueError("当前语义模型不支持聚焦问卷采集")
+                care_outcome = AgentRuntimeOutcome(
+                    result=focused_draft,
+                    started_at=started_at,
+                    completed_at=utc_now_iso(),
+                    agent_name="care_agent",
+                    agent_version=self.agent.VERSION,
+                )
+            else:
+                care_outcome = self.runtime.run("care_agent", task)
         else:
             now = utc_now_iso()
             care_outcome = AgentRuntimeOutcome(
@@ -283,7 +452,11 @@ class CareAgentService:
             update={
                 "stage_traces": [
                     *care_outcome.result.stage_traces,
-                    self._care_stage_trace(care_outcome),
+                    self._care_stage_trace(
+                        care_outcome,
+                        task=task,
+                        focus_link_ids=normalized_focus,
+                    ),
                 ]
             }
         )
@@ -297,6 +470,30 @@ class CareAgentService:
             ),
         )
         result = self._resolve_missing_items(task, safety_outcome.result)
+        if candidate_only:
+            # Product chat owns the deterministic next-question policy.  Missing
+            # Questionnaire items are therefore not persisted as conversational
+            # actions here; every natural-language turn remains a candidate-only
+            # proposal until the patient presses an explicit confirmation button.
+            clarifications = [
+                item
+                for item in result.clarifications
+                if not item.clarification_id.startswith("clarify-missing-")
+            ]
+            result = result.model_copy(
+                update={
+                    "clarifications": clarifications,
+                    "status": (
+                        SemanticStatus.NEEDS_CLARIFICATION
+                        if clarifications
+                        else (
+                            SemanticStatus.NEEDS_CONFIRMATION
+                            if result.candidates
+                            else SemanticStatus.NO_MATCH
+                        )
+                    ),
+                }
+            )
         result = self._attach_temporal_context(task, result)
         result = self._rewrite_patient_language(task, result)
         result = result.model_copy(
@@ -321,7 +518,7 @@ class CareAgentService:
         if len(bindings_by_run) > 1:
             raise ValueError("一条回复不能同时关闭多个历史 Agent 运行的待办")
         analysis_audit = self._semantic_analysis_audit(task, record, outcome.result)
-        if bindings_by_run:
+        if bindings_by_run and not candidate_only:
             source_run_id, bound_action_ids = next(iter(bindings_by_run.items()))
             source_record = self.store.get_agent_run(source_run_id)
             if source_record is None:
@@ -424,6 +621,7 @@ class CareAgentService:
     ) -> SemanticInteraction:
         """Return only complete durable results; never bless an orphaned run."""
 
+        self._require_record_boundary(record, task)
         result = SemanticResult.model_validate(record.output_json)
         if (
             record.patient_id != task.patient_id
@@ -712,13 +910,28 @@ class CareAgentService:
 
         decorated: list[SemanticCandidate] = []
         handled_concepts: set[str] = set()
-        for candidate in draft.candidates:
+        for candidate in sorted(
+            draft.candidates,
+            key=lambda item: item.link_id.startswith(DYNAMIC_LINK_PREFIX),
+        ):
+            is_dynamic = candidate.link_id.startswith(DYNAMIC_LINK_PREFIX)
             match = self.terminology.catalog.match_for_questionnaire(
                 link_id=candidate.link_id,
                 coding=candidate.questionnaire_code,
                 matched_text=candidate.evidence_text,
             )
-            candidate = candidate.model_copy(update={"terminology_match": match})
+            if is_dynamic and match.concept_id in handled_concepts:
+                continue
+            candidate = candidate.model_copy(
+                update={
+                    "terminology_match": match,
+                    "origin": (
+                        CandidateOrigin.PATIENT_REPORTED_NEW
+                        if is_dynamic
+                        else candidate.origin
+                    ),
+                }
+            )
             decorated.append(candidate)
             handled_concepts.add(match.concept_id)
 
@@ -791,6 +1004,7 @@ class CareAgentService:
                     subject=classify_evidence_subject(task.message_text, start, end),
                     temporality=_mention_temporality(task, start, end),
                     negated=_mention_negated(task.message_text, start),
+                    source_mode=CandidateSource.DETERMINISTIC_CATALOG,
                 )
             )
             known_spans.add(identity)
@@ -1012,7 +1226,11 @@ class CareAgentService:
         options = [
             ClarificationOption(
                 option_id=f"concept::{item.concept_id}",
-                label=item.preferred_zh,
+                label=(
+                    f"{item.preferred_zh}（确认是现在仍有）"
+                    if mention.temporality == Temporality.UNSPECIFIED
+                    else item.preferred_zh
+                ),
                 accepts_candidate=True,
                 terminology_match=item,
             )
@@ -1030,7 +1248,11 @@ class CareAgentService:
             kind=ClarificationKind.TERMINOLOGY_DISAMBIGUATION,
             prompt=(
                 f"您说的“{mention.evidence_text}”可能对应几种不同记录。"
-                "请选择当前最符合的一项："
+                + (
+                    "请选择最符合的一项，并同时确认这是您现在仍有的情况："
+                    if mention.temporality == Temporality.UNSPECIFIED
+                    else "请选择最符合的一项："
+                )
             ),
             target_link_id=None,
             options=options,
@@ -1104,12 +1326,17 @@ class CareAgentService:
         )
 
     def _care_stage_trace(
-        self, outcome: AgentRuntimeOutcome
+        self,
+        outcome: AgentRuntimeOutcome,
+        *,
+        task: SemanticTask,
+        focus_link_ids: list[str] | None = None,
     ) -> AgentStageTrace:
         result = outcome.result
         config = self.agent.model_adapter.config
         model_mode = result.mode in {
             "model_api:xiaomi_mimo",
+            "model_api:volcengine_doubao",
             "model_api:feishu_aily_not_live_verified",
         }
         return AgentStageTrace(
@@ -1124,6 +1351,16 @@ class CareAgentService:
             model_usage=result.model_usage if model_mode else None,
             provider_request_id=result.provider_request_id if model_mode else None,
             latency_ms=_elapsed_ms(outcome.started_at, outcome.completed_at),
+            details={
+                "focus_link_ids": focus_link_ids or [],
+                "memory_scope": task.conversation_context.memory_scope,
+                "recent_turn_count": len(task.conversation_context.recent_turns),
+                "focused_existing_answer_link_ids": [
+                    link_id
+                    for link_id in (focus_link_ids or [])
+                    if link_id in task.existing_answers
+                ],
+            },
         )
 
     def _resolve_missing_items(
@@ -1260,7 +1497,7 @@ class CareAgentService:
                     if set(supported) <= resolved_links
                     else "partial"
                 ),
-                model_provider="xiaomi_mimo",
+                model_provider=self.agent.model_adapter.config.provider,
                 model_name=self.agent.model_adapter.config.model_name,
                 prompt_version=self.agent.model_adapter.config.prompt_version,
                 model_usage=focused.model_usage,
@@ -1384,7 +1621,7 @@ class CareAgentService:
             agent_version=self.agent.VERSION,
             mode=outcome.mode,
             status="completed",
-            model_provider="xiaomi_mimo",
+            model_provider=self.agent.model_adapter.config.provider,
             model_name=self.agent.model_adapter.config.model_name,
             prompt_version=outcome.prompt_version,
             model_usage=outcome.model_usage,
@@ -1410,7 +1647,13 @@ class CareAgentService:
         )
 
     def confirm_candidates(
-        self, run_id: str, candidate_ids: list[str]
+        self,
+        run_id: str,
+        candidate_ids: list[str],
+        *,
+        include_original_text: bool = True,
+        track_original_text_context: bool = False,
+        answer_overrides: dict[str, Any] | None = None,
     ):
         if (
             not candidate_ids
@@ -1424,6 +1667,67 @@ class CareAgentService:
         if unknown:
             raise ValueError("确认内容不属于该次安全审核结果")
         candidates = [available[item_id] for item_id in candidate_ids]
+        overrides = dict(answer_overrides or {})
+        selected_by_link: dict[str, list[SemanticCandidate]] = {}
+        for candidate in candidates:
+            selected_by_link.setdefault(candidate.link_id, []).append(candidate)
+        if any(
+            link_id.startswith(DYNAMIC_LINK_PREFIX)
+            or link_id not in selected_by_link
+            or len(selected_by_link[link_id]) != 1
+            for link_id in overrides
+        ):
+            raise ValueError("患者选择必须对应本轮唯一的受控问卷字段")
+        selection_rows: list[dict[str, Any]] = []
+        if overrides:
+            task = self._task_for_record(record)
+            questionnaire_items = {
+                item.link_id: item for item in task.allowed_items
+            }
+            selected_candidates: list[SemanticCandidate] = []
+            for candidate in candidates:
+                if candidate.link_id not in overrides:
+                    selected_candidates.append(candidate)
+                    continue
+                selected_answer = overrides[candidate.link_id]
+                contract = questionnaire_items.get(candidate.link_id)
+                allowed_answers = {
+                    option.code for option in (contract.answer_options if contract else [])
+                }
+                if (
+                    contract is None
+                    or contract.item_type != "choice"
+                    or selected_answer not in allowed_answers
+                ):
+                    raise ValueError("患者选择不属于锁定问卷的受控选项")
+                effective = candidate.effective_time
+                if effective is not None:
+                    effective = effective.model_copy(
+                        update={
+                            "basis": TemporalResolutionBasis.PATIENT_CONFIRMATION,
+                            "inherited_from_action_id": candidate.candidate_id,
+                        }
+                    )
+                elif result.temporal_context is not None:
+                    effective = candidate_temporal_resolution(
+                        candidate,
+                        result.temporal_context,
+                        basis=TemporalResolutionBasis.PATIENT_CONFIRMATION,
+                        inherited_from_action_id=candidate.candidate_id,
+                    )
+                selected_candidate = candidate.model_copy(
+                    update={"answer": selected_answer, "effective_time": effective}
+                )
+                selected_candidates.append(selected_candidate)
+                selection_rows.append(
+                    {
+                        "candidate_id": candidate.candidate_id,
+                        "link_id": candidate.link_id,
+                        "model_answer": candidate.answer,
+                        "patient_selected_answer": selected_answer,
+                    }
+                )
+            candidates = selected_candidates
         self._preflight_action_decisions(
             record,
             {
@@ -1434,16 +1738,167 @@ class CareAgentService:
         resolved_at = utc_now_iso()
         plan = self.prepare_confirmed_candidates(
             run_id,
-            candidate_ids,
+            candidate_ids if not overrides else [],
             resolved_at=resolved_at,
+            include_original_text=include_original_text,
+            track_original_text_context=track_original_text_context,
+            _candidate_values=(candidates if overrides else None),
         )
+        selection_events: list[AuditEvent] = []
+        selection_option_id = None
+        audit_decision = "accepted"
+        if selection_rows:
+            selection_payload = json.dumps(
+                {
+                    "session_id": record.session_id,
+                    "source_run_id": record.run_id,
+                    "selections": selection_rows,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            selection_digest = hashlib.sha256(
+                selection_payload.encode("utf-8")
+            ).hexdigest()
+            selection_option_id = f"patient-selection:{selection_digest[:24]}"
+            audit_decision = "accepted_with_patient_selection"
+            selection_events.append(
+                build_audit_event(
+                    event_id=f"audit-{selection_digest[:32]}-selection",
+                    patient_id=record.patient_id,
+                    entity_type="CareSession",
+                    entity_id=record.session_id,
+                    event_type="patient_answer_selected",
+                    actor_type="synthetic_patient",
+                    created_at=resolved_at,
+                    details={
+                        "session_id": record.session_id,
+                        "source_run_id": record.run_id,
+                        "selections": selection_rows,
+                        "clinical_assessment": "not_assessed",
+                    },
+                )
+            )
         return self._persist_conversation_decision(
             plan=plan,
             action_ids=candidate_ids,
             decision="accepted",
             resolution_decision=ContextResolutionDecision.ACCEPTED,
+            option_id=selection_option_id,
+            audit_decision=audit_decision,
+            additional_audit_events=selection_events,
+        )
+
+    def stage_candidates_for_final_review(
+        self,
+        run_id: str,
+        candidate_ids: list[str],
+        *,
+        include_original_text: bool = True,
+        track_original_text_context: bool = False,
+    ) -> CareSession:
+        """Place validated model output in an unconfirmed draft, never clinical data."""
+
+        if (
+            not candidate_ids
+            or len(candidate_ids) != len(set(candidate_ids))
+            or any(not item.strip() for item in candidate_ids)
+        ):
+            raise ValueError("待整理草稿必须包含本轮非空唯一候选")
+        record, result = self._stored_result(run_id)
+        available = {item.candidate_id: item for item in result.candidates}
+        if set(candidate_ids) - set(available):
+            raise ValueError("草稿内容不属于该次安全审核结果")
+        plan = self.prepare_confirmed_candidates(
+            run_id,
+            candidate_ids,
+            include_original_text=include_original_text,
+            track_original_text_context=track_original_text_context,
+            _provisional=True,
+        )
+        if not isinstance(plan, ProvisionalCandidatePlan):
+            raise RuntimeError("provisional candidate preparation returned the wrong plan")
+        return self._persist_provisional_plan(
+            plan=plan,
+            action_ids=candidate_ids,
+            action_type="candidate",
+            decision="drafted",
             option_id=None,
-            audit_decision="accepted",
+            persist_answers=True,
+        )
+
+    def resolve_clarification_for_final_review(
+        self,
+        run_id: str,
+        clarification_id: str,
+        option_id: str,
+        *,
+        include_original_text: bool = True,
+        track_original_text_context: bool = False,
+    ) -> CareSession:
+        """Resolve ambiguity into a provisional draft, not a patient confirmation."""
+
+        record, result = self._stored_result(run_id)
+        clarification = next(
+            (
+                item
+                for item in result.clarifications
+                if item.clarification_id == clarification_id
+            ),
+            None,
+        )
+        if clarification is None:
+            raise ValueError("澄清问题不属于该次分析结果")
+        option = next(
+            (item for item in clarification.options if item.option_id == option_id),
+            None,
+        )
+        if option is None:
+            raise ValueError("澄清选项无效")
+        candidate = self.prepare_clarification_candidate(
+            run_id,
+            clarification_id,
+            option_id,
+            temporal_basis=TemporalResolutionBasis.PATIENT_SELECTION,
+        )
+        if candidate is None:
+            decision = "unsure" if option_id == "unsure" else "rejected"
+            session = self._session(record.session_id)
+            plan = ProvisionalCandidatePlan(
+                record=record,
+                session=session,
+                candidates=[],
+                answers=session.answers,
+                answer_contexts=[],
+                symptom_reports=[],
+                resolved_at=utc_now_iso(),
+            )
+            return self._persist_provisional_plan(
+                plan=plan,
+                action_ids=[clarification_id],
+                action_type="clarification",
+                decision=decision,
+                option_id=option_id,
+                persist_answers=False,
+            )
+        plan = self.prepare_confirmed_candidates(
+            run_id,
+            [],
+            include_original_text=include_original_text,
+            track_original_text_context=track_original_text_context,
+            _candidate_values=[candidate],
+            _provisional=True,
+        )
+        if not isinstance(plan, ProvisionalCandidatePlan):
+            raise RuntimeError("provisional clarification returned the wrong plan")
+        return self._persist_provisional_plan(
+            plan=plan,
+            action_ids=[clarification_id],
+            action_type="clarification",
+            decision="drafted",
+            option_id=option_id,
+            persist_answers=True,
         )
 
     def prepare_confirmed_candidates(
@@ -1453,8 +1908,11 @@ class CareAgentService:
         *,
         resolved_at: str | None = None,
         require_complete_set: bool = False,
+        include_original_text: bool = True,
+        track_original_text_context: bool = False,
         _candidate_values: list[SemanticCandidate] | None = None,
-    ) -> ConfirmedCandidatePlan:
+        _provisional: bool = False,
+    ) -> ConfirmedCandidatePlan | ProvisionalCandidatePlan:
         """Validate and materialize a confirmation without changing the store."""
 
         if not candidate_ids and _candidate_values is None:
@@ -1483,18 +1941,90 @@ class CareAgentService:
         session = self._session(record.session_id)
         if session.patient_id != record.patient_id:
             raise ValueError("Agent 运行记录与随访会话患者不一致")
+        questionnaire = self.care_engine.questionnaire_for_session(session)
+        questionnaire_link_ids = {
+            item["linkId"]
+            for item in flatten_questionnaire_items(questionnaire.get("item", []))
+            if item.get("type") not in {"display", "group"}
+        }
+        active_contexts = (
+            self.store.list_active_provisional_answer_contexts(session.session_id)
+            if _provisional
+            else self.store.list_active_answer_contexts(session.session_id)
+        )
+        active_by_link: dict[str, Any] = {}
+        for context in active_contexts:
+            if context.link_id in active_by_link:
+                raise ValueError("同一草稿字段存在多个当前来源，不能继续确认")
+            active_by_link[context.link_id] = context
         answers: dict[str, Any] = dict(session.answers)
         original = record.input_text.strip()
-        if original:
+        free_text_updated = False
+        if original and include_original_text:
             previous = str(answers.get("free-text-report", "")).strip()
             lines = previous.splitlines() if previous else []
             if original not in lines:
                 answers["free-text-report"] = "\n".join([*lines, original])
+                free_text_updated = True
 
         temporal = result.temporal_context
         now = resolved_at or utc_now_iso()
-        contexts: list[ConfirmedAnswerContext] = []
-        reports: list[ConfirmedSymptomReport] = []
+        contexts: list[Any] = []
+        reports: list[Any] = []
+        corrections: list[DraftAnswerCorrection] = []
+        invalidations: list[DraftAnswerInvalidation] = []
+        if free_text_updated and track_original_text_context:
+            context_kwargs = {
+                "session_id": session.session_id,
+                "link_id": "free-text-report",
+                "answer": answers["free-text-report"],
+                "source_run_id": record.run_id,
+                "followup_occurrence_id": (
+                        temporal.followup_occurrence_id
+                        if temporal is not None
+                        else f"occurrence-{session.session_id}"
+                    ),
+                "patient_timezone": (
+                        temporal.patient_timezone
+                        if temporal is not None
+                        else self.patient_timezone
+                    ),
+                "reported_at": (
+                        temporal.received_at_local
+                        if temporal is not None
+                        else record.completed_at
+                    ),
+                "temporal_kind": None,
+                "resolution_basis": TemporalResolutionBasis.EXPLICIT_PATIENT_TEXT.value,
+                "raw_text": original,
+                "created_at": now,
+            }
+            if _provisional:
+                contexts.append(
+                    ProvisionalAnswerContext(
+                        draft_context_id=(
+                            "draft-context-"
+                            + uuid5(
+                                NAMESPACE_URL,
+                                f"{record.run_id}|free-text-report|{answers['free-text-report']}",
+                            ).hex
+                        ),
+                        **context_kwargs,
+                    )
+                )
+            else:
+                contexts.append(
+                    ConfirmedAnswerContext(
+                        answer_context_id=(
+                            "answer-context-"
+                            + uuid5(
+                                NAMESPACE_URL,
+                                f"{record.run_id}|free-text-report|{answers['free-text-report']}",
+                            ).hex
+                        ),
+                        **context_kwargs,
+                    )
+                )
         for candidate in candidates:
             effective = candidate.effective_time
             if effective is None and temporal is not None:
@@ -1508,106 +2038,237 @@ class CareAgentService:
                 if candidate.terminology_match is None:
                     raise ValueError("患者自述症状缺少经过校验的术语匹配")
                 match = candidate.terminology_match
-                reports.append(
-                    ConfirmedSymptomReport(
-                        report_id=(
-                            "symptom-report-"
-                            + uuid5(
-                                NAMESPACE_URL,
-                                f"{record.run_id}|{candidate.candidate_id}",
-                            ).hex
-                        ),
-                        session_id=session.session_id,
-                        concept_id=match.concept_id,
-                        preferred_zh=match.preferred_zh,
-                        coding=match.coding.model_dump(mode="json"),
-                        terminology_match=terminology_match,
-                        source_kind=candidate.origin.value,
-                        source_run_id=record.run_id,
-                        evidence_text=candidate.evidence_text,
-                        evidence_start=candidate.evidence_start,
-                        evidence_end=candidate.evidence_end,
-                        followup_occurrence_id=(
+                report_kwargs = {
+                    "session_id": session.session_id,
+                    "concept_id": match.concept_id,
+                    "preferred_zh": match.preferred_zh,
+                    "coding": match.coding.model_dump(mode="json"),
+                    "terminology_match": terminology_match,
+                    "source_kind": candidate.origin.value,
+                    "source_run_id": record.run_id,
+                    "evidence_text": candidate.evidence_text,
+                    "evidence_start": candidate.evidence_start,
+                    "evidence_end": candidate.evidence_end,
+                    "followup_occurrence_id": (
                             temporal.followup_occurrence_id
                             if temporal is not None
                             else f"occurrence-{session.session_id}"
                         ),
-                        patient_timezone=(
+                    "patient_timezone": (
                             temporal.patient_timezone
                             if temporal is not None
                             else self.patient_timezone
                         ),
-                        reported_at=(
+                    "reported_at": (
                             temporal.received_at_local
                             if temporal is not None
                             else record.completed_at
                         ),
-                        effective_start=(
+                    "effective_start": (
                             effective.effective_start if effective is not None else None
                         ),
-                        effective_end=(
+                    "effective_end": (
                             effective.effective_end if effective is not None else None
                         ),
-                        temporal_kind=(
+                    "temporal_kind": (
                             effective.kind.value if effective is not None else None
                         ),
-                        created_at=now,
+                    "created_at": now,
+                }
+                report_identity = uuid5(
+                    NAMESPACE_URL,
+                    f"{record.run_id}|{candidate.candidate_id}",
+                ).hex
+                if _provisional:
+                    reports.append(
+                        ProvisionalSymptomReport(
+                            draft_report_id=f"draft-symptom-report-{report_identity}",
+                            **report_kwargs,
+                        )
+                    )
+                else:
+                    reports.append(
+                        ConfirmedSymptomReport(
+                            report_id=f"symptom-report-{report_identity}",
+                            **report_kwargs,
+                        )
+                    )
+                continue
+            previous_answer = session.answers.get(candidate.link_id)
+            if (
+                candidate.link_id in session.answers
+                and previous_answer != candidate.answer
+            ):
+                previous_context = active_by_link.get(candidate.link_id)
+                if (
+                    previous_context is None
+                    or previous_context.answer != previous_answer
+                ):
+                    raise ValueError("待修改字段缺少与当前值一致的上一版来源")
+                correction_payload = json.dumps(
+                    {
+                        "link_id": candidate.link_id,
+                        "previous_context_id": (
+                            previous_context.draft_context_id
+                            if _provisional
+                            else previous_context.answer_context_id
+                        ),
+                        "replacement": candidate.answer,
+                        "source_run_id": record.run_id,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                corrections.append(
+                    DraftAnswerCorrection(
+                        correction_id=(
+                            "correction-"
+                            + uuid5(NAMESPACE_URL, correction_payload).hex
+                        ),
+                        link_id=candidate.link_id,
+                        previous_answer=previous_answer,
+                        replacement_answer=candidate.answer,
+                        previous_source_run_id=previous_context.source_run_id,
+                        correction_source_run_id=record.run_id,
+                        raw_text=record.input_text,
                     )
                 )
-                continue
             answers[candidate.link_id] = candidate.answer
-            contexts.append(
-                ConfirmedAnswerContext(
-                    answer_context_id=(
-                        "answer-context-"
-                        + uuid5(
-                            NAMESPACE_URL,
-                            f"{record.run_id}|{candidate.candidate_id}|{candidate.link_id}",
-                        ).hex
-                    ),
-                    session_id=session.session_id,
-                    link_id=candidate.link_id,
-                    answer=candidate.answer,
-                    source_run_id=record.run_id,
-                    followup_occurrence_id=(
+            context_kwargs = {
+                "session_id": session.session_id,
+                "link_id": candidate.link_id,
+                "answer": candidate.answer,
+                "source_run_id": record.run_id,
+                "followup_occurrence_id": (
                         temporal.followup_occurrence_id
                         if temporal is not None
                         else f"occurrence-{session.session_id}"
                     ),
-                    patient_timezone=(
+                "patient_timezone": (
                         temporal.patient_timezone
                         if temporal is not None
                         else self.patient_timezone
                     ),
-                    reported_at=(
+                "reported_at": (
                         temporal.received_at_local
                         if temporal is not None
                         else record.completed_at
                     ),
-                    effective_start=(
+                "effective_start": (
                         effective.effective_start if effective is not None else None
                     ),
-                    effective_end=(
+                "effective_end": (
                         effective.effective_end if effective is not None else None
                     ),
-                    temporal_kind=(
+                "temporal_kind": (
                         effective.kind.value if effective is not None else None
                     ),
-                    resolution_basis=(
+                "resolution_basis": (
                         effective.basis.value if effective is not None else None
                     ),
-                    raw_text=record.input_text,
-                    terminology_match=terminology_match,
-                    created_at=now,
+                "raw_text": record.input_text,
+                "terminology_match": terminology_match,
+                "created_at": now,
+            }
+            context_identity = uuid5(
+                NAMESPACE_URL,
+                f"{record.run_id}|{candidate.candidate_id}|{candidate.link_id}",
+            ).hex
+            if _provisional:
+                contexts.append(
+                    ProvisionalAnswerContext(
+                        draft_context_id=f"draft-context-{context_identity}",
+                        **context_kwargs,
+                    )
+                )
+            else:
+                contexts.append(
+                    ConfirmedAnswerContext(
+                        answer_context_id=f"answer-context-{context_identity}",
+                        **context_kwargs,
+                    )
+                )
+        structured_candidate_links = [
+            item.link_id
+            for item in candidates
+            if not item.link_id.startswith(DYNAMIC_LINK_PREFIX)
+        ]
+        if len(structured_candidate_links) != len(set(structured_candidate_links)):
+            raise ValueError("同一轮不能为一个问卷字段确认多个不同候选")
+
+        visible_before = {
+            item["linkId"]
+            for item in visible_questionnaire_items(questionnaire, session.answers)
+        }
+        preexisting_disabled = {
+            link_id
+            for link_id in session.answers
+            if link_id in questionnaire_link_ids and link_id not in visible_before
+        }
+        if preexisting_disabled:
+            raise ValueError("当前草稿包含已失效的条件字段，不能继续修改")
+        visible_after = {
+            item["linkId"] for item in visible_questionnaire_items(questionnaire, answers)
+        }
+        newly_disabled_candidates = {
+            link_id
+            for link_id in structured_candidate_links
+            if link_id in questionnaire_link_ids and link_id not in visible_after
+        }
+        if newly_disabled_candidates:
+            raise ValueError("本轮候选之间违反 Questionnaire 条件依赖")
+        invalidated_links = sorted(
+            link_id
+            for link_id in session.answers
+            if link_id in questionnaire_link_ids and link_id not in visible_after
+        )
+        changed_links = sorted(
+            {
+                item.link_id
+                for item in candidates
+                if not item.link_id.startswith(DYNAMIC_LINK_PREFIX)
+                and session.answers.get(item.link_id) != item.answer
+            }
+        )
+        for link_id in invalidated_links:
+            previous_context = active_by_link.get(link_id)
+            if (
+                previous_context is None
+                or previous_context.answer != session.answers.get(link_id)
+            ):
+                raise ValueError("失效的条件字段缺少可验证的上一版来源")
+            invalidations.append(
+                DraftAnswerInvalidation(
+                    link_id=link_id,
+                    previous_answer=session.answers[link_id],
+                    previous_source_run_id=previous_context.source_run_id,
+                    invalidated_by_link_ids=changed_links,
                 )
             )
-        return ConfirmedCandidatePlan(
+            answers.pop(link_id, None)
+
+        # Validate the exact post-confirmation draft before any persistence.  This
+        # is also the gate that prevents disabled Questionnaire items surviving a
+        # parent-answer correction.
+        build_questionnaire_response(
+            questionnaire=questionnaire,
+            response_id=f"draft-{session.session_id.removeprefix('session-')}",
+            patient_id=session.patient_id,
+            authored=now,
+            answers=answers,
+            status="in-progress",
+        )
+        plan_type = ProvisionalCandidatePlan if _provisional else ConfirmedCandidatePlan
+        return plan_type(
             record=record,
             session=session,
             candidates=candidates,
             answers=answers,
             answer_contexts=contexts,
             symptom_reports=reports,
+            corrections=corrections,
+            invalidations=invalidations,
             resolved_at=now,
         )
 
@@ -1721,8 +2382,88 @@ class CareAgentService:
             audit_decision="verbatim_only_accepted",
         )
 
+    def prepare_clarification_candidate(
+        self,
+        run_id: str,
+        clarification_id: str,
+        option_id: str,
+        *,
+        temporal_basis: TemporalResolutionBasis = TemporalResolutionBasis.PATIENT_CONFIRMATION,
+    ) -> SemanticCandidate | None:
+        """Materialize one explicit option without mutating session state."""
+
+        record, result = self._stored_result(run_id)
+        clarification = next(
+            (
+                item
+                for item in result.clarifications
+                if item.clarification_id == clarification_id
+            ),
+            None,
+        )
+        if clarification is None:
+            raise ValueError("澄清问题不属于该次分析结果")
+        option = next(
+            (item for item in clarification.options if item.option_id == option_id),
+            None,
+        )
+        if option is None:
+            raise ValueError("澄清选项无效")
+        task = self._task_for_record(record)
+        if clarification.kind == ClarificationKind.TERMINOLOGY_DISAMBIGUATION:
+            mention = clarification.reported_symptom
+            if option.terminology_match is None or mention is None:
+                return None
+            candidate = self._symptom_candidate(
+                task,
+                mention,
+                option.terminology_match,
+                force_current=mention.temporality == Temporality.UNSPECIFIED,
+            )
+            candidate = candidate.model_copy(
+                update={
+                    "effective_time": candidate_temporal_resolution(
+                        candidate,
+                        task.temporal_context,
+                        basis=temporal_basis,
+                        inherited_from_action_id=clarification.clarification_id,
+                    )
+                }
+            )
+        else:
+            candidate = clarification.proposed_candidate
+            if not option.accepts_candidate or candidate is None:
+                return None
+            if clarification.kind == ClarificationKind.CONFIRM_TIME_WINDOW:
+                candidate = candidate.model_copy(
+                    update={"temporality": Temporality.EXPLICIT_24H}
+                )
+            elif clarification.kind == ClarificationKind.CONFIRM_CURRENT:
+                candidate = candidate.model_copy(
+                    update={"temporality": Temporality.CURRENT}
+                )
+            candidate = candidate.model_copy(
+                update={
+                    "effective_time": candidate_temporal_resolution(
+                        candidate,
+                        task.temporal_context,
+                        basis=temporal_basis,
+                        inherited_from_action_id=clarification.clarification_id,
+                    )
+                }
+            )
+        if self.safety.review_candidate(task, candidate):
+            raise ValueError("澄清后的候选未通过安全校验")
+        return candidate
+
     def resolve_clarification(
-        self, run_id: str, clarification_id: str, option_id: str
+        self,
+        run_id: str,
+        clarification_id: str,
+        option_id: str,
+        *,
+        include_original_text: bool = True,
+        track_original_text_context: bool = False,
     ):
         record, result = self._stored_result(run_id)
         clarification = next(
@@ -1788,7 +2529,7 @@ class CareAgentService:
                 task,
                 mention,
                 option.terminology_match,
-                force_current=True,
+                force_current=mention.temporality == Temporality.UNSPECIFIED,
             )
             candidate = candidate.model_copy(
                 update={
@@ -1807,6 +2548,8 @@ class CareAgentService:
                 run_id,
                 [],
                 resolved_at=resolved_at,
+                include_original_text=include_original_text,
+                track_original_text_context=track_original_text_context,
                 _candidate_values=[candidate],
             )
             return self._persist_conversation_decision(
@@ -1851,6 +2594,8 @@ class CareAgentService:
             run_id,
             [],
             resolved_at=resolved_at,
+            include_original_text=include_original_text,
+            track_original_text_context=track_original_text_context,
             _candidate_values=[candidate],
         )
         return self._persist_conversation_decision(
@@ -1875,6 +2620,169 @@ class CareAgentService:
                 ContextResolutionDecision.REJECTED.value,
             } and current != decision.value:
                 raise ValueError("该对话操作已经完成，不能重复提交")
+
+    def _persist_provisional_plan(
+        self,
+        *,
+        plan: ProvisionalCandidatePlan,
+        action_ids: list[str],
+        action_type: str,
+        decision: str,
+        option_id: str | None,
+        persist_answers: bool,
+    ) -> CareSession:
+        """Persist one provisional turn with no patient-confirmed side effects."""
+
+        if persist_answers:
+            questionnaire = self.care_engine.questionnaire_for_session(plan.session)
+            build_questionnaire_response(
+                questionnaire=questionnaire,
+                response_id=f"draft-{plan.session.session_id.removeprefix('session-')}",
+                patient_id=plan.session.patient_id,
+                authored=plan.resolved_at,
+                answers=plan.answers,
+                status="in-progress",
+            )
+        identity_payload = json.dumps(
+            {
+                "source_run_id": plan.record.run_id,
+                "action_ids": sorted(action_ids),
+                "action_type": action_type,
+                "decision": decision,
+                "option_id": option_id,
+                "confirmation_status": "pending_final_review",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        identity = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()
+        context_digests = {
+            item.draft_context_id: _provisional_material_sha256(item)
+            for item in plan.answer_contexts
+        }
+        report_digests = {
+            item.draft_report_id: _provisional_material_sha256(item)
+            for item in plan.symptom_reports
+        }
+        audits: list[AuditEvent] = []
+        if persist_answers:
+            audits.append(
+                build_audit_event(
+                    event_id=f"audit-{identity[:32]}-provisional",
+                    patient_id=plan.record.patient_id,
+                    entity_type="CareSession",
+                    entity_id=plan.record.session_id,
+                    event_type="care_session_provisional_draft_saved",
+                    actor_type="deterministic_workflow",
+                    created_at=plan.resolved_at,
+                    details={
+                        "session_id": plan.record.session_id,
+                        "source_run_id": plan.record.run_id,
+                        "action_ids": sorted(action_ids),
+                        "draft_context_ids": sorted(
+                            item.draft_context_id for item in plan.answer_contexts
+                        ),
+                        "draft_report_ids": sorted(
+                            item.draft_report_id for item in plan.symptom_reports
+                        ),
+                        "draft_context_sha256": context_digests,
+                        "draft_report_sha256": report_digests,
+                        "answered_link_ids": sorted(plan.answers),
+                        "confirmation_status": "pending_final_review",
+                        "clinical_assessment": "not_assessed",
+                    },
+                )
+            )
+        audits.append(
+            build_audit_event(
+                event_id=f"audit-{identity[:32]}-draft-action",
+                patient_id=plan.record.patient_id,
+                entity_type="AgentRun",
+                entity_id=plan.record.run_id,
+                event_type="semantic_candidate_staged_to_draft",
+                actor_type="deterministic_workflow",
+                created_at=plan.resolved_at,
+                details={
+                    "session_id": plan.record.session_id,
+                    "action_ids": sorted(action_ids),
+                    "action_type": action_type,
+                    "decision": decision,
+                    "option_id": option_id,
+                    "staged_link_ids": sorted(
+                        item.link_id for item in plan.candidates
+                    ),
+                    "confirmation_status": "pending_final_review",
+                    "clinical_assessment": "not_assessed",
+                },
+            )
+        )
+        for correction in plan.corrections:
+            audits.append(
+                build_audit_event(
+                    event_id=f"audit-{correction.correction_id}-draft",
+                    patient_id=plan.record.patient_id,
+                    entity_type="CareSession",
+                    entity_id=plan.record.session_id,
+                    event_type="patient_draft_answer_revised",
+                    actor_type="synthetic_patient",
+                    created_at=plan.resolved_at,
+                    details={
+                        "session_id": plan.record.session_id,
+                        "link_id": correction.link_id,
+                        "previous_answer": correction.previous_answer,
+                        "replacement_answer": correction.replacement_answer,
+                        "previous_source_run_id": correction.previous_source_run_id,
+                        "correction_source_run_id": correction.correction_source_run_id,
+                        "raw_text": correction.raw_text,
+                        "confirmation_status": "pending_final_review",
+                        "clinical_assessment": "not_assessed",
+                    },
+                )
+            )
+        if plan.invalidations:
+            audits.append(
+                build_audit_event(
+                    event_id=f"audit-{identity[:32]}-draft-dependency",
+                    patient_id=plan.record.patient_id,
+                    entity_type="CareSession",
+                    entity_id=plan.record.session_id,
+                    event_type="patient_draft_dependencies_invalidated",
+                    actor_type="deterministic_questionnaire_policy",
+                    created_at=plan.resolved_at,
+                    details={
+                        "session_id": plan.record.session_id,
+                        "invalidations": [
+                            item.model_dump(mode="json") for item in plan.invalidations
+                        ],
+                        "correction_source_run_id": plan.record.run_id,
+                        "confirmation_status": "pending_final_review",
+                        "clinical_assessment": "not_assessed",
+                    },
+                )
+            )
+        self.store.persist_provisional_draft_bundle(
+            expected_session=plan.session,
+            answers=plan.answers if persist_answers else None,
+            answer_contexts=plan.answer_contexts if persist_answers else [],
+            symptom_reports=plan.symptom_reports if persist_answers else [],
+            supersede_link_ids=(
+                [item.link_id for item in plan.invalidations]
+                if persist_answers
+                else []
+            ),
+            action_ids=action_ids,
+            action_type=action_type,
+            source_run_id=plan.record.run_id,
+            decision=decision,
+            option_id=option_id,
+            resolved_at=plan.resolved_at,
+            audit_events=audits,
+        )
+        session = self.store.get_care_session(plan.record.session_id)
+        if session is None:
+            raise ValueError("随访会话不存在")
+        return session
 
     def _persist_conversation_decision(
         self,
@@ -1927,7 +2835,15 @@ class CareAgentService:
                     event_type="care_session_draft_saved",
                     actor_type="synthetic_patient",
                     created_at=plan.resolved_at,
-                    details={"answered_link_ids": sorted(plan.answers)},
+                    details={
+                        "answered_link_ids": sorted(plan.answers),
+                        "correction_ids": [
+                            item.correction_id for item in plan.corrections
+                        ],
+                        "invalidated_link_ids": [
+                            item.link_id for item in plan.invalidations
+                        ],
+                    },
                 )
             )
         audits.append(
@@ -1944,10 +2860,71 @@ class CareAgentService:
                     "decision": audit_decision,
                     "candidate_ids": [item.candidate_id for item in plan.candidates],
                     "confirmed_link_ids": [item.link_id for item in plan.candidates],
+                    "correction_ids": [
+                        item.correction_id for item in plan.corrections
+                    ],
+                    "invalidated_link_ids": [
+                        item.link_id for item in plan.invalidations
+                    ],
                     "clinical_assessment": "not_assessed",
                 },
             )
         )
+        for correction in plan.corrections:
+            audits.append(
+                build_audit_event(
+                    event_id=f"audit-{correction.correction_id}",
+                    patient_id=plan.record.patient_id,
+                    entity_type="CareSession",
+                    entity_id=plan.record.session_id,
+                    event_type="patient_answer_corrected",
+                    actor_type="synthetic_patient",
+                    created_at=plan.resolved_at,
+                    details={
+                        "correction_id": correction.correction_id,
+                        "session_id": plan.record.session_id,
+                        "link_id": correction.link_id,
+                        "previous_answer": correction.previous_answer,
+                        "replacement_answer": correction.replacement_answer,
+                        "previous_source_run_id": correction.previous_source_run_id,
+                        "correction_source_run_id": (
+                            correction.correction_source_run_id
+                        ),
+                        "raw_text": correction.raw_text,
+                        "clinical_assessment": "not_assessed",
+                    },
+                )
+            )
+        if plan.invalidations:
+            invalidation_payload = json.dumps(
+                [item.model_dump(mode="json") for item in plan.invalidations],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            invalidation_id = hashlib.sha256(
+                f"{plan.record.run_id}|{invalidation_payload}".encode("utf-8")
+            ).hexdigest()[:32]
+            audits.append(
+                build_audit_event(
+                    event_id=f"audit-{invalidation_id}-dependency",
+                    patient_id=plan.record.patient_id,
+                    entity_type="CareSession",
+                    entity_id=plan.record.session_id,
+                    event_type="patient_answers_dependency_invalidated",
+                    actor_type="deterministic_questionnaire_policy",
+                    created_at=plan.resolved_at,
+                    details={
+                        "session_id": plan.record.session_id,
+                        "invalidations": [
+                            item.model_dump(mode="json")
+                            for item in plan.invalidations
+                        ],
+                        "correction_source_run_id": plan.record.run_id,
+                        "clinical_assessment": "not_assessed",
+                    },
+                )
+            )
         if context_audit_details is not None:
             audits.append(
                 build_audit_event(
@@ -1966,6 +2943,11 @@ class CareAgentService:
             answers=plan.answers if persist_answers else None,
             answer_contexts=plan.answer_contexts if persist_answers else [],
             symptom_reports=plan.symptom_reports if persist_answers else [],
+            supersede_link_ids=(
+                [item.link_id for item in plan.invalidations]
+                if persist_answers
+                else []
+            ),
             action_ids=action_ids,
             source_run_id=plan.record.run_id,
             decision=decision,
@@ -1996,6 +2978,10 @@ class CareAgentService:
             mode=outcome.result.mode,
             input_text=task.message_text,
             input_hash=hashlib.sha256(task.message_text.encode("utf-8")).hexdigest(),
+            knowledge_release_id=task.knowledge_release_id,
+            terminology_catalog_id=task.terminology_catalog_id,
+            terminology_catalog_version=task.terminology_catalog_version,
+            terminology_catalog_sha256=task.terminology_catalog_sha256,
             output_json=outcome.result.model_dump(mode="json"),
             status=outcome.result.status.value,
             model_provider=(
@@ -2013,13 +2999,23 @@ class CareAgentService:
         record = self.store.get_agent_run(run_id)
         if record is None:
             raise ValueError("Agent 运行记录不存在")
+        self._task_for_record(record)
         return record, SemanticResult.model_validate(record.output_json)
 
     def _task_for_record(self, record: AgentRunRecord) -> SemanticTask:
-        session = self._session(record.session_id)
+        stored_session = self.store.get_care_session(record.session_id)
+        allow_completed_anchor = bool(
+            record.task_id.startswith("supplemental:")
+            and stored_session is not None
+            and stored_session.parent_session_id is None
+        )
+        session = self._session(
+            record.session_id,
+            allow_completed_anchor=allow_completed_anchor,
+        )
         questionnaire = self.care_engine.questionnaire_for_session(session)
         result = SemanticResult.model_validate(record.output_json)
-        return self._build_task(
+        task = self._build_task(
             session,
             questionnaire,
             record.input_text,
@@ -2030,13 +3026,38 @@ class CareAgentService:
                 else record.started_at
             ),
         )
+        self._require_record_boundary(record, task)
+        return task
 
-    def _session(self, session_id: str):
+    @staticmethod
+    def _record_matches_task(record: AgentRunRecord, task: SemanticTask) -> bool:
+        return (
+            record.knowledge_release_id == task.knowledge_release_id
+            and record.terminology_catalog_id == task.terminology_catalog_id
+            and record.terminology_catalog_version == task.terminology_catalog_version
+            and record.terminology_catalog_sha256 == task.terminology_catalog_sha256
+        )
+
+    @classmethod
+    def _require_record_boundary(
+        cls, record: AgentRunRecord, task: SemanticTask
+    ) -> None:
+        if not cls._record_matches_task(record, task):
+            raise ValueError("AgentRun knowledge or terminology release mismatch")
+
+    def _session(self, session_id: str, *, allow_completed_anchor: bool = False):
         session = self.store.get_care_session(session_id)
         if session is None:
             raise ValueError("随访会话不存在")
-        if session.status.value != "in_progress":
+        allowed_statuses = (
+            {"in_progress", "completed"}
+            if allow_completed_anchor
+            else {"in_progress"}
+        )
+        if session.status.value not in allowed_statuses:
             raise ValueError("只有进行中的随访可以使用对话辅助填写")
+        if allow_completed_anchor and session.status.value != "completed":
+            raise ValueError("补充上报只能附加到已完成的当日随访")
         return session
 
     def _build_task(
@@ -2064,6 +3085,12 @@ class CareAgentService:
         digest = hashlib.sha256(message_text.encode("utf-8")).hexdigest()
         context_identity = json.dumps(
             {
+                "knowledge_release_id": session.knowledge_release_id,
+                "terminology_catalog_id": self.terminology.catalog.catalog_id,
+                "terminology_catalog_version": self.terminology.catalog.version,
+                "terminology_catalog_sha256": terminology_catalog_sha256(
+                    self.terminology.catalog
+                ),
                 "local_date": temporal_context.local_date,
                 "latest_run_id": (
                     conversation_context.recent_turns[-1].run_id
@@ -2125,8 +3152,12 @@ class CareAgentService:
             pathway_version=session.pathway_version,
             questionnaire_canonical=session.questionnaire_canonical,
             questionnaire_version=session.questionnaire_version,
+            knowledge_release_id=session.knowledge_release_id,
             terminology_catalog_id=self.terminology.catalog.catalog_id,
             terminology_catalog_version=self.terminology.catalog.version,
+            terminology_catalog_sha256=terminology_catalog_sha256(
+                self.terminology.catalog
+            ),
             message_text=message_text,
             existing_answers=session.answers,
             conversation_context=conversation_context,
@@ -2230,6 +3261,16 @@ class CareAgentService:
             followup_occurrence_id=followup_occurrence_id,
             max_turns=max_turns,
         )
+
+
+def _provisional_material_sha256(item: Any) -> str:
+    payload = json.dumps(
+        item.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _questionnaire_contracts(questionnaire: dict[str, Any]):
@@ -2393,17 +3434,27 @@ def _contextual_answer(message_text: str, question) -> tuple[Any, bool] | None:
             value = parse_number_token(token_match.group(0)) if token_match else None
         return (value, False) if type(value) is int and value >= 0 else None
     if question.item_type == "quantity":
-        value = millilitres_from_evidence(text_value)
+        if question.link_id == "body-weight":
+            token_match = re.search(r"\d+(?:\.\d+)?", text_value)
+            value = float(token_match.group(0)) if token_match else None
+            unit = "kg"
+        else:
+            value = millilitres_from_evidence(text_value)
+            unit = "mL"
         if value is None:
             token_match = re.search(r"\d+(?:\.\d+)?|[零〇一二两三四五六七八九十]+", text_value)
             value = parse_number_token(token_match.group(0)) if token_match else None
-        if type(value) not in {int, float} or value < 0:
+        if (
+            type(value) not in {int, float}
+            or value < 0
+            or (question.link_id == "body-weight" and not 20 <= value <= 400)
+        ):
             return None
         return {
             "value": value,
-            "unit": "mL",
+            "unit": unit,
             "system": UCUM,
-            "code": "mL",
+            "code": unit,
         }, False
     return None
 

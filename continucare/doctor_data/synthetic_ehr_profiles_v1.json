@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "profiles": [
+    {
+      "patientId": "P-DEMO-001",
+      "snapshotId": "ehr-synthetic-p-demo-001-v1",
+      "recordedAt": "2026-08-15T09:00:00+00:00",
+      "sourceSystem": "院内电子病历（合成演示）",
+      "productId": "cn-wegovy-sj20240020",
+      "indication": "chronic_weight_management",
+      "population": "adult_cn_label_population",
+      "context": [
+        {
+          "contextId": "demographic-age-band",
+          "category": "基本信息",
+          "label": "年龄范围",
+          "value": "45–54岁",
+          "status": "confirmed",
+          "sourceReference": "Patient/P-DEMO-001",
+          "recordedAt": "2026-08-15",
+          "planningUse": "核对成人适用人群"
+        },
+        {
+          "contextId": "demographic-sex",
+          "category": "基本信息",
+          "label": "性别",
+          "value": "女性",
+          "status": "confirmed",
+          "sourceReference": "Patient/P-DEMO-001",
+          "recordedAt": "2026-08-15",
+          "planningUse": "形成最小必要患者背景"
+        },
+        {
+          "contextId": "condition-weight-management",
+          "category": "诊疗背景",
+          "label": "本次治疗目的",
+          "value": "成人长期体重管理",
+          "status": "confirmed",
+          "sourceReference": "Condition/weight-management-demo",
+          "recordedAt": "2026-08-15",
+          "planningUse": "匹配GLP-1知识包的适应证范围"
+        },
+        {
+          "contextId": "medication-wegovy",
+          "category": "当前治疗",
+          "label": "当前药物",
+          "value": "诺和盈（司美格鲁肽注射液）",
+          "status": "confirmed",
+          "sourceReference": "MedicationRequest/wegovy-demo",
+          "recordedAt": "2026-08-15",
+          "planningUse": "匹配中国GLP-1产品范围"
+        },
+        {
+          "contextId": "finding-recent-nausea",
+          "category": "近期情况",
+          "label": "近期症状",
+          "value": "门诊记录提及偶有恶心",
+          "status": "confirmed",
+          "sourceReference": "Encounter/endocrine-demo-20260815",
+          "recordedAt": "2026-08-15",
+          "planningUse": "提高恶心相关采集项的推荐优先级",
+          "conceptIds": ["nausea_present_now", "nausea_severity_current"]
+        },
+        {
+          "contextId": "device-home-scale",
+          "category": "随访条件",
+          "label": "家庭设备",
+          "value": "可使用家用体重秤并通过手机完成上报",
+          "status": "patient_reported",
+          "sourceReference": "QuestionnaireResponse/intake-demo",
+          "recordedAt": "2026-08-15",
+          "planningUse": "评估患者完成远程随访的可行性"
+        }
+      ],
+      "missingItems": [
+        "本次最小化档案未导入与随访规划无关的身份字段",
+        "用药剂量与调药记录需要在真实院内接口接入后核对"
+      ],
+      "excludedData": ["身份证号", "详细住址", "医保账户", "与本次路径无关的病历内容"]
+    }
+  ]
+}

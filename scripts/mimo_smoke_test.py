@@ -1,23 +1,33 @@
-"""One synthetic MiMo call; requires MIMO_API_KEY in ignored local environment."""
+"""One synthetic model call using the ignored local environment."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 import tempfile
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT_TEXT = str(PROJECT_ROOT)
+sys.path[:] = [item for item in sys.path if item != PROJECT_ROOT_TEXT]
+sys.path.insert(0, PROJECT_ROOT_TEXT)
 
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.agents.errors import ModelRequestError, ModelResponseError
 from continucare.care_agent import CareAgentService
-from continucare.care_agent.model_api import SemanticModelConfig, build_model_adapter
+from continucare.care_agent.model_api import (
+    MODEL_API_MODES,
+    SemanticModelConfig,
+    build_model_adapter,
+)
 from continucare.care_engine import CareEngine
 from continucare.demo_data import DEMO_PATIENT_ID
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run one synthetic-data MiMo semantic extraction call."
+        description="Run one synthetic-data semantic extraction model call."
     )
     parser.add_argument(
         "--text",
@@ -29,7 +39,7 @@ def main() -> None:
     adapter = build_model_adapter(config)
     if not adapter.configured:
         raise SystemExit(
-            "MiMo is not configured. Put a rotated MIMO_API_KEY in the ignored .env file."
+            "The model is not configured. Put its API key in the ignored .env file."
         )
     diagnostic_errors: list[str] = []
     original_extract = adapter.extract
@@ -52,7 +62,7 @@ def main() -> None:
             session.session_id,
             args.text,
         )
-        if interaction.result.mode != "model_api:xiaomi_mimo":
+        if interaction.result.mode not in MODEL_API_MODES:
             sanitized_reasons = [
                 reason
                 for reason in interaction.result.ignored_reasons
@@ -62,7 +72,7 @@ def main() -> None:
             if diagnostic_errors:
                 detail = diagnostic_errors[0]
             raise SystemExit(
-                "MiMo call did not pass the model adapter contract: " + detail
+                "Model call did not pass the adapter contract: " + detail
             )
         print(
             json.dumps(

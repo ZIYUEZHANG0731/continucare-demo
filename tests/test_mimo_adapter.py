@@ -14,6 +14,7 @@ from continucare.care_agent.mimo_adapter import MiMoSemanticAdapter, _post_json
 from continucare.care_agent.model_api import SemanticModelConfig
 from continucare.care_engine import CareEngine
 from continucare.demo_data import DEMO_PATIENT_ID
+from continucare.terminology import load_supplemental_terminology_backend
 
 
 def _configured_adapter(monkeypatch, response, captured=None):
@@ -147,6 +148,239 @@ def test_mimo_adapter_uses_json_mode_and_local_governance(monkeypatch, tmp_path)
     assert updated.answers["nausea-present"] is True
     assert updated.answers["nausea-severity"] == "LA6752-5"
     assert store.list_observations(DEMO_PATIENT_ID) == []
+
+
+def test_focused_abdominal_pain_accepts_colloquial_not_hurting(
+    monkeypatch, tmp_path
+):
+    captured = {}
+    adapter = _configured_adapter(
+        monkeypatch,
+        _provider_response(
+            {"blocked": False, "items": [], "symptom_mentions": []}
+        ),
+        captured,
+    )
+    store = SQLiteStore(tmp_path / "focused-colloquial.db")
+    engine = CareEngine(store)
+    session = engine.start_or_resume(DEMO_PATIENT_ID)
+    service = CareAgentService(
+        store,
+        care_engine=engine,
+        model_adapter=adapter,
+        terminology_backend=load_supplemental_terminology_backend(),
+    )
+
+    interaction = service.analyze_patient_checkin(
+        session.session_id,
+        "不疼",
+        focus_link_ids=["abdominal-pain-present"],
+    )
+
+    assert interaction.result.status == SemanticStatus.NEEDS_CONFIRMATION
+    assert len(interaction.result.candidates) == 1
+    candidate = interaction.result.candidates[0]
+    assert candidate.link_id == "abdominal-pain-present"
+    assert candidate.answer is False
+    assert candidate.negated is True
+    assert candidate.evidence_text == "不疼"
+    assert candidate.source_mode.value == "patient_selection"
+    assert interaction.result.ignored_reasons == [
+        "focused_governed_patient_selection_used"
+    ]
+    assert '"link_id":"abdominal-pain-present"' in captured["payload"][
+        "messages"
+    ][0]["content"]
+
+
+def test_body_weight_uses_the_same_focused_mimo_conversation_path(
+    monkeypatch, tmp_path
+):
+    captured = {}
+    response = _provider_response(
+        {
+            "blocked": False,
+            "items": [
+                {
+                    "link_id": "body-weight",
+                    "answer": {
+                        "value": 65.5,
+                        "unit": "kg",
+                        "system": "http://unitsofmeasure.org",
+                        "code": "kg",
+                    },
+                    "evidence_text": "65.5公斤",
+                    "subject": "patient",
+                    "temporality": "current",
+                    "negated": False,
+                }
+            ],
+            "symptom_mentions": [],
+        }
+    )
+    adapter = _configured_adapter(monkeypatch, response, captured)
+    store = SQLiteStore(tmp_path / "body-weight-mimo.db")
+    engine = CareEngine(store)
+    session = engine.start_or_resume(DEMO_PATIENT_ID)
+    service = CareAgentService(
+        store,
+        care_engine=engine,
+        model_adapter=adapter,
+        terminology_backend=load_supplemental_terminology_backend(),
+    )
+
+    interaction = service.analyze_patient_checkin(
+        session.session_id,
+        "65.5公斤",
+        focus_link_ids=["body-weight"],
+    )
+
+    assert interaction.result.mode == "model_api:xiaomi_mimo"
+    assert interaction.record.model_provider == "xiaomi_mimo"
+    assert interaction.result.safety_violations == []
+    assert len(interaction.result.candidates) == 1
+    candidate = interaction.result.candidates[0]
+    assert candidate.link_id == "body-weight"
+    assert candidate.answer == {
+        "value": 65.5,
+        "unit": "kg",
+        "system": "http://unitsofmeasure.org",
+        "code": "kg",
+    }
+    assert candidate.source_mode.value == "mimo"
+    assert candidate.terminology_match.target_coding.code == "29463-7"
+    assert '"quantity_unit":"kg"' in captured["payload"]["messages"][0]["content"]
+
+    service.stage_candidates_for_final_review(
+        interaction.record.run_id,
+        [candidate.candidate_id],
+        include_original_text=False,
+    )
+    current = store.get_care_session(session.session_id)
+    assert current.answers["body-weight"]["value"] == 65.5
+    assert store.list_observations(DEMO_PATIENT_ID) == []
+
+
+@pytest.mark.parametrize("evidence", ["65.5 lb", "65.5斤", "65.5 g"])
+def test_body_weight_rejects_conflicting_explicit_units(
+    monkeypatch, tmp_path, evidence
+):
+    response = _provider_response(
+        {
+            "blocked": False,
+            "items": [
+                {
+                    "link_id": "body-weight",
+                    "answer": {
+                        "value": 65.5,
+                        "unit": "kg",
+                        "system": "http://unitsofmeasure.org",
+                        "code": "kg",
+                    },
+                    "evidence_text": evidence,
+                    "subject": "patient",
+                    "temporality": "current",
+                    "negated": False,
+                }
+            ],
+            "symptom_mentions": [],
+        }
+    )
+    adapter = _configured_adapter(monkeypatch, response, {})
+    store = SQLiteStore(tmp_path / f"body-weight-{evidence}.db")
+    engine = CareEngine(store)
+    session = engine.start_or_resume(DEMO_PATIENT_ID)
+    service = CareAgentService(
+        store,
+        care_engine=engine,
+        model_adapter=adapter,
+        terminology_backend=load_supplemental_terminology_backend(),
+    )
+
+    interaction = service.analyze_patient_checkin(
+        session.session_id,
+        evidence,
+        focus_link_ids=["body-weight"],
+    )
+
+    assert interaction.result.candidates == []
+    assert any(
+        violation.endswith(":answer_evidence_mismatch")
+        for violation in interaction.result.safety_violations
+    )
+
+
+def test_candidate_only_chat_never_auto_applies_a_short_context_reply(
+    monkeypatch, tmp_path
+):
+    response = _provider_response(
+        {
+            "blocked": False,
+            "items": [
+                {
+                    "link_id": "nausea-present",
+                    "answer": True,
+                    "evidence_text": "现在有恶心",
+                    "subject": "patient",
+                    "temporality": "current",
+                    "negated": False,
+                }
+            ],
+        }
+    )
+    adapter = _configured_adapter(monkeypatch, response, {})
+    store, session, service = _service(tmp_path, adapter)
+
+    first = service.analyze(session.session_id, "现在有恶心", candidate_only=True)
+    assert first.result.candidates
+    second = service.analyze(session.session_id, "是", candidate_only=True)
+
+    current = store.get_care_session(session.session_id)
+    assert current.answers == {}
+    assert store.conversation_action_decisions(session.session_id) == {}
+    assert second.record.run_id != first.record.run_id
+
+
+def test_opening_multi_field_scope_does_not_grant_single_question_time_context(
+    monkeypatch, tmp_path
+):
+    response = _provider_response(
+        {
+            "blocked": False,
+            "items": [
+                {
+                    "link_id": "vomiting-count-24h",
+                    "answer": 2,
+                    "evidence_text": "2次",
+                    "subject": "patient",
+                    "temporality": "explicit_24h",
+                    "negated": False,
+                }
+            ],
+        }
+    )
+    _, session, service = _service(
+        tmp_path, _configured_adapter(monkeypatch, response)
+    )
+
+    interaction = service.analyze(
+        session.session_id,
+        "2次",
+        candidate_only=True,
+        focus_link_ids=[
+            "nausea-present",
+            "nausea-severity",
+            "vomiting-count-24h",
+            "fluid-intake-24h-estimated",
+            "abdominal-pain-present",
+        ],
+    )
+
+    assert interaction.result.candidates == []
+    assert interaction.result.status == SemanticStatus.NEEDS_CLARIFICATION
+    assert interaction.result.candidate_issues[0].reason_codes == [
+        "time_window_not_explicit"
+    ]
 
 
 def test_mimo_missing_time_becomes_local_deterministic_clarification(

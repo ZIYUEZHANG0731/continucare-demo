@@ -21,13 +21,16 @@ from continucare.agents.contracts import (
 from continucare.agents.errors import ModelNotConfiguredError, ModelResponseError
 from continucare.care_agent.mimo_adapter import (
     JsonTransport,
-    MiMoSemanticAdapter,
-    _official_mimo_base_url,
     _post_json,
+    _provider_mode,
     _request_id,
+    _supported_model_config,
     _usage,
 )
-from continucare.care_agent.model_api import SemanticModelConfig
+from continucare.care_agent.model_api import (
+    SemanticModelConfig,
+    provider_request_options,
+)
 from continucare.care_agent.subjects import classify_evidence_subject
 
 
@@ -156,7 +159,7 @@ class MiMoSafetyCritic:
                 messages = _strict_contract_retry(messages)
         return SafetyCriticOutcome(
             decision=decision,
-            mode="model_api:xiaomi_mimo",
+            mode=_provider_mode(self.config),
             prompt_version=self.config.safety_prompt_version,
             model_usage=_sum_usage(responses),
             provider_request_id=_request_id(response),
@@ -166,6 +169,7 @@ class MiMoSafetyCritic:
 
 
 _MISSING_EVIDENCE_PATTERNS = {
+    "body-weight": re.compile(r"体重|kg|KG|公斤|千克"),
     "nausea-present": re.compile(r"恶心|反胃|想吐"),
     "nausea-severity": re.compile(r"恶心|反胃|想吐"),
     "vomiting-count-24h": re.compile(r"呕吐|吐了?|吐过"),
@@ -200,6 +204,9 @@ class MiMoLanguageRewriter:
         "中度",
         "重度",
         "毫升",
+        "公斤",
+        "千克",
+        "kg",
         "次",
     )
 
@@ -270,7 +277,7 @@ class MiMoLanguageRewriter:
         return LanguageRewriteOutcome(
             rewrites=rewrites,
             rejected_reasons=rejected,
-            mode="model_api:xiaomi_mimo",
+            mode=_provider_mode(self.config),
             prompt_version=self.config.language_prompt_version,
             model_usage=_sum_usage(responses),
             provider_request_id=_request_id(response),
@@ -390,12 +397,7 @@ def questionnaire_item_enabled(item, answers: dict[str, Any]) -> bool:
 
 
 def _mimo_configured(config: SemanticModelConfig) -> bool:
-    return bool(
-        config.configured
-        and config.provider in {"xiaomi_mimo", "mimo"}
-        and config.model_name in MiMoSemanticAdapter.SUPPORTED_JSON_MODELS
-        and _official_mimo_base_url(config.base_url)
-    )
+    return _supported_model_config(config)
 
 
 def _call_mimo(
@@ -406,10 +408,10 @@ def _call_mimo(
     max_completion_tokens: int,
 ) -> dict[str, Any]:
     if not _mimo_configured(config):
-        raise ModelNotConfiguredError("MiMo auxiliary stage is not configured")
+        raise ModelNotConfiguredError("model auxiliary stage is not configured")
     api_key = config.api_key()
     if not api_key:
-        raise ModelNotConfiguredError("MiMo API key is not configured")
+        raise ModelNotConfiguredError("model API key is not configured")
     return transport(
         f"{config.base_url.rstrip('/')}/chat/completions",
         {
@@ -425,6 +427,7 @@ def _call_mimo(
             "temperature": 0,
             "top_p": 0.1,
             "stream": False,
+            **provider_request_options(config),
         },
         config.timeout_seconds,
     )

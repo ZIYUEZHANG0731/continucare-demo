@@ -7,11 +7,12 @@ keeping the resolver and confirmation workflow unchanged.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -286,8 +287,6 @@ class RepositoryTerminologyBackend:
         for normalized_alias, entries in self._aliases.items():
             if len(normalized_alias) < 2:
                 continue
-            # Chinese aliases are stored without whitespace/punctuation.  Runtime
-            # scanning deliberately remains exact and auditable rather than fuzzy.
             for match in re.finditer(re.escape(normalized_alias), _normalize(text)):
                 span = _normalized_span_to_original(text, match.start(), match.end())
                 if span is None:
@@ -303,17 +302,180 @@ class RepositoryTerminologyBackend:
                             match_method="repository_alias_scan",
                         )
                     )
-        # Prefer longer overlapping phrases, while preserving multiple concepts
-        # for the exact same span so the UI can ask a disambiguation question.
         selected: list[tuple[int, int, list[TerminologyMatchContract]]] = []
         for (start, end), matches in sorted(
             raw_hits.items(), key=lambda item: (-(item[0][1] - item[0][0]), item[0][0])
         ):
-            if any(start < old_end and end > old_start for old_start, old_end, _ in selected):
+            if any(
+                start < old_end and end > old_start
+                for old_start, old_end, _ in selected
+            ):
                 continue
             unique = {item.concept_id: item for item in matches}
             selected.append((start, end, list(unique.values())))
         return sorted(selected, key=lambda item: item[0])
+
+
+class SupplementalTerminologyCatalog:
+    """One locked boundary with separate fixed and dynamic source catalogs.
+
+    Fixed Questionnaire bindings remain owned by the CN release. The dynamic
+    symptom source is the synthetic-only prototype catalog. ``model_dump``
+    intentionally includes both complete sources so the persisted boundary
+    digest proves the exact pair used for one AgentRun.
+    """
+
+    def __init__(
+        self,
+        *,
+        fixed_catalog: TerminologyCatalog,
+        dynamic_catalog: TerminologyCatalog,
+    ):
+        self.fixed_catalog = fixed_catalog
+        self.dynamic_catalog = dynamic_catalog
+        self.catalog_id = (
+            "continucare-supplemental-composite::"
+            f"{fixed_catalog.catalog_id}+{dynamic_catalog.catalog_id}"
+        )
+        self.version = f"{fixed_catalog.version}+{dynamic_catalog.version}"
+        self.status = "synthetic-only-composite"
+        self.concepts = list(dynamic_catalog.concepts)
+        concept_by_coding = {
+            (item.coding.system, item.coding.code): item
+            for item in dynamic_catalog.concepts
+        }
+        dynamic_binding_by_link = {
+            item.link_id: item for item in dynamic_catalog.questionnaire_bindings
+        }
+        self.questionnaire_bindings = [
+            item.model_copy(
+                update={
+                    "symptom_concept_id": (
+                        dynamic_binding_by_link[item.link_id].symptom_concept_id
+                        if item.link_id in dynamic_binding_by_link
+                        else (
+                            concept_by_coding.get(
+                                (item.coding.system, item.coding.code)
+                            ).concept_id
+                            if concept_by_coding.get(
+                                (item.coding.system, item.coding.code)
+                            ) is not None
+                            else None
+                        )
+                    )
+                }
+            )
+            for item in fixed_catalog.questionnaire_bindings
+        ]
+
+    def model_dump(self, *, mode: str = "json", **_: Any) -> dict[str, Any]:
+        return {
+            "catalog_id": self.catalog_id,
+            "version": self.version,
+            "status": self.status,
+            "fixed_source": self.fixed_catalog.model_dump(mode=mode),
+            "dynamic_source": self.dynamic_catalog.model_dump(mode=mode),
+        }
+
+    def questionnaire_contracts(self) -> list[QuestionnaireItemContract]:
+        return self.dynamic_catalog.questionnaire_contracts()
+
+    def match_for_questionnaire(
+        self,
+        *,
+        link_id: str,
+        coding: CodingContract | None,
+        matched_text: str,
+    ) -> TerminologyMatchContract:
+        if link_id.startswith(DYNAMIC_LINK_PREFIX):
+            concept = self.dynamic_catalog.concept(
+                link_id.removeprefix(DYNAMIC_LINK_PREFIX)
+            )
+            if coding is None or _coding_identity(coding) != _coding_identity(
+                concept.coding
+            ):
+                raise ValueError("动态症状候选代码与锁定目录不一致")
+            match = self.dynamic_catalog.match_for_concept(
+                concept,
+                matched_text=matched_text,
+                matched_alias=matched_text,
+                match_method="model_candidate_validated_against_repository",
+            )
+            return self._bind_source(match, self.dynamic_catalog)
+
+        match = self.fixed_catalog.match_for_questionnaire(
+            link_id=link_id,
+            coding=coding,
+            matched_text=matched_text,
+        )
+        binding = next(
+            (item for item in self.questionnaire_bindings if item.link_id == link_id),
+            None,
+        )
+        if binding is not None and binding.symptom_concept_id is not None:
+            match = match.model_copy(
+                update={"concept_id": binding.symptom_concept_id}
+            )
+        return self._bind_source(match, self.fixed_catalog)
+
+    def bind_dynamic_match(
+        self, match: TerminologyMatchContract
+    ) -> TerminologyMatchContract:
+        return self._bind_source(match, self.dynamic_catalog)
+
+    def _bind_source(
+        self,
+        match: TerminologyMatchContract,
+        source: TerminologyCatalog,
+    ) -> TerminologyMatchContract:
+        return match.model_copy(
+            update={
+                "catalog_id": self.catalog_id,
+                "catalog_version": self.version,
+                "source_catalog_id": source.catalog_id,
+                "source_catalog_version": source.version,
+                "source_catalog_sha256": terminology_catalog_sha256(source),
+                "source_catalog_status": source.status,
+            }
+        )
+
+
+class SupplementalTerminologyBackend:
+    """Delegate fixed bindings to CN and dynamic search to the prototype set."""
+
+    def __init__(
+        self,
+        *,
+        fixed_catalog: TerminologyCatalog,
+        dynamic_catalog: TerminologyCatalog,
+    ):
+        self.catalog = SupplementalTerminologyCatalog(
+            fixed_catalog=fixed_catalog,
+            dynamic_catalog=dynamic_catalog,
+        )
+        self._fixed = RepositoryTerminologyBackend(fixed_catalog)
+        self._dynamic = RepositoryTerminologyBackend(dynamic_catalog)
+
+    def validate_code(self, coding: CodingContract) -> bool:
+        return self._fixed.validate_code(coding) or self._dynamic.validate_code(coding)
+
+    def search(self, phrase: str) -> list[TerminologyMatchContract]:
+        return [
+            self.catalog.bind_dynamic_match(item)
+            for item in self._dynamic.search(phrase)
+        ]
+
+    def scan(
+        self, text: str
+    ) -> list[tuple[int, int, list[TerminologyMatchContract]]]:
+        return [
+            (
+                start,
+                end,
+                [self.catalog.bind_dynamic_match(item) for item in matches],
+            )
+            for start, end, matches in self._dynamic.scan(text)
+        ]
 
 
 def _normalize(value: str) -> str:
@@ -337,3 +499,19 @@ def load_glp1_symptom_catalog() -> TerminologyCatalog:
     return TerminologyCatalog.model_validate(
         json.loads(DATA_FILE.read_text(encoding="utf-8"))
     )
+
+
+def terminology_catalog_sha256(catalog: Any) -> str:
+    """Return a stable digest for the complete Layer-3 whitelist contract."""
+
+    payload = json.dumps(
+        catalog.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _coding_identity(coding: CodingContract) -> tuple[str, str, str | None]:
+    return coding.system, coding.code, coding.version

@@ -19,10 +19,13 @@ class ObservationMapping(StrictModel):
         "coded_choice",
         "count_per_day",
         "millilitres_per_24_hours",
+        "kilograms",
     ]
     positive_only: bool = False
     effective_period_hours: int | None = Field(default=None, gt=0)
     accepted_quantity_unit_codes: list[str] = Field(default_factory=list)
+    metric_id: str | None = None
+    evidence_claim_ids: list[str] = Field(default_factory=list)
 
 
 class ObservationMappingPolicy(StrictModel):
@@ -36,6 +39,20 @@ class ObservationMappingPolicy(StrictModel):
         link_ids = [item.link_id for item in self.mappings]
         if len(link_ids) != len(set(link_ids)):
             raise ValueError("observation mapping contains duplicate linkIds")
+        for item in self.mappings:
+            if item.kind != "kilograms":
+                continue
+            expected_claim = (
+                "goal-rule:continucare-followup-goals-v1.0.0:"
+                "nhc-obesity-anthropometry-weight-bmi-2024-001"
+            )
+            if (
+                item.link_id != "body-weight"
+                or item.metric_id != "body_weight"
+                or item.accepted_quantity_unit_codes != ["kg"]
+                or item.evidence_claim_ids != [expected_claim]
+            ):
+                raise ValueError("body-weight mapping is not the governed release")
         return self
 
 

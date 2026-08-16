@@ -21,6 +21,9 @@ READY_TO_SEND = "ready-to-send"
 MANUAL_REVIEW_OUTCOME_LABELS = {
     "evidence_consistent": "已核对原话、确认结果与最终证据链，记录一致",
     "clarification_needed": "已核对原话、确认结果与最终证据链，需要后续补充说明",
+    "reviewed_no_escalation": "护士已完成人工安全复核，本次未上报医生",
+    "clarification_required": "护士人工判断需要联系患者补充核实",
+    "escalated_to_doctor": "护士已人工上报医生评估",
 }
 
 # M5-B deliberately has no sender.  A future slice must change this flag and

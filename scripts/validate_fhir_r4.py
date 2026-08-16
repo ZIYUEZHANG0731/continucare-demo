@@ -8,8 +8,9 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.append(str(PROJECT_ROOT))
+PROJECT_ROOT_TEXT = str(PROJECT_ROOT)
+sys.path[:] = [item for item in sys.path if item != PROJECT_ROOT_TEXT]
+sys.path.insert(0, PROJECT_ROOT_TEXT)
 
 from continucare.fhir.r4 import validate_official_json_schema
 from continucare.fhir.questionnaires import build_free_text_questionnaire_response
@@ -23,7 +24,7 @@ from continucare.layer4.fhir import (
     build_provenance,
     build_workflow_task,
 )
-from continucare.pathways import load_glp1_plan_definition, load_glp1_questionnaire
+from continucare.knowledge import compile_plan_definition, compile_questionnaire
 
 
 def main() -> None:
@@ -85,8 +86,8 @@ def main() -> None:
         activity_display="create",
     )
     resources = [
-        load_glp1_questionnaire(),
-        load_glp1_plan_definition(),
+        compile_questionnaire(),
+        compile_plan_definition(),
         response,
         observation,
         communication,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,7 +13,13 @@ from continucare.config import get_settings
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    synthetic_now = os.getenv("CONTINUCARE_SYNTHETIC_NOW")
+    if not synthetic_now:
+        return datetime.now(timezone.utc).isoformat()
+    parsed = datetime.fromisoformat(synthetic_now)
+    if parsed.tzinfo is None:
+        raise ValueError("CONTINUCARE_SYNTHETIC_NOW must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -54,6 +61,39 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE observation_evidence ADD COLUMN terminology_match_json TEXT"
         )
+    observation_evidence_columns = {
+        "metric_id": "TEXT",
+        "evidence_claim_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+        "knowledge_release_id": "TEXT",
+        "observation_mapping_sha256": "TEXT",
+    }
+    for name, definition in observation_evidence_columns.items():
+        if name not in columns:
+            connection.execute(
+                f"ALTER TABLE observation_evidence ADD COLUMN {name} {definition}"
+            )
+    care_session_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(care_sessions)")
+    }
+    if "knowledge_release_id" not in care_session_columns:
+        connection.execute(
+            "ALTER TABLE care_sessions ADD COLUMN knowledge_release_id TEXT"
+        )
+    if "parent_session_id" not in care_session_columns:
+        connection.execute(
+            "ALTER TABLE care_sessions ADD COLUMN parent_session_id TEXT"
+        )
+    agent_run_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(agent_runs)")
+    }
+    for name in (
+        "knowledge_release_id",
+        "terminology_catalog_id",
+        "terminology_catalog_version",
+        "terminology_catalog_sha256",
+    ):
+        if name not in agent_run_columns:
+            connection.execute(f"ALTER TABLE agent_runs ADD COLUMN {name} TEXT")
     answer_columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(confirmed_answer_contexts)")
@@ -71,6 +111,35 @@ def _migrate_schema(connection: sqlite3.Connection) -> None:
             "ALTER TABLE confirmed_symptom_reports ADD COLUMN "
             "source_kind TEXT NOT NULL DEFAULT 'patient_reported_new'"
         )
+    supplemental_columns = {
+        row["name"]
+        for row in connection.execute(
+            "PRAGMA table_info(patient_supplemental_reports)"
+        )
+    }
+    supplemental_additions = {
+        "anchor_session_id": "TEXT",
+        "questionnaire_response_id": "TEXT",
+        "observation_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+        "provenance_id": "TEXT",
+        "report_kind": "TEXT NOT NULL DEFAULT 'patient_supplemental'",
+        "handoff_reason_code": "TEXT",
+        "handoff_policy_version": "TEXT",
+    }
+    for name, definition in supplemental_additions.items():
+        if name not in supplemental_columns:
+            connection.execute(
+                f"ALTER TABLE patient_supplemental_reports ADD COLUMN {name} {definition}"
+            )
+    connection.execute(
+        "UPDATE patient_supplemental_reports "
+        "SET anchor_session_id=session_id WHERE anchor_session_id IS NULL"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_patient_supplemental_reports_queue "
+        "ON patient_supplemental_reports("
+        "patient_id, anchor_session_id, status, created_at)"
+    )
     _migrate_layer4_contract_record_types(connection)
 
 
@@ -235,6 +304,8 @@ CREATE TABLE IF NOT EXISTS care_sessions (
     pathway_version TEXT NOT NULL,
     questionnaire_canonical TEXT NOT NULL,
     questionnaire_version TEXT NOT NULL,
+    knowledge_release_id TEXT,
+    parent_session_id TEXT REFERENCES care_sessions(session_id),
     status TEXT NOT NULL CHECK (
         status IN ('in_progress', 'completed', 'stopped', 'entered_in_error')
     ),
@@ -255,6 +326,10 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     mode TEXT NOT NULL,
     input_text TEXT NOT NULL,
     input_hash TEXT NOT NULL,
+    knowledge_release_id TEXT NOT NULL,
+    terminology_catalog_id TEXT NOT NULL,
+    terminology_catalog_version TEXT NOT NULL,
+    terminology_catalog_sha256 TEXT NOT NULL,
     output_json TEXT NOT NULL,
     status TEXT NOT NULL,
     model_provider TEXT,
@@ -276,6 +351,59 @@ CREATE TABLE IF NOT EXISTS conversation_action_resolutions (
     resolved_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS patient_draft_action_resolutions (
+    action_id TEXT PRIMARY KEY,
+    source_run_id TEXT NOT NULL REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES care_sessions(session_id) ON DELETE CASCADE,
+    action_type TEXT NOT NULL CHECK (action_type IN ('candidate', 'clarification')),
+    decision TEXT NOT NULL CHECK (decision IN ('drafted', 'rejected', 'unsure')),
+    option_id TEXT,
+    status TEXT NOT NULL CHECK (status IN ('active', 'finalized')),
+    created_at TEXT NOT NULL,
+    finalized_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS patient_supplemental_turn_resolutions (
+    source_run_id TEXT PRIMARY KEY REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES care_sessions(session_id) ON DELETE CASCADE,
+    decision TEXT NOT NULL CHECK (decision IN ('accepted', 'rejected')),
+    resolved_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS patient_supplemental_reports (
+    report_id TEXT PRIMARY KEY,
+    patient_id TEXT NOT NULL REFERENCES patients(patient_id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES care_sessions(session_id) ON DELETE CASCADE,
+    anchor_session_id TEXT NOT NULL REFERENCES care_sessions(session_id) ON DELETE CASCADE,
+    source_run_id TEXT NOT NULL UNIQUE REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+    original_text TEXT NOT NULL,
+    structured_items_json TEXT NOT NULL,
+    questionnaire_response_id TEXT REFERENCES fhir_questionnaire_responses(resource_id),
+    observation_ids_json TEXT NOT NULL DEFAULT '[]',
+    provenance_id TEXT,
+    report_kind TEXT NOT NULL DEFAULT 'patient_supplemental',
+    handoff_reason_code TEXT,
+    handoff_policy_version TEXT,
+    status TEXT NOT NULL CHECK (status IN ('requested', 'reviewed')),
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    review_note TEXT
+);
+
+CREATE TABLE IF NOT EXISTS patient_collection_resolutions (
+    resolution_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES care_sessions(session_id) ON DELETE CASCADE,
+    link_id TEXT NOT NULL,
+    resolution TEXT NOT NULL CHECK (resolution IN ('explicit_unknown')),
+    policy_version TEXT NOT NULL,
+    actor_type TEXT NOT NULL,
+    is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_patient_collection_resolution_current
+ON patient_collection_resolutions(session_id, link_id) WHERE is_current = 1;
+
 CREATE TABLE IF NOT EXISTS confirmed_answer_contexts (
     answer_context_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL REFERENCES care_sessions(session_id) ON DELETE CASCADE,
@@ -292,6 +420,25 @@ CREATE TABLE IF NOT EXISTS confirmed_answer_contexts (
     raw_text TEXT NOT NULL,
     terminology_match_json TEXT,
     status TEXT NOT NULL CHECK (status IN ('active', 'superseded')),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provisional_answer_contexts (
+    draft_context_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES care_sessions(session_id) ON DELETE CASCADE,
+    link_id TEXT NOT NULL,
+    answer_json TEXT NOT NULL,
+    source_run_id TEXT NOT NULL REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+    followup_occurrence_id TEXT NOT NULL,
+    patient_timezone TEXT NOT NULL,
+    reported_at TEXT NOT NULL,
+    effective_start TEXT,
+    effective_end TEXT,
+    temporal_kind TEXT,
+    resolution_basis TEXT,
+    raw_text TEXT NOT NULL,
+    terminology_match_json TEXT,
+    status TEXT NOT NULL CHECK (status IN ('active', 'superseded', 'promoted')),
     created_at TEXT NOT NULL
 );
 
@@ -318,6 +465,28 @@ CREATE TABLE IF NOT EXISTS confirmed_symptom_reports (
     UNIQUE(session_id, concept_id)
 );
 
+CREATE TABLE IF NOT EXISTS provisional_symptom_reports (
+    draft_report_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES care_sessions(session_id) ON DELETE CASCADE,
+    concept_id TEXT NOT NULL,
+    preferred_zh TEXT NOT NULL,
+    coding_json TEXT NOT NULL,
+    terminology_match_json TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_run_id TEXT NOT NULL REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+    evidence_text TEXT NOT NULL,
+    evidence_start INTEGER NOT NULL,
+    evidence_end INTEGER NOT NULL,
+    followup_occurrence_id TEXT NOT NULL,
+    patient_timezone TEXT NOT NULL,
+    reported_at TEXT NOT NULL,
+    effective_start TEXT,
+    effective_end TEXT,
+    temporal_kind TEXT,
+    status TEXT NOT NULL CHECK (status IN ('active', 'superseded', 'promoted')),
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS fhir_observations (
     observation_id TEXT PRIMARY KEY,
     patient_id TEXT NOT NULL REFERENCES patients(patient_id) ON DELETE CASCADE,
@@ -342,7 +511,11 @@ CREATE TABLE IF NOT EXISTS observation_evidence (
     evidence_end INTEGER NOT NULL,
     recorded_at TEXT NOT NULL,
     source_kind TEXT NOT NULL DEFAULT 'pathway_monitored',
-    terminology_match_json TEXT
+    terminology_match_json TEXT,
+    metric_id TEXT,
+    evidence_claim_ids_json TEXT NOT NULL DEFAULT '[]',
+    knowledge_release_id TEXT,
+    observation_mapping_sha256 TEXT
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -445,12 +618,22 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_session_time
 ON agent_runs(session_id, completed_at);
 CREATE INDEX IF NOT EXISTS idx_conversation_resolutions_session
 ON conversation_action_resolutions(session_id, resolved_at);
+CREATE INDEX IF NOT EXISTS idx_draft_action_resolutions_session
+ON patient_draft_action_resolutions(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_answer_contexts_session_link
 ON confirmed_answer_contexts(session_id, link_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_answer_context
 ON confirmed_answer_contexts(session_id, link_id) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_provisional_contexts_session_link
+ON provisional_answer_contexts(session_id, link_id, status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_provisional_context
+ON provisional_answer_contexts(session_id, link_id) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_symptom_reports_session_status
 ON confirmed_symptom_reports(session_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_provisional_reports_session_status
+ON provisional_symptom_reports(session_id, status, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_provisional_report
+ON provisional_symptom_reports(session_id, concept_id) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_alerts_patient_status
 ON alerts(patient_id, status);
 CREATE INDEX IF NOT EXISTS idx_audit_patient_time

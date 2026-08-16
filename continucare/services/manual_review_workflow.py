@@ -37,7 +37,28 @@ MANUAL_REVIEW_DRAFT_TEMPLATE = (
     "此沟通草稿仅用于确认记录，不构成诊断、风险评估、治疗或用药建议。"
 )
 
-ManualReviewOutcome = Literal["evidence_consistent", "clarification_needed"]
+MANUAL_REVIEW_DRAFT_TEMPLATES = {
+    "reviewed_no_escalation": (
+        "您好，护士已人工查看并记录您提交且确认的合成随访内容。"
+        "本次未上报医生仅代表本次人工工作流决定，不代表患者安全、低风险或临床评估。"
+    ),
+    "clarification_required": (
+        "您好，护士人工查看后认为仍需要补充核实部分信息。"
+        "当前文字仅为待核对的合成沟通草稿，尚未发送，也不构成诊断、风险评估、治疗或用药建议。"
+    ),
+    "escalated_to_doctor": (
+        "您好，护士已人工复核并请求医生查看您确认的随访记录。"
+        "这表示人工交接已经记录，不代表系统完成了风险分级、诊断或治疗判断。"
+    ),
+}
+
+ManualReviewOutcome = Literal[
+    "evidence_consistent",
+    "clarification_needed",
+    "reviewed_no_escalation",
+    "clarification_required",
+    "escalated_to_doctor",
+]
 
 _OUTCOME_LABELS = MANUAL_REVIEW_OUTCOME_LABELS
 
@@ -251,6 +272,13 @@ class ManualReviewWorkflowService:
             actor_reference=actor_reference,
             note=note_text,
             occurred_at=occurred_at,
+            status_reason=(
+                {
+                    "reviewed_no_escalation": "human-reviewed-no-escalation",
+                    "clarification_required": "human-clarification-required",
+                    "escalated_to_doctor": "human-escalated-to-doctor",
+                }.get(outcome)
+            ),
         )
         completed["output"] = [
             {
@@ -313,7 +341,9 @@ class ManualReviewWorkflowService:
             task_reference=task_reference,
             evidence_references=evidence.source_references,
             evidence_digest=evidence.digest,
-            content_text=MANUAL_REVIEW_DRAFT_TEMPLATE,
+            content_text=MANUAL_REVIEW_DRAFT_TEMPLATES.get(
+                outcome, MANUAL_REVIEW_DRAFT_TEMPLATE
+            ),
             updated_at=occurred_at,
             communication_id=communication_id,
             identifier_digest=action_digest,
@@ -322,7 +352,7 @@ class ManualReviewWorkflowService:
         return self._commit_action(
             action="record-outcome",
             event_type="manual_review_outcome_recorded",
-            event_label="护士记录人工复核结果并生成待批准草稿",
+            event_label="护士记录人工安全复核结果并生成待核对文字",
             patient_id=patient_id,
             actor_reference=actor_reference,
             note=payload_key,

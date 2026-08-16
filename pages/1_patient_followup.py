@@ -4,13 +4,26 @@ from __future__ import annotations
 
 import html
 import json
+import sys
+from pathlib import Path
 from typing import Any
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT_TEXT = str(PROJECT_ROOT)
+sys.path[:] = [item for item in sys.path if item != PROJECT_ROOT_TEXT]
+sys.path.insert(0, PROJECT_ROOT_TEXT)
+
+import continucare
 import streamlit as st
+
+if Path(continucare.__file__).resolve().parent.parent != PROJECT_ROOT:
+    raise RuntimeError("Streamlit imported continucare from outside this project")
 
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.agents.contracts import (
     CandidateIssueAction,
+    ClarificationRequest,
+    SemanticCandidate,
     SemanticResult,
     SemanticStatus,
 )
@@ -21,6 +34,7 @@ from continucare.care_agent.model_api import (
 )
 from continucare.care_engine import CareEngine
 from continucare.config import get_settings
+from continucare.db import initialize_database
 from continucare.demo_data import (
     DEMO_PATIENT_ID,
     MANUAL_REVIEW_MESSAGE,
@@ -32,7 +46,13 @@ from continucare.fhir.questionnaires import (
 )
 from continucare.fhir.r4 import FHIRValidationError
 from continucare.fhir.terminology import UCUM
-from continucare.presentation import observation_text
+from continucare.presentation import (
+    build_l5_governance_view,
+    build_latest_l5_submission_view,
+    observation_text,
+)
+from continucare.product_mvp import ProductRole, build_product_context
+from continucare.product_ui import inject_product_styles, render_role_context
 from continucare.models import CareSessionStatus
 from continucare.ui import (
     PATIENT_EMERGENCY_NOTICE,
@@ -40,13 +60,34 @@ from continucare.ui import (
     inject_global_styles,
     patient_recorded_meaning,
     project_patient_followup,
+    render_l5_governance_panel,
+    render_l5_submission_panel,
     render_mode_badges,
 )
 from continucare.services.confirmed_review import ConfirmedReviewService
 from continucare.services.competition_demo import (
     CompetitionDemoConflict,
+    CompetitionDemoStartError,
+    CompetitionDemoStage,
+    competition_mimo_configured,
     demo_write_guard,
     read_competition_demo,
+    reset_competition_demo,
+    submit_patient_chat_turn,
+    submit_activated_plan_feedback,
+)
+from continucare.services.patient_checkin import (
+    OPENING_PROMPT,
+    project_patient_checkin,
+    questionnaire_answer_display,
+    questionnaire_candidate_confirmation_display,
+    questionnaire_choice_options,
+    record_explicit_unknown,
+)
+from continucare.services.supplemental_reports import (
+    read_supplemental_reports,
+    resolve_supplemental_turn,
+    submit_supplemental_report_turn,
 )
 
 
@@ -343,16 +384,21 @@ def _render_semantic_result(record, result: SemanticResult) -> None:
         if result.mode == "local_semantic_mock":
             st.caption("本地语义 Mock · Safety Agent v4 硬规则已检查")
         else:
+            provider_label = (
+                "火山方舟豆包"
+                if result.mode == "model_api:volcengine_doubao"
+                else "小米 MiMo"
+            )
             stage_by_name = {item.stage: item for item in result.stage_traces}
             safety_mode = stage_by_name.get("safety_critic")
             language_mode = stage_by_name.get("language_rewrite")
             stage_labels = ["Safety Agent v4 已检查"]
-            if safety_mode and safety_mode.mode == "model_api:xiaomi_mimo":
-                stage_labels.append("MiMo Safety Critic 已复核")
+            if safety_mode and safety_mode.mode.startswith("model_api:"):
+                stage_labels.append(f"{provider_label} Safety Critic 已复核")
             if language_mode and language_mode.details.get("rewritten_count", 0):
                 stage_labels.append("亲和力表达已优化")
             st.caption(
-                f"小米 MiMo {record.model_name or ''} · JSON mode · "
+                f"{provider_label} {record.model_name or ''} · JSON mode · "
                 + " · ".join(stage_labels)
             )
 
@@ -390,7 +436,7 @@ def _render_semantic_result(record, result: SemanticResult) -> None:
                     st.caption(f"依据原话：‘{candidate.evidence_text}’")
                     source_labels = {
                         "deterministic_mock": "来源：本地确定性 Mock fallback（非真实模型）",
-                        "mimo": "来源：MiMo 候选（仍须 Safety 与患者确认）",
+                        "mimo": "来源：豆包候选（仍须 Safety 与患者确认）",
                         "aily": "来源：Aily 候选（真实 API 未验证；仍须 Safety 与患者确认）",
                     }
                     st.caption(source_labels[candidate.source_mode.value])
@@ -860,7 +906,7 @@ def _render_patient_links(projection: PatientFollowupProjection) -> None:
         with st.container(key="cc_patient_nurse_link"):
             st.page_link(
                 "pages/2_nurse_risk_center.py",
-                label="演示：切换到护士工作台",
+                label="演示：切换到护士安全复核台",
                 width="stretch",
             )
     if projection.show_record_link:
@@ -929,10 +975,20 @@ def _render_technical_details() -> None:
         render_mode_badges(st)
         st.write("第三层只生成待确认内容与澄清问题，不能直接写 FHIR、生成风险等级或创建 Alert。")
         st.write("患者确认后，答案才交给第二层完成问卷校验、条件分支和 Observation 映射。")
-        if agent_service.agent.model_adapter.configured:
-            st.write("小米 MiMo API 已配置；模型只生成待确认内容，异常时回退本地语义 Mock。")
+        if semantic_result is not None and semantic_result.mode.startswith("model_api:"):
+            provider_label = (
+                "火山方舟豆包"
+                if semantic_result.mode == "model_api:volcengine_doubao"
+                else "小米 MiMo"
+            )
+            st.write(
+                f"本轮候选来源：{provider_label} {record.model_name or ''}；"
+                "当前患者确认阶段只读取已保存结果，不会再次外呼。"
+            )
+        elif semantic_result is not None:
+            st.write("本轮候选来源：本地语义 Mock；当前患者确认阶段不会外呼模型。")
         else:
-            st.write("MiMo API Key 未配置；系统使用本地语义 Mock 安全回退。")
+            st.write("本轮尚无语义候选；模型是否可用以顶部模式标签为准。")
         st.caption("当前 Pathway 为 draft / synthetic_only / not_reviewed。")
 
     with st.expander("技术详情：查看当前 GLP-1 症状术语目录"):
@@ -1091,18 +1147,742 @@ def _render_other_methods() -> None:
     _render_technical_details()
 
 
+def _run_product_chat() -> None:
+    st.set_page_config(
+        page_title="今日随访 · ContinuCare",
+        layout="centered",
+        initial_sidebar_state="collapsed",
+    )
+    inject_global_styles(st)
+    inject_product_styles(st)
+    st.markdown(
+        '<div class="cc-patient-shell cc-ios-runtime" aria-hidden="true"></div>',
+        unsafe_allow_html=True,
+    )
+    settings_local = get_settings()
+    initialize_database(settings_local.db_path)
+    progress_local = read_competition_demo(settings_local.db_path)
+    store_local = (
+        SQLiteStore(settings_local.db_path, initialize=False)
+        if settings_local.db_path.is_file()
+        else None
+    )
+    render_role_context(st, build_product_context(store_local, ProductRole.PATIENT))
+    st.title("今日随访")
+    st.caption("系统按已锁定的 Pathway 主动询问；豆包负责语义整理，您决定哪些候选成为正式记录。")
+    st.info(
+        "可以输入任意合成随访内容。发送后，原话会保存在本地演示库，"
+        "并与最小必要上下文传给豆包；Pathway 问题优先。术语唯一命中时生成候选卡，"
+        "多项命中时由您选择，未命中则保留原话供人工复核。只有您确认后，"
+        "才会写入问卷、补充记录或 Observation。"
+    )
+    if st.button("刷新共享状态", key="cc_patient_refresh_shared", width="stretch"):
+        st.rerun()
+    if progress_local.integrity_issue:
+        st.error("共享流程记录暂时不可读取；患者端已停止写入。")
+        st.stop()
+    if (
+        not progress_local.plan_activated
+        or store_local is None
+        or not progress_local.session_id
+    ):
+        st.info("医生尚未启动今天的随访。请先在医生端确认并启动方案。")
+        st.page_link("pages/3_doctor_summary.py", label="打开医生端", width="stretch")
+        st.stop()
+
+    session_local = store_local.get_care_session(progress_local.session_id)
+    if session_local is None:
+        st.error("今天的随访会话不可读取。")
+        st.stop()
+    engine_local = CareEngine(store_local)
+    questionnaire_local = engine_local.questionnaire_for_session(session_local)
+    checkin = project_patient_checkin(
+        session_local,
+        questionnaire_local,
+        explicit_unknown_link_ids={
+            link_id
+            for link_id, resolution in progress_local.collection_resolutions.items()
+            if resolution == "explicit_unknown"
+        },
+    )
+    agent_local = CareAgentService(
+        store_local,
+        care_engine=engine_local,
+        model_adapter=UnconfiguredModelAdapter(SemanticModelConfig()),
+        patient_timezone=settings_local.patient_timezone,
+    )
+    review_local = ConfirmedReviewService(
+        store_local, care_agent=agent_local, care_engine=engine_local
+    )
+    runs = list(reversed(store_local.list_agent_runs(session_local.session_id)))
+    active_contexts = store_local.list_active_answer_contexts(session_local.session_id)
+    active_context_keys = {
+        (item.source_run_id, item.link_id) for item in active_contexts
+    }
+    revision_events = [
+        item
+        for item in store_local.list_audit_events(session_local.patient_id)
+        if item.entity_type == "CareSession"
+        and item.entity_id == session_local.session_id
+        and item.event_type
+        in {
+            "patient_answer_corrected",
+            "patient_answers_dependency_invalidated",
+        }
+    ]
+    record_local = (
+        store_local.get_agent_run(progress_local.run_id)
+        if progress_local.run_id
+        else None
+    )
+    semantic_local = (
+        SemanticResult.model_validate(record_local.output_json)
+        if record_local is not None
+        else None
+    )
+
+    with st.chat_message("assistant"):
+        st.write(OPENING_PROMPT)
+    for turn in runs:
+        with st.chat_message("user"):
+            st.write(turn.input_text)
+        turn_result = SemanticResult.model_validate(turn.output_json)
+        accepted = [
+            item
+            for item in turn_result.candidates
+            if progress_local.candidate_decisions.get(item.candidate_id) == "accepted"
+        ]
+        if accepted:
+            with st.chat_message("assistant"):
+                current_items = [
+                    item
+                    for item in accepted
+                    if (turn.run_id, item.link_id) in active_context_keys
+                ]
+                st.write(
+                    "当前确认记录："
+                    if current_items
+                    else "这版曾被确认，后来已修改或因问卷条件失效："
+                )
+                for item in accepted:
+                    suffix = (
+                        ""
+                        if (turn.run_id, item.link_id) in active_context_keys
+                        else "（历史版本）"
+                    )
+                    st.write(f"• {patient_recorded_meaning(item)}{suffix}")
+
+    pending = (
+        [
+            item
+            for item in semantic_local.candidates
+            if progress_local.candidate_decisions.get(item.candidate_id) is None
+        ]
+        if semantic_local is not None
+        else []
+    )
+    if pending and record_local is not None:
+        answer_overrides: dict[str, Any] = {}
+        pending_by_link = {item.link_id: item for item in pending}
+        nausea_present = pending_by_link.get("nausea-present")
+        nausea_severity = pending_by_link.get("nausea-severity")
+        grouped_nausea = bool(
+            nausea_present is not None
+            and nausea_present.answer is True
+            and nausea_severity is not None
+            and "nausea-present" not in session_local.answers
+            and "nausea-severity" not in session_local.answers
+        )
+        required_choice_missing = False
+        with st.chat_message("assistant"):
+            st.write("我准备把这句话记成下面这些内容，请您确认：")
+            grouped_candidate_ids: set[str] = set()
+            if grouped_nausea and nausea_present and nausea_severity:
+                grouped_candidate_ids.update(
+                    {nausea_present.candidate_id, nausea_severity.candidate_id}
+                )
+                with st.container(border=True):
+                    st.markdown("**恶心**")
+                    st.write("已识别：现在有恶心")
+                    severity_options = questionnaire_choice_options(
+                        questionnaire_local, "nausea-severity"
+                    )
+                    severity_labels = dict(severity_options)
+                    selected_severity = st.radio(
+                        "请选择恶心程度",
+                        options=[code for code, _ in severity_options],
+                        index=None,
+                        format_func=lambda code: severity_labels.get(code, code),
+                        horizontal=True,
+                        key=f"cc_nausea_severity_{record_local.run_id}",
+                    )
+                    required_choice_missing = selected_severity is None
+                    if selected_severity is not None:
+                        answer_overrides["nausea-severity"] = selected_severity
+                    st.caption("程度由您选择；豆包的整理结果不会替您完成确认。")
+                    st.caption(f"依据原话：{nausea_present.evidence_text}")
+            for item in pending:
+                if item.candidate_id in grouped_candidate_ids:
+                    continue
+                with st.container(border=True):
+                    question_text, proposed_answer = (
+                        questionnaire_candidate_confirmation_display(
+                            questionnaire_local, item.link_id, item.answer
+                        )
+                    )
+                    st.markdown(f"**{question_text}**")
+                    previous = session_local.answers.get(item.link_id)
+                    if previous is not None and previous != item.answer:
+                        st.write(
+                            "**拟修改**  "
+                            f"{questionnaire_answer_display(questionnaire_local, item.link_id, previous)}"
+                            " → "
+                            f"{proposed_answer}"
+                        )
+                        st.caption(
+                            "确认后旧值仍保留为历史版本，并写入可追溯的更正来源链。"
+                        )
+                    elif (
+                        progress_local.collection_resolutions.get(item.link_id)
+                        == "explicit_unknown"
+                    ):
+                        st.write(
+                            "**拟修改**  暂时无法估算 → "
+                            f"{proposed_answer}"
+                        )
+                    else:
+                        st.write(f"拟记录：{proposed_answer}")
+                    st.caption(f"依据原话：{item.evidence_text}")
+        accept_col, retry_col = st.columns(2)
+        with accept_col:
+            accept_turn = st.button(
+                "确认并记录",
+                type="primary",
+                width="stretch",
+                disabled=required_choice_missing,
+            )
+        with retry_col:
+            reject_turn = st.button("不对，重新回答", width="stretch")
+        try:
+            if accept_turn:
+                include_original = (
+                    "free-text-report" not in session_local.answers
+                )
+                with demo_write_guard(
+                    settings_local.db_path,
+                    expected_generation=progress_local.generation,
+                ):
+                    agent_local.confirm_candidates(
+                        record_local.run_id,
+                        [item.candidate_id for item in pending],
+                        include_original_text=include_original,
+                        track_original_text_context=include_original,
+                        answer_overrides=answer_overrides,
+                    )
+                st.rerun()
+            if reject_turn:
+                with demo_write_guard(
+                    settings_local.db_path,
+                    expected_generation=progress_local.generation,
+                ):
+                    agent_local.reject_candidates(
+                        record_local.run_id, [item.candidate_id for item in pending]
+                    )
+                st.rerun()
+        except (CompetitionDemoConflict, ValueError):
+            st.error("本轮内容已变化或未能保存，请刷新后重试。")
+        st.stop()
+
+    pending_clarifications = (
+        [
+            item
+            for item in semantic_local.clarifications
+            if progress_local.candidate_decisions.get(item.clarification_id) is None
+        ]
+        if semantic_local is not None
+        else []
+    )
+    if pending_clarifications and record_local is not None:
+        clarification = pending_clarifications[0]
+        with st.chat_message("assistant"):
+            st.write("这句话里还有一个会影响记录含义的细节，请您确认：")
+            st.write(clarification.prompt)
+        columns = st.columns(len(clarification.options))
+        for column, option in zip(columns, clarification.options):
+            with column:
+                selected = st.button(
+                    option.label,
+                    width="stretch",
+                    key=f"cc_product_clarify_{clarification.clarification_id}_{option.option_id}",
+                )
+            if selected:
+                try:
+                    include_original = "free-text-report" not in session_local.answers
+                    with demo_write_guard(
+                        settings_local.db_path,
+                        expected_generation=progress_local.generation,
+                    ):
+                        agent_local.resolve_clarification(
+                            record_local.run_id,
+                            clarification.clarification_id,
+                            option.option_id,
+                            include_original_text=include_original,
+                            track_original_text_context=include_original,
+                        )
+                except (CompetitionDemoConflict, ValueError):
+                    st.error("这项澄清没有保存，请刷新后重试。")
+                else:
+                    st.rerun()
+        st.caption("只有您明确点击的澄清选项才会进入草稿；不会自动生成临床资源。")
+        st.stop()
+
+    if (
+        session_local.status == CareSessionStatus.IN_PROGRESS
+        and checkin.ready_to_submit
+    ):
+        with st.chat_message("assistant"):
+            st.write("今天需要采集的指标已经齐了。请最后核对并提交本次随访。")
+        items_by_id = {
+            item["linkId"]: item
+            for item in flatten_questionnaire_items(questionnaire_local.get("item", []))
+        }
+        with st.container(border=True):
+            for link_id in checkin.answered_link_ids:
+                st.write(
+                    f"**{items_by_id[link_id].get('text', link_id)}**  "
+                    f"{questionnaire_answer_display(questionnaire_local, link_id, session_local.answers.get(link_id))}"
+                )
+            for link_id in checkin.explicit_unknown_link_ids:
+                st.write(f"**{items_by_id[link_id].get('text', link_id)}**  暂时无法估算")
+            st.caption(
+                "提交后生成患者确认的问卷记录和 Observation，并创建一条例行护士人工复核任务；"
+                "不生成风险判断或 Alert。"
+            )
+            if revision_events:
+                st.markdown("**本轮更正记录**")
+                for event in reversed(revision_events):
+                    if event.event_type == "patient_answer_corrected":
+                        details = event.details_json
+                        st.write(
+                            "• "
+                            f"{items_by_id.get(details['link_id'], {}).get('text', details['link_id'])}："
+                            f"{questionnaire_answer_display(questionnaire_local, details['link_id'], details['previous_answer'])}"
+                            " → "
+                            f"{questionnaire_answer_display(questionnaire_local, details['link_id'], details['replacement_answer'])}"
+                        )
+                    else:
+                        for invalidation in event.details_json.get("invalidations", []):
+                            st.write(
+                                "• 条件变化后不再记录："
+                                f"{items_by_id.get(invalidation['link_id'], {}).get('text', invalidation['link_id'])}"
+                            )
+        if st.button("确认提交本次随访", type="primary", width="stretch"):
+            try:
+                with demo_write_guard(
+                    settings_local.db_path,
+                    expected_generation=progress_local.generation,
+                ):
+                    review_local.submit_confirmed_draft(session_local.session_id)
+            except (CompetitionDemoConflict, ValueError, RuntimeError):
+                st.error("本次随访没有提交，请刷新核对后重试。")
+            else:
+                st.rerun()
+        st.markdown("#### 需要修改后再提交？")
+        st.caption("可以点选一个字段后用短句回答，也可以直接说“把呕吐次数改成2次”。")
+        revision_links = [
+            *checkin.answered_link_ids,
+            *checkin.explicit_unknown_link_ids,
+        ]
+        revision_columns = st.columns(min(3, max(1, len(revision_links))))
+        for index, link_id in enumerate(revision_links):
+            with revision_columns[index % len(revision_columns)]:
+                if st.button(
+                    f"修改{items_by_id[link_id].get('text', link_id).rstrip('？?。')}",
+                    key=f"cc_patient_revision_{link_id}",
+                    width="stretch",
+                ):
+                    st.session_state["cc_patient_revision_link_id"] = link_id
+        selected_revision = st.session_state.get("cc_patient_revision_link_id")
+        if selected_revision not in revision_links:
+            st.session_state.pop("cc_patient_revision_link_id", None)
+            selected_revision = None
+        if selected_revision:
+            with st.chat_message("assistant"):
+                st.write(items_by_id[selected_revision].get("text", selected_revision))
+                st.caption("您的新回答仍会先生成修改卡，点击确认后才替换当前草稿。")
+        revision_synthetic = st.checkbox(
+            "我确认修改内容仍只包含合成演示信息",
+            key="cc_patient_revision_synthetic_only",
+        )
+        revision_message = st.chat_input(
+            "输入要修改的合成回答",
+            disabled=not competition_mimo_configured() or not revision_synthetic,
+            key="cc_patient_revision_chat_input",
+        )
+        if revision_message:
+            try:
+                with st.spinner("豆包正在整理这次修改……"):
+                    submit_patient_chat_turn(
+                        settings_local.db_path,
+                        expected_generation=progress_local.generation or "",
+                        message_text=revision_message,
+                        synthetic_confirmed=revision_synthetic,
+                        selected_revision_link_id=selected_revision,
+                    )
+            except (
+                CompetitionDemoConflict,
+                CompetitionDemoStartError,
+                ValueError,
+            ) as exc:
+                st.error(str(exc))
+            else:
+                st.session_state.pop("cc_patient_revision_link_id", None)
+                st.rerun()
+        st.stop()
+
+    if session_local.status == CareSessionStatus.COMPLETED:
+        st.success("今天的定时随访已记录，已有记录不会被后续对话改写。")
+        st.markdown("### 随时补充上报")
+        st.write(
+            "如果您又想起新情况，或者想上报 Pathway 当前没有单独提问的内容，"
+            "可以继续输入。豆包只做语义整理；您确认后才会形成一条独立补充记录。"
+        )
+        supplemental = read_supplemental_reports(
+            settings_local.db_path,
+            session_id=session_local.session_id,
+        )
+        if supplemental.integrity_issue:
+            st.error("补充上报记录暂时不可安全读取；页面已停止写入。")
+            st.stop()
+        for report in supplemental.reports:
+            with st.chat_message("user"):
+                st.write(report.original_text)
+            with st.chat_message("assistant"):
+                state_label = "护士已复核" if report.status == "reviewed" else "已进入护士人工复核"
+                st.write(f"这条补充上报已保存：{state_label}。")
+                for raw_item in report.structured_items:
+                    candidate = SemanticCandidate.model_validate(raw_item)
+                    st.write(f"• {patient_recorded_meaning(candidate)}")
+                    match = candidate.terminology_match
+                    if match and match.source_catalog_status == "draft-prototype-verified":
+                        st.caption(
+                            "原型术语匹配 · 上线前仍需目标医院术语审批 · "
+                            f"{match.coding.system} {match.coding.code}"
+                        )
+                if not report.structured_items:
+                    st.write("• 当前受控指标未匹配；已保留您的原话供人工复核。")
+                if report.questionnaire_response_id:
+                    st.caption(
+                        f"补充问卷：QuestionnaireResponse/{report.questionnaire_response_id}"
+                    )
+                else:
+                    st.warning(
+                        "这是升级前留下的旧演示原话，缺少独立 FHIR 与来源链；"
+                        "系统不会事后伪造。请在下方重新上报一次来体验新链路。"
+                    )
+                if report.observation_ids:
+                    st.write(
+                        f"已按患者确认形成 {len(report.observation_ids)} 条独立 Observation，"
+                        "未改写今天原有记录。"
+                    )
+                    for observation_id in report.observation_ids:
+                        st.caption(f"Observation/{observation_id}")
+
+        if supplemental.pending_run_id:
+            with st.chat_message("user"):
+                st.write(supplemental.pending_text)
+            with st.chat_message("assistant"):
+                st.write("我准备把这句话作为一条独立补充上报，请您最后确认：")
+                for raw_item in supplemental.pending_items:
+                    candidate = SemanticCandidate.model_validate(raw_item)
+                    with st.container(border=True):
+                        st.write(patient_recorded_meaning(candidate))
+                        st.caption(f"依据原话：{candidate.evidence_text}")
+                clarification_options: dict[str, str] = {}
+                for raw_item in supplemental.pending_clarifications:
+                    clarification = ClarificationRequest.model_validate(raw_item)
+                    with st.container(border=True):
+                        st.write(clarification.prompt)
+                        selected_option = st.radio(
+                            "请选择最符合的一项",
+                            options=[item.option_id for item in clarification.options],
+                            format_func=lambda value, options=clarification.options: next(
+                                item.label for item in options if item.option_id == value
+                            ),
+                            index=None,
+                            key=f"cc_supplemental_clarify_{clarification.clarification_id}",
+                        )
+                        if selected_option is not None:
+                            clarification_options[
+                                clarification.clarification_id
+                            ] = selected_option
+                        st.caption(
+                            "出现多个受控术语时必须由您选择；豆包不会替您决定医学编码。"
+                        )
+                if (
+                    not supplemental.pending_items
+                    and not supplemental.pending_clarifications
+                ):
+                    with st.container(border=True):
+                        st.write("当前受控指标与原型症状目录都没有完整覆盖这句话。")
+                        st.write(
+                            "确认后仍会形成独立补充 QuestionnaireResponse 并保留原话、时间和豆包来源；"
+                            "不会伪造 Observation，也不会作风险判断。"
+                        )
+                clarification_ready = (
+                    len(clarification_options)
+                    == len(supplemental.pending_clarifications)
+                )
+            confirm_col, retry_col = st.columns(2)
+            with confirm_col:
+                confirm_supplemental = st.button(
+                    "确认并形成补充记录",
+                    type="primary",
+                    width="stretch",
+                    disabled=not clarification_ready,
+                    key="cc_supplemental_confirm",
+                )
+            with retry_col:
+                reject_supplemental = st.button(
+                    "不对，重新说",
+                    width="stretch",
+                    key="cc_supplemental_reject",
+                )
+            if confirm_supplemental or reject_supplemental:
+                try:
+                    resolve_supplemental_turn(
+                        settings_local.db_path,
+                        session_id=session_local.session_id,
+                        run_id=supplemental.pending_run_id,
+                        decision=("accepted" if confirm_supplemental else "rejected"),
+                        expected_story_generation=progress_local.generation or "",
+                        expected_supplemental_generation=supplemental.generation,
+                        clarification_options=(
+                            clarification_options if confirm_supplemental else {}
+                        ),
+                    )
+                except (CompetitionDemoConflict, ValueError) as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
+        else:
+            with st.chat_message("assistant"):
+                st.write("现在还有什么想补充告诉护士吗？")
+                st.caption("可以上报新出现的感受、新的指标变化或其他问题。")
+            supplemental_synthetic = st.checkbox(
+                "我确认只输入合成演示内容；本地会拦截部分明显标识符，但不能保证识别全部敏感信息",
+                key="cc_supplemental_synthetic_only",
+            )
+            st.caption(
+                "发送后，这句话与最小必要问卷上下文会传给火山方舟豆包；"
+                "原文会保存在本地合成演示数据库。"
+            )
+            supplemental_mimo_ready = competition_mimo_configured()
+            if not supplemental_mimo_ready:
+                st.error("豆包当前未配置；系统不会用离线模型冒充成功。")
+            supplemental_message = st.chat_input(
+                "输入一条合成补充上报",
+                disabled=(
+                    not supplemental_mimo_ready or not supplemental_synthetic
+                ),
+                key="cc_supplemental_chat_input",
+            )
+            if supplemental_message:
+                try:
+                    with st.spinner("豆包正在整理这条补充上报……"):
+                        submit_supplemental_report_turn(
+                            settings_local.db_path,
+                            session_id=session_local.session_id,
+                            expected_story_generation=progress_local.generation or "",
+                            expected_supplemental_generation=supplemental.generation,
+                            message_text=supplemental_message,
+                            synthetic_confirmed=supplemental_synthetic,
+                        )
+                except (
+                    CompetitionDemoConflict,
+                    CompetitionDemoStartError,
+                    ValueError,
+                ) as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
+
+        with st.expander("重新开始整轮合成演示"):
+            st.write("这会清空当前整轮合成演示记录，然后回到医生端重新启动。")
+            restart_ack = st.checkbox(
+                "我知道当前这轮合成演示记录会被清空",
+                key="cc_patient_restart_ack",
+            )
+            if st.button(
+                "清空旧演示并去医生端启动新一轮",
+                width="stretch",
+                disabled=not restart_ack,
+            ):
+                try:
+                    reset_competition_demo(
+                        settings_local.db_path,
+                        expected_generation=progress_local.generation,
+                    )
+                except (CompetitionDemoConflict, CompetitionDemoStartError):
+                    st.error("当前演示状态已变化，请刷新后重试。")
+                else:
+                    st.switch_page("pages/3_doctor_summary.py")
+        st.page_link(
+            "pages/2_nurse_risk_center.py",
+            label="打开护士端查看人工复核队列",
+            width="stretch",
+        )
+        st.markdown(
+            f"<p class='cc-patient-emergency'>{html.escape(PATIENT_EMERGENCY_NOTICE)}</p>",
+            unsafe_allow_html=True,
+        )
+        st.stop()
+
+    with st.chat_message("assistant"):
+        st.write(checkin.next_prompt or OPENING_PROMPT)
+        if checkin.next_link_id:
+            st.caption("这道问题来自当前锁定的 FHIR Questionnaire，不由模型临时决定。")
+    if checkin.next_link_id == "fluid-intake-24h-estimated":
+        if st.button("暂时无法估算饮水量", width="stretch"):
+            try:
+                with demo_write_guard(
+                    settings_local.db_path,
+                    expected_generation=progress_local.generation,
+                ):
+                    record_explicit_unknown(
+                        store_local, session_local, checkin.next_link_id
+                    )
+            except (CompetitionDemoConflict, ValueError):
+                st.error("本轮内容已变化，请刷新后重试。")
+            else:
+                st.rerun()
+    synthetic_confirmed = st.checkbox(
+        "我确认只输入合成演示内容；本地会拦截部分明显标识符，但不能保证识别全部敏感信息",
+        key="cc_patient_synthetic_only",
+    )
+    st.caption(
+        "发送后，当前这句话与完成语义整理所需的最小问卷上下文会传给火山方舟豆包；"
+        "原文会保存在本地演示数据库。"
+    )
+    mimo_ready = competition_mimo_configured()
+    if not mimo_ready:
+        st.error("豆包当前未配置；系统不会改用离线模型冒充成功。")
+    message = st.chat_input(
+        "输入合成随访回答，发送后会自动由豆包整理",
+        disabled=not mimo_ready or not synthetic_confirmed,
+    )
+    if message:
+        try:
+            with st.spinner("正在理解您的回答……"):
+                submit_patient_chat_turn(
+                    settings_local.db_path,
+                    expected_generation=progress_local.generation or "",
+                    message_text=message,
+                    synthetic_confirmed=synthetic_confirmed,
+                    target_link_id=(
+                        checkin.next_link_id
+                        if (
+                            session_local.answers
+                            or progress_local.candidate_decisions
+                            or progress_local.collection_resolutions
+                        )
+                        else None
+                    ),
+                )
+        except (CompetitionDemoConflict, CompetitionDemoStartError, ValueError) as exc:
+            st.error(str(exc))
+        else:
+            st.rerun()
+    st.markdown(
+        f"<p class='cc-patient-emergency'>{html.escape(PATIENT_EMERGENCY_NOTICE)}</p>",
+        unsafe_allow_html=True,
+    )
+
+
+_run_product_chat()
+st.stop()
+
+
 st.set_page_config(
     page_title="我的随访 · ContinuCare",
     layout="centered",
     initial_sidebar_state="collapsed",
 )
 inject_global_styles(st)
+inject_product_styles(st)
 st.markdown('<div class="cc-patient-shell" aria-hidden="true"></div>', unsafe_allow_html=True)
 
 settings = get_settings()
 progress = read_competition_demo(settings.db_path)
 store = SQLiteStore(settings.db_path, initialize=False) if settings.db_path.is_file() else None
 patient = store.get_patient(DEMO_PATIENT_ID) if store is not None else None
+render_role_context(
+    st,
+    build_product_context(store, ProductRole.PATIENT),
+)
+if st.button("刷新共享状态", key="cc_patient_refresh_shared", width="stretch"):
+    st.rerun()
+
+if progress.integrity_issue:
+    st.error("共享流程记录暂时不可读取；患者端不会继续写入。")
+    st.stop()
+
+if not progress.plan_activated:
+    st.info("医生尚未启动本轮随访方案。请先在医生页面点击“确认并启动随访方案”，然后刷新本页。")
+    st.page_link(
+        "pages/3_doctor_summary.py",
+        label="打开医生端",
+        width="stretch",
+    )
+    st.stop()
+
+if progress.stage == CompetitionDemoStage.PLAN_ACTIVATED:
+    with st.container(border=True):
+        st.markdown("### 医生已启动今天的随访")
+        st.write("请提交下面这句固定的合成反馈，让豆包帮您整理成待确认记录。")
+        st.code(MANUAL_REVIEW_MESSAGE, language=None)
+        st.caption(
+            "点击后会把这句固定合成文字及必要的合成问卷上下文发送到火山方舟豆包官方接口；"
+            "不会读取或发送真实患者资料，可能产生少量 Token 用量并等待数秒。"
+        )
+        mimo_ready = competition_mimo_configured()
+        if st.button(
+            "提交合成反馈到豆包",
+            type="primary",
+            width="stretch",
+            disabled=not mimo_ready,
+            key="cc_patient_submit_mimo",
+        ):
+            try:
+                with st.spinner("豆包正在整理候选记录，请勿重复点击……"):
+                    submit_activated_plan_feedback(
+                        settings.db_path,
+                        expected_generation=progress.generation,
+                        use_mimo=True,
+                    )
+            except (CompetitionDemoConflict, CompetitionDemoStartError) as exc:
+                st.error(str(exc))
+            else:
+                st.rerun()
+        if not mimo_ready:
+            st.warning("豆包当前未正确配置；可使用下方离线按钮继续体验。")
+        if st.button(
+            "离线整理这句合成反馈",
+            width="stretch",
+            key="cc_patient_submit_offline",
+        ):
+            try:
+                submit_activated_plan_feedback(
+                    settings.db_path,
+                    expected_generation=progress.generation,
+                    use_mimo=False,
+                )
+            except (CompetitionDemoConflict, CompetitionDemoStartError) as exc:
+                st.error(str(exc))
+            else:
+                st.rerun()
+    st.info("整理完成后还需要您再次点击确认；豆包不会替您确认，也不会直接创建护士任务。")
+    st.stop()
 record = store.get_agent_run(progress.run_id) if store is not None and progress.run_id else None
 semantic_result = (
     SemanticResult.model_validate(record.output_json) if record is not None else None
@@ -1166,6 +1946,20 @@ _render_patient_main(
     generation=progress.generation,
     run_id=progress.run_id,
 )
+
+if store is not None and session is not None and engine is not None:
+    with st.expander("工程追溯：中国知识版本、原始回答与标准化 Observation"):
+        governance = build_l5_governance_view(
+            session.pathway_code,
+            session.pathway_version,
+            knowledge_release_id=session.knowledge_release_id,
+            release=engine.knowledge_release,
+        )
+        render_l5_governance_panel(st, governance)
+        render_l5_submission_panel(
+            st,
+            build_latest_l5_submission_view(store, DEMO_PATIENT_ID),
+        )
 
 show_other_methods = bool(projection.decision_actions or progress.run_id is None)
 if (

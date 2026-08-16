@@ -1,6 +1,6 @@
 # GLP-1 患者可报告症状术语目录 v1
 
-机器可执行目录位于 `continucare/terminology/data/glp1_symptom_catalog_v1.json`。它是运行时唯一来源，同时可以渲染为 FHIR R4 `ValueSet`；SQLite 只保存确认记录和检索轨迹，不复制成另一份权威术语表。
+机器可执行目录位于 `continucare/terminology/data/glp1_symptom_catalog_v1.json`。它是动态症状原型检索的唯一来源，同时可以渲染为 FHIR R4 `ValueSet`；SQLite 只保存确认记录和检索轨迹，不复制成另一份权威术语表。中国路径的固定 5 项仍由中国 L1 白名单负责，两者通过可审计的复合边界协作，不能互相冒充来源。
 
 ## 覆盖边界
 
@@ -27,9 +27,13 @@
       → 无匹配：保留原话，标记待人工复核
   → Safety Agent 校验 catalog/version/target coding/evidence
   → 患者确认
-      → Pathway 已有项：CareSession answer
-      → Pathway 外新症状：ConfirmedSymptomReport
-  → 最终提交统一生成 FHIR Observation + derivedFrom + terminology trace
+      → Pathway 已有项：独立补充 CareSession answer（中国 L1 映射）
+      → Pathway 外新症状：ConfirmedSymptomReport（原型目录来源）
+  → 单事务生成补充 QuestionnaireResponse、可安全编码的 Observation、
+    Provenance 与护士人工复核记录
+  → 无匹配时仅保留补充 QuestionnaireResponse，Observation = 0
 ```
+
+补充 occurrence 通过 `parent_session_id` 锚定当天已完成的主随访，但绝不改写主随访。动态 Observation 不得携带中国 knowledge release 或固定 Mapping SHA；界面必须展示原型状态与目标医院验证要求。
 
 `TerminologySearchBackend` 是替换接口。比赛版本使用仓库 JSON；医院版本可以实现相同的 `search / validate_code` 合同，调用 FHIR `$expand`、`$lookup`、`$validate-code`，也可以在检索前加入 RAG 产生搜索词，但最终 code 仍必须来自术语服务而不是 LLM。

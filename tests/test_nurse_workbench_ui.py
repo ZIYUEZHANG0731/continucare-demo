@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,11 +12,16 @@ from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.care_agent import CareAgentService
 from continucare.care_agent.model_api import SemanticModelConfig, UnconfiguredModelAdapter
 from continucare.care_engine import CareEngine
+from continucare.demo_data import DEMO_PATIENT_ID, MANUAL_REVIEW_MESSAGE
+from continucare.layer4.manual_reviews import ManualReviewQueue
+from continucare.layer4.storage import Layer4SQLiteStore
+from continucare.nurse_ui import NURSE_SURFACE_STYLE, build_nurse_answer_cards
 from continucare.services.competition_demo import demo_write_guard, start_competition_demo
 from continucare.services.confirmed_review import ConfirmedReviewService
 from continucare.services.competition_demo import (
     CompetitionDemoProgress,
     CompetitionDemoStage,
+    read_competition_demo,
 )
 from continucare.ui import (
     NURSE_RESULT_BOUNDARY,
@@ -28,6 +34,7 @@ from continucare.ui import (
 ROOT = Path(__file__).parents[1]
 NURSE_PAGE = ROOT / "pages" / "2_nurse_risk_center.py"
 UI_SOURCE = ROOT / "continucare" / "ui.py"
+NURSE_UI_SOURCE = ROOT / "continucare" / "nurse_ui.py"
 
 
 def _progress(stage: CompetitionDemoStage, **updates) -> CompetitionDemoProgress:
@@ -157,7 +164,7 @@ def test_empty_workbench_is_truthful_and_has_no_business_action():
     projection = project_nurse_workbench(CompetitionDemoProgress())
 
     assert projection.state == "empty"
-    assert projection.notice_title == "目前没有待核对记录"
+    assert projection.notice_title == "目前没有待复核记录"
     assert projection.pending_tasks == ()
     assert projection.completed_tasks == ()
     assert projection.selected_task_id is None
@@ -171,7 +178,7 @@ def test_empty_workbench_is_truthful_and_has_no_business_action():
             "requested",
             "等待接手",
             "acknowledge",
-            "接手这项核对",
+            "接手这项安全复核",
             (("cancel", "取消任务"),),
         ),
         (
@@ -179,15 +186,15 @@ def test_empty_workbench_is_truthful_and_has_no_business_action():
             "received",
             "已接手",
             "start",
-            "开始核对",
+            "开始人工复核",
             (("reject", "拒绝处理"), ("cancel", "取消任务")),
         ),
         (
             CompetitionDemoStage.NURSE_IN_PROGRESS,
             "in-progress",
-            "正在核对",
+            "正在人工复核",
             "record_outcome",
-            "记录结果并生成沟通文字",
+            "保存护士人工决定",
             (("cancel", "取消任务"),),
         ),
     ],
@@ -256,7 +263,7 @@ def test_completed_ready_is_processed_and_never_claims_delivery():
     )
 
     assert item.queue == "completed"
-    assert item.status_title == "核对已完成"
+    assert item.status_title == "人工安全复核已完成"
     assert item.primary_action == "open_doctor"
     assert item.primary_writes is False
     assert "本演示不会发送" in item.status_detail
@@ -447,8 +454,57 @@ def test_knowledge_fields_do_not_participate_in_the_projection():
 
 
 def test_frozen_boundaries_are_natural_chinese_and_explain_consequences():
-    assert NURSE_ROLE_BOUNDARY == "这里核对的是患者记录，不判断风险，也不提供诊疗建议。"
-    assert NURSE_RESULT_BOUNDARY == "这里只记录核对结果，不形成诊断、风险等级或治疗建议。"
+    assert NURSE_ROLE_BOUNDARY == (
+        "系统只把每份患者确认记录交给护士；是否需要补充或上报医生，由护士人工决定。"
+    )
+
+
+def test_nurse_answer_cards_translate_persisted_values_to_chinese_only():
+    questionnaire = json.loads(
+        (
+            ROOT
+            / "continucare"
+            / "pathways"
+            / "data"
+            / "fhir"
+            / "glp1_followup_questionnaire_v1.json"
+        ).read_text("utf-8")
+    )
+    cards = build_nurse_answer_cards(
+        questionnaire,
+        {
+            "nausea-present": True,
+            "nausea-severity": {
+                "code": "LA6750-9",
+                "display": "Severe",
+                "system": "http://loinc.org",
+                "version": "2.82",
+            },
+            "vomiting-count-24h": 2,
+            "fluid-intake-24h-estimated": {
+                "value": 800,
+                "unit": "mL",
+                "system": "http://unitsofmeasure.org",
+                "code": "mL",
+            },
+            "abdominal-pain-present": False,
+            "free-text-report": "今天恶心比较明显。",
+        },
+    )
+
+    rendered = {(item.question, item.answer) for item in cards}
+    assert ("现在有恶心吗？", "是") in rendered
+    assert ("恶心程度最接近哪一项？", "重度") in rendered
+    assert ("现在有腹痛吗？", "否") in rendered
+    assert any(item.answer == "800 毫升" for item in cards)
+    assert all("LA6750-9" not in item.answer for item in cards)
+    assert all("http://loinc.org" not in item.answer for item in cards)
+    assert all("value" not in item.answer for item in cards)
+    assert ".cc-nurse-sidebar" in NURSE_SURFACE_STYLE
+    assert NURSE_RESULT_BOUNDARY == (
+        "护士结果是人工工作流决定，不形成系统风险等级、诊断或治疗建议；"
+        "本次未上报也不表示患者安全。"
+    )
     assert NURSE_STOP_CONSEQUENCE == (
         "这会停止后续业务动作；不会生成新的沟通文字或医生速览。"
         "已有记录仍会保留供追溯。"
@@ -458,11 +514,17 @@ def test_frozen_boundaries_are_natural_chinese_and_explain_consequences():
 def test_nurse_page_removes_alert_dashboard_and_keeps_role_styles_scoped():
     source = NURSE_PAGE.read_text("utf-8")
     ui_source = UI_SOURCE.read_text("utf-8")
+    nurse_ui_source = NURSE_UI_SOURCE.read_text("utf-8")
 
-    assert 'st.title("护士工作台")' in source
+    assert "render_nurse_header" in source
+    assert "render_nurse_answer_cards" in source
     assert "project_nurse_workbench" in source
     assert "按提交时间排序" in source
-    assert "例行记录核对" in source
+    assert "患者确认记录人工安全复核" in source
+    assert "SAFETY_REVIEW_CHECKLIST" in source
+    assert '"reviewed_no_escalation"' in source
+    assert '"clarification_required"' in source
+    assert '"escalated_to_doctor"' in source
     assert "AlertService" not in source
     assert ".metric(" not in source
     assert "剩余 SLA" not in source
@@ -472,13 +534,15 @@ def test_nurse_page_removes_alert_dashboard_and_keeps_role_styles_scoped():
     assert "expected_generation=progress.generation" in source
     assert "render_disclosure_controls" in source
     assert 'st.expander("演示边界"' in source
-    assert ".cc-nurse-shell" in ui_source
-    assert '.stApp:has(.cc-nurse-shell) [data-testid="stSidebar"]' in ui_source
-    assert ".st-key-cc_nurse_primary button" in ui_source
-    assert "min-height:48px" in ui_source
-    assert '[data-testid="stHorizontalBlock"]:not(:has(.cc-nurse-sort))' in ui_source
-    assert "flex-direction:row !important" in ui_source
-    assert "@media (prefers-reduced-motion: reduce)" in ui_source
+    assert "st.dataframe" not in source
+    assert "工程追溯" not in source
+    assert "标准化 Observation" not in source
+    assert ".cc-nurse-v3" in nurse_ui_source
+    assert '.stApp:has(.cc-nurse-v3) [data-testid="stSidebar"]' in nurse_ui_source
+    assert ".st-key-cc_nurse_primary button" in nurse_ui_source
+    assert "cc-nurse-answer-grid" in nurse_ui_source
+    assert "cc-nurse-sidebar" in nurse_ui_source
+    assert "@media (prefers-reduced-motion:reduce)" in nurse_ui_source
     assert 'aria-expanded="{str(active).lower()}"' in ui_source
 
 
@@ -496,7 +560,6 @@ def test_nurse_disclosures_render_distinct_unique_targets_and_fail_closed(
     assert [item["aria-controls"] for item in collapsed.controls] == [
         "cc-nurse-source-panel",
         "cc-nurse-record-panel",
-        "cc-nurse-record-panel",
     ]
     assert all(item["aria-expanded"] == "false" for item in collapsed.controls)
     for panel_id in ("cc-nurse-source-panel", "cc-nurse-record-panel"):
@@ -510,11 +573,7 @@ def test_nurse_disclosures_render_distinct_unique_targets_and_fail_closed(
     app.query_params["cc_nurse_disclosure"] = "patient"
     app.run()
     patient = _rendered_dom(app)
-    assert [item["aria-expanded"] for item in patient.controls] == [
-        "true",
-        "false",
-        "false",
-    ]
+    assert [item["aria-expanded"] for item in patient.controls] == ["true", "false"]
     source_targets = [
         item for item in patient.ids if item[1]["id"] == "cc-nurse-source-panel"
     ]
@@ -524,16 +583,12 @@ def test_nurse_disclosures_render_distinct_unique_targets_and_fail_closed(
     assert len(source_targets) == len(record_targets) == 1
     assert source_targets[0][0] == "div" and "hidden" not in source_targets[0][1]
     assert record_targets[0][0] == "span" and record_targets[0][1]["hidden"] is None
-    assert "我今天拉肚子。" in patient.text
+    assert MANUAL_REVIEW_MESSAGE in patient.text
 
     app.query_params["cc_nurse_disclosure"] = "history"
     app.run()
     history = _rendered_dom(app)
-    assert [item["aria-expanded"] for item in history.controls] == [
-        "false",
-        "true",
-        "false",
-    ]
+    assert [item["aria-expanded"] for item in history.controls] == ["false", "true"]
     source_targets = [
         item for item in history.ids if item[1]["id"] == "cc-nurse-source-panel"
     ]
@@ -555,6 +610,80 @@ def test_nurse_disclosures_render_distinct_unique_targets_and_fail_closed(
     assert sum(
         item[1]["id"] == "cc-nurse-record-panel" for item in unknown.ids
     ) == 1
+
+
+def test_nurse_streamlit_requires_checklist_and_can_manually_escalate_to_doctor(
+    monkeypatch, tmp_path
+):
+    db_path = tmp_path / "nurse-manual-escalation.db"
+    _seed_requested_task(db_path)
+    monkeypatch.setenv("CONTINUCARE_DB_PATH", str(db_path))
+    monkeypatch.setattr("streamlit.page_link", lambda *_args, **_kwargs: None)
+
+    app = AppTest.from_file(str(NURSE_PAGE), default_timeout=10).run()
+    next(
+        item for item in app.button if item.label == "接手这项安全复核"
+    ).click().run()
+    next(
+        item for item in app.button if item.label == "开始人工复核"
+    ).click().run()
+
+    submit = next(
+        item for item in app.button if item.label == "保存护士人工决定"
+    )
+    assert submit.disabled is True
+    checklist_labels = {
+        "已核对患者原话和患者确认结果",
+        "已核对中文回答与患者原话是否一致",
+        "已核对时间窗、单位、缺失和冲突",
+        "已查看患者补充说明和可用历史原始值",
+        "已由护士本人决定是否需要患者补充或医生评估",
+    }
+    for checkbox in app.checkbox:
+        if checkbox.label in checklist_labels:
+            checkbox.check()
+    next(
+        item for item in app.radio if item.label == "护士人工处理结果"
+    ).set_value("escalated_to_doctor")
+    next(
+        item for item in app.text_area if item.label == "人工复核说明（必填）"
+    ).set_value("护士已人工查看患者确认事实，请医生进行临床评估。")
+    app.run()
+
+    submit = next(
+        item for item in app.button if item.label == "保存护士人工决定"
+    )
+    assert submit.disabled is False
+    submit.click().run()
+    assert not app.exception
+
+    repository = Layer4SQLiteStore(db_path, initialize=False)
+    tasks = ManualReviewQueue(repository).list_for_patient(DEMO_PATIENT_ID)
+    assert len(tasks) == 1
+    task = tasks[0]
+    outcome = next(
+        item["valueCode"]
+        for item in task["output"]
+        if item["type"]["coding"][0]["code"] == "review-outcome"
+    )
+    assert outcome == "escalated_to_doctor"
+    assert task["statusReason"]["coding"][0]["code"] == (
+        "human-escalated-to-doctor"
+    )
+    assert read_competition_demo(db_path).stage == (
+        CompetitionDemoStage.COMMUNICATION_PENDING
+    )
+    assert SQLiteStore(db_path, initialize=False).list_alerts(DEMO_PATIENT_ID) == []
+
+    doctor = AppTest.from_file(
+        str(ROOT / "pages" / "3_doctor_summary.py"), default_timeout=10
+    ).run()
+    assert not doctor.exception
+    assert any(
+        "护士已人工上报这份患者确认记录" in item.value
+        and "系统未进行临床风险分级" in item.value
+        for item in doctor.warning
+    )
 
 
 def test_visible_projection_never_exposes_internal_or_delivery_capability_terms():

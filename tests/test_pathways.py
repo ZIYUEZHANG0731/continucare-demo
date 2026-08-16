@@ -8,6 +8,7 @@ from continucare.pathways import (
     PathwayDefinition,
     PathwayStatus,
     load_builtin_pathways,
+    load_fhir_artifact,
     load_glp1_observation_mapping,
     load_glp1_plan_definition,
     load_glp1_questionnaire,
@@ -17,7 +18,7 @@ from continucare.pathways import (
 def test_builtin_glp1_pathway_is_fhir_native_and_fail_closed():
     pathway = load_builtin_pathways().get("GLP1-14D")
 
-    assert pathway.version == "1.0.0"
+    assert pathway.version == "1.1.0"
     assert pathway.fhir_version == "4.0.1"
     assert {item.resource_type for item in pathway.artifacts} == {
         "Questionnaire",
@@ -26,7 +27,7 @@ def test_builtin_glp1_pathway_is_fhir_native_and_fail_closed():
     assert pathway.clinical_rules == []
     assert pathway.evidence_document.endswith("glp1_14d_observation_evidence.md")
     assert pathway.observation_mapping_file.endswith(
-        "glp1_followup_observation_mapping_v1.json"
+        "glp1_followup_observation_mapping_v1_1.json"
     )
 
 
@@ -50,6 +51,18 @@ def test_questionnaire_has_standard_codes_answers_and_free_text():
         "LA6750-9",
     }
     assert items["free-text-report"]["type"] == "text"
+
+
+def test_current_questionnaire_includes_governed_body_weight():
+    pathway = load_builtin_pathways().get("GLP1-14D")
+    reference = next(
+        item for item in pathway.artifacts if item.resource_type == "Questionnaire"
+    )
+    questionnaire = load_fhir_artifact(reference.file_name, "Questionnaire")
+    items = {item["linkId"]: item for item in questionnaire["item"]}
+
+    assert items["body-weight"]["code"][0]["code"] == "29463-7"
+    assert items["body-weight"]["type"] == "quantity"
 
 
 def test_observation_mapping_is_versioned_and_only_targets_questionnaire_items():

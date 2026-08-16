@@ -522,7 +522,7 @@ def test_real_layer3_boundary_builds_memory_and_keeps_rule_tasks_disabled(tmp_pa
         Layer4InputReader(source_store),
         repository,
         pathway_code="GLP1-14D",
-        pathway_version="1.0.0",
+        pathway_version=session.pathway_version,
     )
 
     result = service.rebuild(DEMO_PATIENT_ID)

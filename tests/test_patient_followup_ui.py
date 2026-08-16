@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,11 @@ import pytest
 from continucare.services.competition_demo import (
     CompetitionDemoProgress,
     CompetitionDemoStage,
+)
+from continucare.services.patient_checkin import (
+    is_single_focused_patient_checkin_task,
+    questionnaire_candidate_confirmation_display,
+    questionnaire_choice_options,
 )
 from continucare.ui import (
     PATIENT_CONSEQUENCE,
@@ -22,6 +28,15 @@ from continucare.ui import (
 ROOT = Path(__file__).parents[1]
 PATIENT_PAGE = ROOT / "pages" / "1_patient_followup.py"
 UI_SOURCE = ROOT / "continucare" / "ui.py"
+QUESTIONNAIRE = (
+    ROOT
+    / "continucare"
+    / "pathways"
+    / "data"
+    / "fhir"
+    / "glp1_followup_questionnaire_v1.json"
+)
+PATIENT_REACT_SOURCE = ROOT / "patient-web" / "src" / "main.jsx"
 
 
 def _progress(stage: CompetitionDemoStage, **updates) -> CompetitionDemoProgress:
@@ -59,6 +74,69 @@ def test_real_candidate_projects_the_frozen_patient_meaning():
     }
 
     assert patient_recorded_meaning(candidate) == "今天有腹泻"
+
+
+def test_full_sentence_terminology_label_does_not_duplicate_time_or_subject():
+    candidate = {
+        "answer": True,
+        "evidence_text": "我今天有恶心",
+        "effective_time": {"expression": "今天"},
+        "terminology_match": {"preferred_zh": "我今天有恶心"},
+    }
+
+    assert patient_recorded_meaning(candidate) == "今天有恶心"
+
+
+def test_patient_recorded_meaning_normalizes_terminal_punctuation():
+    candidate = {
+        "answer": True,
+        "evidence_text": "我今天有恶心。",
+        "effective_time": {"expression": "今天"},
+        "terminology_match": {"preferred_zh": "恶心。"},
+    }
+
+    assert patient_recorded_meaning(candidate) == "今天有恶心"
+
+
+def test_confirmation_cards_distinguish_presence_from_severity():
+    questionnaire = json.loads(QUESTIONNAIRE.read_text("utf-8"))
+
+    assert questionnaire_candidate_confirmation_display(
+        questionnaire, "nausea-present", True
+    ) == ("现在有恶心吗？", "是")
+    assert questionnaire_candidate_confirmation_display(
+        questionnaire, "nausea-severity", "LA6752-5"
+    ) == ("恶心程度最接近哪一项？", "轻度")
+    assert questionnaire_choice_options(questionnaire, "nausea-severity") == (
+        ("LA6752-5", "轻度"),
+        ("LA6751-7", "中度"),
+        ("LA6750-9", "重度"),
+    )
+
+
+def test_supplemental_confirmation_returns_to_an_explicit_end_screen():
+    source = PATIENT_REACT_SOURCE.read_text("utf-8")
+
+    assert 'if (succeeded && decision === "accepted") setPanel("default")' in source
+    assert "补充情况已确认并保存" in source
+    assert "今天的随访到这里就结束了" in source
+
+
+def test_patient_selection_requires_the_exact_single_focus_task_identity():
+    import hashlib
+
+    link_id = "nausea-severity"
+    digest = hashlib.sha256(b'["nausea-severity"]').hexdigest()[:16]
+    valid = f"patient-checkin:care-task:focus:{digest}"
+
+    assert is_single_focused_patient_checkin_task(valid, link_id)
+    assert not is_single_focused_patient_checkin_task(
+        f"supplemental:care-task:focus:{digest}", link_id
+    )
+    assert not is_single_focused_patient_checkin_task(valid, "nausea-present")
+    assert not is_single_focused_patient_checkin_task(
+        f"{valid}:focus:{digest}", link_id
+    )
 
 
 def test_ready_projection_matches_the_frozen_first_viewport_contract():
@@ -195,6 +273,11 @@ def test_patient_page_keeps_full_group_guard_and_legacy_path_isolated():
     assert "if progress.run_id:" in source
     assert "这里不会开放完整问卷提交，也不会创建第二条语义故事" in source
     assert "show_other_methods = bool(projection.decision_actions or progress.run_id is None)" in source
+    assert '"火山方舟豆包"' in source
+    assert 'else "小米 MiMo"' in source
+    assert 'f"本轮候选来源：{provider_label}' in source
+    assert "当前患者确认阶段只读取已保存结果，不会再次外呼" in source
+    assert "MiMo API Key 未配置" not in source
 
     button_labels = {
         node.args[0].value
@@ -252,3 +335,23 @@ def test_patient_styles_are_scoped_to_the_patient_marker():
     assert "min-height:3rem" in source
     assert 'font-family:"Songti SC", STSong' in source
     assert "@media (prefers-reduced-motion: reduce)" in source
+
+
+def test_product_chat_activates_ios_shell_before_any_fail_closed_stop():
+    source = PATIENT_PAGE.read_text("utf-8")
+    product_chat = source[
+        source.index("def _run_product_chat()") : source.index("\n\n_run_product_chat()")
+    ]
+
+    marker = 'class="cc-patient-shell cc-ios-runtime"'
+    assert marker in product_chat
+    assert product_chat.index(marker) < product_chat.index(
+        "if progress_local.integrity_issue:"
+    )
+    assert "可以输入任意合成随访内容" in product_chat
+    assert "未命中则保留原话供人工复核" in product_chat
+    assert "只有您确认后" in product_chat
+
+    ui_source = UI_SOURCE.read_text("utf-8")
+    assert ".stApp:has(.cc-ios-runtime)" in ui_source
+    assert '[data-testid="stChatInput"]' in ui_source
