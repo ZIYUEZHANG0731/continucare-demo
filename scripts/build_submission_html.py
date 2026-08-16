@@ -320,11 +320,11 @@ def build_html(markdown_path: Path, output_path: Path) -> tuple[int, list[Path]]
       margin: 0;
       color: var(--ink);
       background: var(--canvas);
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+      font-family: "Songti SC", "STSong", "SimSun", "Noto Serif CJK SC", serif;
       font-size: 17px;
       line-height: 1.78;
       text-rendering: optimizeLegibility;
-      -webkit-font-smoothing: antialiased;
+      -webkit-font-smoothing: auto;
     }}
     a {{ color: var(--brand-strong); }}
     .progress {{ position: fixed; inset: 0 auto auto 0; height: 3px; width: 0; background: var(--brand); z-index: 20; }}
@@ -351,11 +351,16 @@ def build_html(markdown_path: Path, output_path: Path) -> tuple[int, list[Path]]
       content: ""; position: absolute; width: 480px; height: 480px; right: -120px; top: -220px;
       border: 1px solid rgba(255,255,255,.16); border-radius: 50%; box-shadow: 0 0 0 72px rgba(255,255,255,.035), 0 0 0 144px rgba(255,255,255,.025);
     }}
-    .hero-kicker {{ position: relative; z-index: 1; font-size: 14px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; opacity: .78; }}
-    .hero h1 {{ position: relative; z-index: 1; max-width: 1120px; margin: 20px 0 22px; font-size: clamp(36px, 5vw, 64px); line-height: 1.18; letter-spacing: -.035em; }}
-    .hero-summary {{ position: relative; z-index: 1; max-width: 820px; margin: 0; font-size: 20px; color: rgba(255,255,255,.8); }}
-    .hero-tags {{ position: relative; z-index: 1; display: flex; gap: 10px; flex-wrap: wrap; margin-top: 30px; }}
-    .hero-tag {{ border: 1px solid rgba(255,255,255,.22); border-radius: 999px; padding: 5px 12px; font-size: 13px; color: rgba(255,255,255,.86); }}
+    .hero-kicker {{ position: relative; z-index: 1; font-size: 14px; font-weight: 700; letter-spacing: .12em; opacity: .76; }}
+    .hero-team {{ position: relative; z-index: 1; margin-top: 6px; color: rgba(255,255,255,.68); font-size: 14px; letter-spacing: .04em; }}
+    .hero-product {{ position: relative; z-index: 1; margin-top: 26px; font-size: clamp(28px, 3vw, 42px); font-weight: 750; letter-spacing: -.02em; }}
+    .hero h1 {{ position: relative; z-index: 1; max-width: 1180px; margin: 12px 0 18px; font-size: clamp(40px, 4vw, 58px); line-height: 1.12; letter-spacing: -.04em; white-space: nowrap; }}
+    .hero-summary {{ position: relative; z-index: 1; max-width: 980px; margin: 0; font-size: 19px; color: rgba(255,255,255,.8); }}
+    .hero-highlights {{ position: relative; z-index: 1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; max-width: 1180px; margin-top: 34px; }}
+    .hero-highlight {{ min-height: 82px; padding: 14px 16px; border: 1px solid rgba(255,255,255,.2); border-radius: 14px; background: rgba(255,255,255,.055); }}
+    .hero-highlight-index {{ display: block; margin-bottom: 6px; color: #8de0db; font-size: 11px; font-weight: 800; letter-spacing: .14em; }}
+    .hero-highlight-title {{ display: block; font-size: 16px; font-weight: 750; }}
+    .hero-highlight-note {{ display: block; margin-top: 4px; color: rgba(255,255,255,.65); font-size: 12px; }}
     .layout {{ display: grid; grid-template-columns: 250px minmax(0, var(--content)); gap: 38px; justify-content: center; align-items: start; padding: 46px 28px 100px; }}
     .toc {{ position: sticky; top: 84px; max-height: calc(100vh - 110px); overflow: auto; padding: 18px; border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.82); box-shadow: 0 10px 28px rgba(23,33,38,.05); }}
     .toc-title {{ margin: 0 0 12px; color: var(--muted); font-size: 12px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }}
@@ -403,10 +408,11 @@ def build_html(markdown_path: Path, output_path: Path) -> tuple[int, list[Path]]
       .layout {{ grid-template-columns: minmax(0, var(--content)); }}
       .toc {{ position: static; max-height: none; columns: 2; }}
       .toc-title {{ column-span: all; }}
+      .hero-highlights {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
     }}
     @media (max-width: 720px) {{
       body {{ font-size: 16px; }} .topbar {{ padding: 8px 16px; }} .topbar-meta {{ display: none; }}
-      .hero {{ padding: 60px 22px 52px; }} .hero h1 {{ font-size: 34px; }} .hero-summary {{ font-size: 17px; }}
+      .hero {{ padding: 60px 22px 52px; }} .hero h1 {{ font-size: 36px; white-space: normal; }} .hero-summary {{ font-size: 17px; }} .hero-highlights {{ grid-template-columns: 1fr; }}
       .layout {{ padding: 22px 12px 64px; gap: 18px; }} .toc {{ columns: 1; }}
       main {{ padding: 30px 20px 48px; border-radius: 18px; }} h2 {{ font-size: 28px; }} h3 {{ font-size: 23px; }}
       .document-figure {{ margin-left: -10px; margin-right: -10px; }}
@@ -415,7 +421,7 @@ def build_html(markdown_path: Path, output_path: Path) -> tuple[int, list[Path]]
       @page {{ size: A4; margin: 15mm 14mm 17mm; }}
       * {{ -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }}
       body {{ background: #fff; font-size: 10.5pt; }} .progress, .topbar, .toc, .print-button {{ display: none !important; }}
-      .hero {{ padding: 24mm 15mm 20mm; page-break-after: always; }} .hero h1 {{ font-size: 28pt; }}
+      .hero {{ padding: 24mm 15mm 20mm; page-break-after: always; }} .hero h1 {{ font-size: 28pt; white-space: normal; }} .hero-highlights {{ grid-template-columns: repeat(2, 1fr); }}
       .layout {{ display: block; padding: 0; }} main {{ padding: 0; border: 0; border-radius: 0; box-shadow: none; }}
       h2 {{ break-before: page; margin-top: 0; padding-top: 0; font-size: 20pt; }} h2:first-child {{ break-before: auto; }}
       h3, h4 {{ break-after: avoid; }} p, li {{ orphans: 3; widows: 3; }}
@@ -429,16 +435,20 @@ def build_html(markdown_path: Path, output_path: Path) -> tuple[int, list[Path]]
   <div class="progress" id="progress"></div>
   <header class="topbar">
     <div class="topbar-brand">ContinuCare Copilot</div>
-    <div class="topbar-meta">40强赛参赛方案 · 单文件离线版</div>
+    <div class="topbar-meta">和睦家医疗企业命题 · 单文件离线版</div>
     <button class="print-button" type="button" onclick="window.print()">打印 / 导出 PDF</button>
   </header>
   <section class="hero">
-    <div class="hero-kicker">United Family Healthcare Challenge · Submission</div>
-    <h1>{html.escape(title)}</h1>
-    <p class="hero-summary">让院外变化成为医生复诊前可信、可追溯、可复用的连续上下文。</p>
-    <div class="hero-tags">
-      <span class="hero-tag">确定性事实主链</span><span class="hero-tag">受控 AI 辅助</span>
-      <span class="hero-tag">患者与医护人工确认</span><span class="hero-tag">FHIR 证据链</span>
+    <div class="hero-kicker">和睦家医疗企业命题</div>
+    <div class="hero-team">慕尼黑空调｜李忻睿 · 章子悦</div>
+    <div class="hero-product">ContinuCare Copilot</div>
+    <h1>让院外随访不断线，让复诊获得完整数据</h1>
+    <p class="hero-summary">医生设定随访周期和照护路径，豆包持续跟踪记录，护士监控接手，复诊前形成带证据的结构化资料。</p>
+    <div class="hero-highlights" aria-label="四步产品体验">
+      <div class="hero-highlight"><span class="hero-highlight-index">01 · 患者</span><span class="hero-highlight-title">自然表达，持续记录</span><span class="hero-highlight-note">用日常语言反馈症状与关键指标</span></div>
+      <div class="hero-highlight"><span class="hero-highlight-index">02 · 豆包</span><span class="hero-highlight-title">沿医生路径持续跟踪</span><span class="hero-highlight-note">按设定周期追问、理解并串联变化</span></div>
+      <div class="hero-highlight"><span class="hero-highlight-index">03 · 护士</span><span class="hero-highlight-title">过程监控，随时接手</span><span class="hero-highlight-note">复核证据，补充核实或上报医生</span></div>
+      <div class="hero-highlight"><span class="hero-highlight-index">04 · 医生</span><span class="hero-highlight-title">复诊前获得完整资料</span><span class="hero-highlight-note">结构化总结、趋势和来源证据一并交付</span></div>
     </div>
   </section>
   <div class="layout">

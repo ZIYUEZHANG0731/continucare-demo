@@ -1,16 +1,20 @@
 项目名称：ContinuCare Demo
 GitHub：https://github.com/xli561980-ship-it/continucare-demo
-Draft PR：https://github.com/xli561980-ship-it/continucare-demo/pull/1
+主分支：https://github.com/xli561980-ship-it/continucare-demo/tree/main
 
 提交前必须完成：
-1. 合并 Draft PR #1 到 main。
+1. 确认最新三端完整路径与运行文档均已进入 main。
 2. 将仓库设为 Public，或确认评委账号已获得私有仓库访问权限。
-3. 在干净环境中重新运行 pytest 与 Streamlit 烟雾检查，并确认原型界面与交互闭环可用。
+3. 按 README 在干净环境中构建两个前端并运行 pytest。
+4. 配置本地豆包 Key 后，完成医生 → 患者 → 护士 → 医生的网页烟雾检查；不得提交 Key 或真实患者数据。
 
-方案定位：当前仓库中的可点击原型用于展示未来产品形态；入围后按开题方案接入 Aily Agent 编排、飞书医护协作与 Multi-Agent 能力。
+方案定位：当前仓库已实现使用合成数据的三角色 Web 闭环；真实医院、Aily、飞书租户和生产临床验证仍属于后续范围。
 
 本地运行：
 python3.11 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m pytest -q
-.venv/bin/streamlit run app.py
+npm --prefix patient-web ci && npm --prefix patient-web run build
+npm --prefix doctor-web ci && npm --prefix doctor-web run build
+cp .env.example .env
+# 在 .env 填写本机 ARK_API_KEY
+.venv/bin/python scripts/start_demo.py --open

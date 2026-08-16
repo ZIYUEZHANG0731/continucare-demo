@@ -23,6 +23,7 @@ dist/
 
 # Local exports, recordings, and generated submission bundles.
 output/
+movie/
 
 # One-off rendered previews kept outside the documentation asset tree.
 /json_*.png

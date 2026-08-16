@@ -2,13 +2,37 @@
 
 验证覆盖 FHIR R4 基础资源结构、资源间追溯关系、Questionnaire 动态回答语义、Care Session、确定性 Observation 映射、合成固定场景和应用工作流，不代表临床性能或医院接入认证。
 
+发布验收必须固定并核对官方 FHIR R4 Schema 哈希，不能把未提供 Schema 时的 3 个 skip 视为通过：
+
 ```bash
-curl -L https://hl7.org/fhir/R4/fhir.schema.json.zip -o /tmp/fhir-r4-schema.zip
-FHIR_R4_SCHEMA_ZIP=/tmp/fhir-r4-schema.zip .venv/bin/python -m pytest -q
-.venv/bin/python scripts/validate_fhir_r4.py --schema /tmp/fhir-r4-schema.zip
+curl --fail --location --retry 3 \
+  https://hl7.org/fhir/R4/fhir.schema.json.zip \
+  --output /tmp/fhir-r4-schema.zip
+printf '%s  %s\n' \
+  '75e5560da3cf503895a44c8ca7af17a83b4cca6c2cb5ba1883d2aec0d1cb5ac6' \
+  '/tmp/fhir-r4-schema.zip' \
+  | shasum -a 256 --check
+FHIR_R4_SCHEMA_ZIP=/tmp/fhir-r4-schema.zip \
+  .venv/bin/python -m pytest -q -p no:cacheprovider
+.venv/bin/python -m scripts.validate_fhir_r4 \
+  --schema /tmp/fhir-r4-schema.zip
+
+# 公开 checkout：从受控 JSON 重建并核验知识发布包
+.venv/bin/python -m scripts.validate_cn_glp1_knowledge --skip-source-files
+.venv/bin/python -m scripts.build_cn_glp1_knowledge
+.venv/bin/python -m scripts.build_cn_glp1_knowledge --check
+
+# 只有持有受控本地 source pack 时才运行原件哈希核验
+.venv/bin/python -m scripts.check_cn_glp1_sources
+
 .venv/bin/python scripts/evaluate_semantic_layer.py --output docs/evaluations/layer3_v1.0.0_offline.json
 .venv/bin/python scripts/rehearse_demo.py
+npm --prefix patient-web run build
+npm --prefix doctor-web run build
+.venv/bin/python scripts/start_demo.py --check
 ```
+
+哈希命令必须输出 `/tmp/fhir-r4-schema.zip: OK`；随后全量 pytest 应退出 0，且不再出现上述 3 个 Schema skip。`check_cn_glp1_sources` 依赖不公开的受控源文件包，公开 checkout 缺少该包时必须如实记录，不能用跳过结果替代原件核验。
 
 Layer 3 v1.0.0 的真实 MiMo 评测还会校验模型及三个 Prompt 是否与发布清单完全一致，不一致时拒绝运行：
 

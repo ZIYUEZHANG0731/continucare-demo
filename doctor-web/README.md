@@ -4,12 +4,18 @@
 
 ## 本地启动
 
+推荐从仓库根目录按 [统一运行手册](../docs/quickstart.md) 构建两个前端，并用一个命令同时启动三角色网页：
+
 ```bash
-cd doctor-web
-npm install
-npm run build
-cd ..
-CONTINUCARE_DB_PATH=data/continucare.db python -m continucare.doctor_web
+.venv/bin/python scripts/start_demo.py --open
+```
+
+如需单独调试医生服务：
+
+```bash
+npm --prefix doctor-web ci
+npm --prefix doctor-web run build
+CONTINUCARE_DB_PATH=data/continucare.db .venv/bin/python -m continucare.doctor_web
 ```
 
 打开 `http://127.0.0.1:8520`。

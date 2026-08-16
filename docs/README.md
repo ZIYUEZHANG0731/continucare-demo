@@ -10,6 +10,7 @@
 
 | 文件 | 用途 |
 |---|---|
+| [quickstart.md](quickstart.md) | 当前三角色网页的安装、配置、启动、完整使用顺序与故障排查 |
 | [00_product_overview.md](00_product_overview.md) | 产品定位、使命愿景、核心边界、竞品差异 |
 | [01_prd.md](01_prd.md) | 完整产品需求文档、用户、场景、MVP范围、验收标准 |
 | [02_system_architecture.md](02_system_architecture.md) | 系统架构、模块职责、数据流、部署和集成方式 |

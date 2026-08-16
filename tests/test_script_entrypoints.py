@@ -102,6 +102,7 @@ def test_fhir_validation_script_runs_without_editable_import_path():
         "evaluate_mimo_live.py",
         "evaluate_summary_live.py",
         "mimo_smoke_test.py",
+        "start_demo.py",
         "validate_cn_glp1_knowledge.py",
     ],
 )
