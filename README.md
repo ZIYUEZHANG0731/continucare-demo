@@ -48,7 +48,7 @@ flowchart LR
 
 ## 核心特点：把多来源 Knowledge 变成可治理的知识层
 
-ContinuCare 的差异化不只是调用一个大模型回答问题。项目吸收并整理来自监管机构、药品标签、患者教育资料与文献元数据等多来源 **Knowledge**，再将其转化为有出处、可审核、可版本化的结构化知识资产。当前证据基础登记了 **15 个独立来源记录和 13 个精确历史别名**；中国 GLP-1 L1 知识包进一步编译出 Source、Product、Evidence Claim、Metric 与 FHIR 产物。
+ContinuCare 的差异化不只是调用一个大模型回答问题。项目吸收并整理来自监管机构、药品标签、患者教育资料与文献元数据等多来源 **Knowledge**，再将其转化为有出处、可审核、可版本化的结构化知识资产。当前证据基础登记了 **15 个独立来源记录和 13 个精确历史别名**，并支持将经过治理的知识包确定性编译为 Source、Product、Evidence Claim、Metric 与 FHIR 产物。
 
 ```mermaid
 flowchart LR
@@ -64,7 +64,7 @@ flowchart LR
 - **不确定性不会被“补全”**：未知、歧义、未审核或权利状态未解决的内容进入 Gap 或 withheld 状态，由后续审核和新版本处理。
 - **知识与运行权限严格分离**：Knowledge 只提供信息背景，保持 `knowledge_effect=informational_only` 与 `runtime_authority=none`；它不能直接改写患者状态、创建临床结论或触发诊疗动作。
 
-连接器合同和离线验证并不等同于已启用在线采集：当前真实来源的 live acquisition 仍关闭，部分 rights/review Gap 仍待完成。实现细节见 [Knowledge Evidence Foundation](docs/25_knowledge_evidence_foundation.md)、[Knowledge Capability Review Guide](docs/32_knowledge_capability_review_guide.md) 与 [中国 GLP-1 L1 知识版本](docs/clinical/cn_glp1/README.md)。
+连接器合同和离线验证并不等同于已启用在线采集：当前真实来源的 live acquisition 仍关闭，部分 rights/review Gap 仍待完成。实现细节见 [Knowledge Evidence Foundation](docs/25_knowledge_evidence_foundation.md) 与 [Knowledge Capability Review Guide](docs/32_knowledge_capability_review_guide.md)。
 
 ## 产品界面
 
@@ -232,7 +232,7 @@ npm --prefix doctor-web run build
 - 原始回答与 FHIR `Observation` 通过 `derivedFrom` 可追溯。
 - 定时随访只使用发布包固定的 Questionnaire linkId 白名单；模型不能提供医学代码。
 - 没有获批临床规则时保持 fail-closed，不输出风险等级或 Alert。
-- 当前中国 GLP-1 L1 知识版本为 `cn-glp1-l1-v1.0.3`；部分产品证据仍标记 incomplete，不能夸大为完整临床覆盖。
+- 当前知识库中仍有部分来源和产品证据标记为 incomplete，不能夸大为完整临床覆盖。
 - 真实 IAM/EMR、医院 Profile、临床规则审批、真实飞书/Aily 联调、消息实际发送和生产隐私合规均不在当前完成范围。
 
-临床知识版本、证据覆盖与运行边界见 [中国 GLP-1 L1 文档](docs/clinical/cn_glp1/README.md)。所有演示身份、消息和结果均为合成数据；禁止提交密钥、运行数据库或真实患者信息。
+知识版本、证据覆盖与运行边界见 [Knowledge Evidence Foundation](docs/25_knowledge_evidence_foundation.md) 与 [Knowledge Capability Review Guide](docs/32_knowledge_capability_review_guide.md)。所有演示身份、消息和结果均为合成数据；禁止提交密钥、运行数据库或真实患者信息。
