@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from continucare.adapters.sqlite_store import SQLiteStore
 from continucare.db import connect, initialize_database, utc_now_iso
@@ -175,8 +176,19 @@ def _parse_date(value: str, field_name: str) -> date:
         raise DoctorPortalBoundaryError(f"{field_name}日期无效") from exc
 
 
+def _patient_today() -> date:
+    """Return the fixed demo patient's local date from the shared clock."""
+
+    instant = datetime.fromisoformat(utc_now_iso())
+    if instant.tzinfo is None:
+        raise ValueError("utc_now_iso() must return a timezone-aware timestamp")
+    # Keep this fixed demo-patient zone aligned with the next-check-in boundary
+    # in services.competition_demo.
+    return instant.astimezone(ZoneInfo("Asia/Shanghai")).date()
+
+
 def _period(patient) -> tuple[str, str]:
-    today = date.today()
+    today = _patient_today()
     try:
         next_visit = date.fromisoformat(patient.next_visit_date)
     except ValueError:

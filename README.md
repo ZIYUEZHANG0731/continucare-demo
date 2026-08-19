@@ -1,8 +1,71 @@
-# ContinuCare Copilot
+<p align="center">
+  <img src="assets/showcase/continucare-cover.png" alt="ContinuCare — 让每一次随访，都接得上上一次" width="100%">
+</p>
 
-ContinuCare 是一个使用合成数据的连续照护 Web 原型：医生先确认随访方案，患者用自然语言持续反馈，系统在患者确认后形成可追溯的 FHIR 记录，护士人工复核并决定是否上报医生，医生最终在协作待办和复诊视图中查看完整上下文。
+<h1 align="center">ContinuCare</h1>
 
-> **安全边界：** 本项目不是医疗急救通道，不诊断、不治疗、不分诊、不生成用药建议；当前仅用于本地工程演示，不代表临床验证或医院生产部署。
+<p align="center">
+  <strong>让院外一句话，变成复诊前可追溯的记录。</strong><br>
+  A synthetic-data continuous-care prototype with patient confirmation, human review and FHIR provenance.
+</p>
+
+<p align="center">
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
+  <img alt="React + Vite" src="https://img.shields.io/badge/Frontend-React%20%2B%20Vite-0A7F78?logo=react&logoColor=white">
+  <img alt="FHIR R4" src="https://img.shields.io/badge/Standard-FHIR%20R4-EA4B35">
+  <img alt="Synthetic data only" src="https://img.shields.io/badge/Data-Synthetic%20Only-6B7280">
+  <img alt="Status: prototype" src="https://img.shields.io/badge/Status-Engineering%20Prototype-D97706">
+</p>
+
+ContinuCare 是一个使用合成数据的连续照护 Web 原型：医生先定义随访方案，患者用自然语言反馈，AI 只整理待确认候选；患者确认后由护士人工复核，并以 FHIR 资源与 Provenance 保留从原话到临床工作流的来龙去脉。医生最终能从趋势回到患者原话、确认动作和审核记录。
+
+> [!IMPORTANT]
+> **仅限工程演示。** 本项目不是医疗器械或急救通道，不诊断、不治疗、不分诊、不生成用药建议，也不代表临床验证或医院生产部署。所有人物、身份、消息与健康数据均为合成演示内容。
+
+## 共同创作 / Collaboration
+
+本项目由 [Ziyue Zhang](https://github.com/ZIYUEZHANG0731) 与 [xli561980-ship-it](https://github.com/xli561980-ship-it) **共同设计与开发**。该独立仓库由 Ziyue Zhang 维护，用于作品集和工程展示；完整 Git 历史保留双方贡献记录，并明确关联[最初的协作仓库](https://github.com/xli561980-ship-it/continucare-demo)。详见 [AUTHORS.md](AUTHORS.md) 与 [NOTICE.md](NOTICE.md)。
+
+## 一条可追溯的照护链
+
+```mermaid
+flowchart LR
+    A[医生定义随访方案] --> B[患者自然语言随访]
+    B --> C[AI 只提出候选]
+    C --> D[患者确认或修正]
+    D --> E[护士人工复核]
+    E --> F[FHIR + Provenance]
+    F --> G[医生查看趋势与原话]
+    G --> A
+```
+
+核心设计不是让模型替人做临床判断，而是让每个状态变化都有明确责任人和证据来源：
+
+- **患者可以照常说话**：自然语言先被整理为候选，确认前不写入正式结构化记录。
+- **人保留最终决定权**：护士核对原话、时间、单位、缺失和冲突后，才决定记录、补充或上报。
+- **医生看得到来龙去脉**：趋势、患者原话、确认动作和审核状态通过版本链与 Provenance 关联。
+- **失败时停止而不是猜测**：缺少配置、证据或获批规则时保持 fail-closed，不输出风险等级或诊疗建议。
+
+## 产品界面
+
+<table>
+  <tr>
+    <td width="50%" align="center"><strong>医生定义患者随访方案</strong></td>
+    <td width="50%" align="center"><strong>患者自然表达并确认候选</strong></td>
+  </tr>
+  <tr>
+    <td><img src="assets/showcase/doctor-plan.png" alt="医生创建随访方案"></td>
+    <td align="center"><img src="assets/showcase/patient-confirmation.png" alt="患者自然语言随访与确认" width="310"></td>
+  </tr>
+  <tr>
+    <td width="50%" align="center"><strong>护士人工安全复核</strong></td>
+    <td width="50%" align="center"><strong>医生查看趋势与证据来源</strong></td>
+  </tr>
+  <tr>
+    <td><img src="assets/showcase/nurse-review.png" alt="护士人工安全复核"></td>
+    <td><img src="assets/showcase/doctor-trends.png" alt="医生查看趋势与证据来源"></td>
+  </tr>
+</table>
 
 ## 最快启动
 

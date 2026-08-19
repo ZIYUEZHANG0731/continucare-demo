@@ -798,6 +798,8 @@ def test_confirmed_plan_accepts_two_daily_patient_submissions(
     monkeypatch.setenv("CONTINUCARE_SYNTHETIC_NOW", "2026-08-16T08:00:00+08:00")
     db_path = _configured_db(tmp_path, monkeypatch)
     proposal = build_followup_plan_proposal()
+    assert proposal["period"]["startDate"] == "2026-08-16"
+    assert proposal["period"]["endDate"] >= "2026-08-17"
     saved_plan = confirm_followup_plan(
         {
             "patientId": proposal["patientId"],
