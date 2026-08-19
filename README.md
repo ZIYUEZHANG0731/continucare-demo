@@ -15,6 +15,7 @@
   <img alt="FHIR R4" src="https://img.shields.io/badge/Standard-FHIR%20R4-EA4B35">
   <img alt="Synthetic data only" src="https://img.shields.io/badge/Data-Synthetic%20Only-6B7280">
   <img alt="Status: prototype" src="https://img.shields.io/badge/Status-Engineering%20Prototype-D97706">
+  <img alt="Usage: portfolio only" src="https://img.shields.io/badge/Usage-Portfolio%20Only-475569">
 </p>
 
 ContinuCare 是一个使用合成数据的连续照护 Web 原型：医生先定义随访方案，患者用自然语言反馈，AI 只整理待确认候选；患者确认后由护士人工复核，并以 FHIR 资源与 Provenance 保留从原话到临床工作流的来龙去脉。医生最终能从趋势回到患者原话、确认动作和审核记录。
@@ -251,3 +252,9 @@ npm --prefix doctor-web run build
 - 真实 IAM/EMR、医院 Profile、临床规则审批、真实飞书/Aily 联调、消息实际发送和生产隐私合规均不在当前完成范围。
 
 知识版本、证据覆盖与运行边界见 [Knowledge Evidence Foundation](docs/25_knowledge_evidence_foundation.md) 与 [Knowledge Capability Review Guide](docs/32_knowledge_capability_review_guide.md)。所有演示身份、消息和结果均为合成数据；禁止提交密钥、运行数据库或真实患者信息。
+
+## 使用许可 / License
+
+Copyright © 2026 **Ziyue Zhang** and **xli561980-ship-it**. All rights reserved.
+
+本仓库公开用于作品集、评估与工程演示，**未授予开源许可证**。除 GitHub 服务条款及适用法律另有规定外，未经两位共同著作权人事先书面同意，不得复制、修改、再分发、再许可或商业使用本项目。第三方依赖及素材仍分别受其自身许可约束。详见 [NOTICE.md](NOTICE.md)。
