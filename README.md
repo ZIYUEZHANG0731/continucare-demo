@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>让院外一句话，变成复诊前可追溯的记录。</strong><br>
-  A synthetic-data continuous-care prototype with patient confirmation, human review and FHIR provenance.
+  A knowledge-grounded continuous-care prototype with patient confirmation, human review and FHIR provenance.
 </p>
 
 <p align="center">
@@ -45,6 +45,26 @@ flowchart LR
 - **人保留最终决定权**：护士核对原话、时间、单位、缺失和冲突后，才决定记录、补充或上报。
 - **医生看得到来龙去脉**：趋势、患者原话、确认动作和审核状态通过版本链与 Provenance 关联。
 - **失败时停止而不是猜测**：缺少配置、证据或获批规则时保持 fail-closed，不输出风险等级或诊疗建议。
+
+## 核心特点：把多来源 Knowledge 变成可治理的知识层
+
+ContinuCare 的差异化不只是调用一个大模型回答问题。项目吸收并整理来自监管机构、药品标签、患者教育资料与文献元数据等多来源 **Knowledge**，再将其转化为有出处、可审核、可版本化的结构化知识资产。当前证据基础登记了 **15 个独立来源记录和 13 个精确历史别名**；中国 GLP-1 L1 知识包进一步编译出 Source、Product、Evidence Claim、Metric 与 FHIR 产物。
+
+```mermaid
+flowchart LR
+    A[多来源 Knowledge] --> B[SourcePolicy 与完整性校验]
+    B --> C[Evidence Claim / 术语 / Binding]
+    C --> D[人工审核与 Gap 登记]
+    D --> E[版本化知识包]
+    E --> F[只读 Knowledge 界面]
+```
+
+- **吸收多种知识形态**：既处理来源文档，也处理药品产品、证据主张、指标、术语映射和来源连接器契约；当前已覆盖 DailyMed、EMA、MedlinePlus、PubMed 与 PMC 等连接器合同。
+- **每条知识都能回到出处**：保存来源定位、摘要哈希、版本、前序链与精确引用，避免把标题相似或二手转述误当成同一证据。
+- **不确定性不会被“补全”**：未知、歧义、未审核或权利状态未解决的内容进入 Gap 或 withheld 状态，由后续审核和新版本处理。
+- **知识与运行权限严格分离**：Knowledge 只提供信息背景，保持 `knowledge_effect=informational_only` 与 `runtime_authority=none`；它不能直接改写患者状态、创建临床结论或触发诊疗动作。
+
+连接器合同和离线验证并不等同于已启用在线采集：当前真实来源的 live acquisition 仍关闭，部分 rights/review Gap 仍待完成。实现细节见 [Knowledge Evidence Foundation](docs/25_knowledge_evidence_foundation.md)、[Knowledge Capability Review Guide](docs/32_knowledge_capability_review_guide.md) 与 [中国 GLP-1 L1 知识版本](docs/clinical/cn_glp1/README.md)。
 
 ## 产品界面
 
